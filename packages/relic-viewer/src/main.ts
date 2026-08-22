@@ -1682,6 +1682,17 @@ const THREAD_MAX_WIDTH = 640;
 const THREAD_WIDTH_KEY = 'relic:comment-width';
 
 /**
+ * Deliberately not keyed by relic.
+ *
+ * A display name belongs to the reader, not to the file they are looking at,
+ * and retyping it per relic is the same annoyance as signing in per relic. It
+ * is untrusted text the reader chose and it is not a credential, which is why
+ * it can live here at all: the session proving who they are stays in an
+ * HttpOnly cookie that no script on this origin can read.
+ */
+const DISPLAY_NAME_KEY = 'relic:display-name';
+
+/**
  * Clamps a dragged width to what the viewport can actually spare.
  *
  * The ceiling is a share of the viewport rather than a constant, so dragging
@@ -1695,8 +1706,15 @@ export function clampThreadWidth(width: number, viewport: number): number {
   return Math.min(Math.max(width, THREAD_MIN_WIDTH), max);
 }
 
-/** Storage, or nothing: touching it throws outright in some contexts. */
-function widthStore(): Storage | undefined {
+/**
+ * Storage for reader preferences, or nothing.
+ *
+ * Touching `localStorage` throws outright in some embedded contexts rather
+ * than being absent, so the guard has to be a try and not a null check.
+ * Preferences only: relic keys go through the vault and the session is a
+ * cookie, neither of which belongs here.
+ */
+function preferenceStore(): Storage | undefined {
   try {
     return globalThis.localStorage ?? undefined;
   } catch {
@@ -1704,10 +1722,55 @@ function widthStore(): Storage | undefined {
   }
 }
 
+/** The display name this reader last posted under, on any relic. */
+export function readDisplayName(): string {
+  try {
+    return preferenceStore()?.getItem(DISPLAY_NAME_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** Remembers it, so the next comment and the next relic start filled in. */
+export function writeDisplayName(name: string): void {
+  try {
+    const store = preferenceStore();
+    if (store === undefined) return;
+    const trimmed = name.trim();
+    // Clearing it is a choice worth keeping, so an empty name removes the
+    // entry rather than leaving the previous one to reappear.
+    if (trimmed.length === 0) store.removeItem(DISPLAY_NAME_KEY);
+    else store.setItem(DISPLAY_NAME_KEY, trimmed);
+  } catch {
+    // Quota, or storage disabled mid-session. A remembered name is a
+    // convenience, and failing to keep one is not worth an error page.
+  }
+}
+
+/**
+ * The display name field, already filled in.
+ *
+ * A function rather than four lines inline so the prefill is assertable: the
+ * whole point of the change is that this field arrives carrying the name the
+ * reader typed on some other relic, and an untested assignment is exactly the
+ * kind of one-liner that silently stops happening.
+ */
+export function displayNameInput(): HTMLInputElement {
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.className = 'compose-input';
+  // A coarse guard only: `maxLength` counts UTF-16 units and the cap is on
+  // UTF-8 bytes, so the byte check before encryption is the authority.
+  name.maxLength = MAX_DISPLAY_NAME_BYTES;
+  name.placeholder = 'Optional, shown beside your address';
+  name.value = readDisplayName();
+  return name;
+}
+
 /** The width this reader last dragged the divider to, if it was kept. */
 function readThreadWidth(): number | undefined {
   try {
-    const raw = widthStore()?.getItem(THREAD_WIDTH_KEY);
+    const raw = preferenceStore()?.getItem(THREAD_WIDTH_KEY);
     if (raw === null || raw === undefined) return undefined;
     const width = Number.parseInt(raw, 10);
     return Number.isFinite(width) ? width : undefined;
@@ -1719,7 +1782,7 @@ function readThreadWidth(): number | undefined {
 /** Keeps a dragged width, so the next relic opens the way this one was left. */
 function writeThreadWidth(width: number): void {
   try {
-    widthStore()?.setItem(THREAD_WIDTH_KEY, String(Math.round(width)));
+    preferenceStore()?.setItem(THREAD_WIDTH_KEY, String(Math.round(width)));
   } catch {
     // Quota, or storage disabled mid-session. A remembered width is a
     // convenience, and failing to keep one is not worth an error page.
@@ -2078,13 +2141,7 @@ function buildThread(
       policyLink()
     );
 
-    const name = document.createElement('input');
-    name.type = 'text';
-    name.className = 'compose-input';
-    // A coarse guard only: `maxLength` counts UTF-16 units and the cap is on
-    // UTF-8 bytes, so the byte check before encryption is the authority.
-    name.maxLength = MAX_DISPLAY_NAME_BYTES;
-    name.placeholder = 'Optional, shown beside your address';
+    const name = displayNameInput();
     form.appendChild(field('Display name', name));
 
     const body = document.createElement('textarea');
@@ -2139,7 +2196,9 @@ function buildThread(
           return;
         }
         body.value = '';
-        name.value = '';
+        // The body is this comment's and goes. The name is the reader's and
+        // stays, here and on the next relic they open.
+        writeDisplayName(name.value);
         paintCount();
         outcome.replaceChildren(
           line(
