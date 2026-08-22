@@ -24,12 +24,15 @@ import {
   buildStageWrap,
   clampThreadWidth,
   commentRow,
+  displayNameInput,
   localStorageKeyVault,
   pinFraction,
   pinOffsets,
+  readDisplayName,
   THREAD_EMPTY_NOTE,
   threadRefusal,
   updateThreadToggle,
+  writeDisplayName,
 } from '../src/main.ts';
 import type { ReadyView, ViewerDeps } from '../src/viewer.ts';
 
@@ -174,6 +177,100 @@ function memoryStorage(): Storage {
     },
   } as Storage;
 }
+
+describe('the display name, remembered across relics', () => {
+  // Reported as signing in per relic. The session was already global; this
+  // was the part that genuinely was not, and it was worse than per relic: the
+  // composer cleared the name after every single comment.
+  const original = globalThis.localStorage;
+
+  afterEach(() => {
+    if (original === undefined) {
+      delete (globalThis as { localStorage?: unknown }).localStorage;
+    } else {
+      (globalThis as { localStorage?: unknown }).localStorage = original;
+    }
+  });
+
+  function install(): Storage {
+    const store = memoryStorage();
+    (globalThis as { localStorage?: unknown }).localStorage = store;
+    return store;
+  }
+
+  test('nothing remembered reads as empty, not as undefined', () => {
+    install();
+    expect(readDisplayName()).toBe('');
+  });
+
+  test('a name survives to the next read, under a key with no relic in it', () => {
+    const store = install();
+    writeDisplayName('Ada');
+    expect(readDisplayName()).toBe('Ada');
+    // The key is the load-bearing part: anything relic-scoped would reproduce
+    // the reported bug exactly.
+    expect(store.getItem('relic:display-name')).toBe('Ada');
+    expect(RELIC_ID.length).toBeGreaterThan(0);
+    expect(store.getItem('relic:display-name')).not.toContain(RELIC_ID);
+  });
+
+  test('it is trimmed on the way in', () => {
+    install();
+    writeDisplayName('  Ada  ');
+    expect(readDisplayName()).toBe('Ada');
+  });
+
+  test('clearing it is respected rather than reverted', () => {
+    const store = install();
+    writeDisplayName('Ada');
+    writeDisplayName('   ');
+    expect(readDisplayName()).toBe('');
+    expect(store.getItem('relic:display-name')).toBeNull();
+  });
+
+  test('storage that refuses is not an error path', () => {
+    // Safari private mode throws on touch rather than being absent.
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      setItem: () => {
+        throw new Error('denied');
+      },
+      removeItem: () => {
+        throw new Error('denied');
+      },
+    } as unknown as Storage;
+    expect(readDisplayName()).toBe('');
+    expect(() => writeDisplayName('Ada')).not.toThrow();
+  });
+
+  test('the field arrives carrying the remembered name', () => {
+    // The wiring, not just the storage. This assignment is the whole feature
+    // and it is one line, which is the kind that silently stops happening.
+    install();
+    writeDisplayName('Ada');
+    installDom();
+    try {
+      const input = displayNameInput() as unknown as ElementStub;
+      expect(input.value).toBe('Ada');
+      expect(input.className).toBe('compose-input');
+      expect(input.type).toBe('text');
+    } finally {
+      clearDom();
+    }
+  });
+
+  test('with nothing remembered the field is empty', () => {
+    install();
+    installDom();
+    try {
+      expect((displayNameInput() as unknown as ElementStub).value).toBe('');
+    } finally {
+      clearDom();
+    }
+  });
+});
 
 interface Call {
   readonly url: string;

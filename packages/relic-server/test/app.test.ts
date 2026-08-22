@@ -1913,6 +1913,69 @@ describe('magic-link identity', () => {
     );
   });
 
+  test('one sign-in carries to every other relic, without a second link', async () => {
+    // The reported symptom was signing in again for each relic. The session
+    // row has no relic id and the cookie is Path=/, so this asserts the
+    // property end to end rather than reading the shapes and assuming it.
+    const sent: Array<{ email: string; link: string }> = [];
+    app = build({
+      mailer: {
+        async send(email, link) {
+          sent.push({ email, link });
+        },
+      },
+    });
+
+    const first = await publish();
+    const second = await publish();
+    expect(second.id).not.toBe(first.id);
+
+    // Signed in from the first relic, and only ever from there.
+    await app.fetch(
+      req('/api/auth/request', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: 'reader@example.com',
+          return_to: `/${first.id}`,
+        }),
+      })
+    );
+    const link = sent[0]?.link;
+    if (link === undefined) throw new Error('no link was sent');
+    const followed = await app.fetch(
+      req(new URL(link).pathname + new URL(link).search, {
+        redirect: 'manual',
+      })
+    );
+    const session = (followed.headers.get('set-cookie') ?? '').split(';')[0];
+    if (session === undefined) throw new Error('no session cookie');
+
+    // The reader now opens a relic they have never signed in on. The session
+    // endpoint has to already know them, or the composer asks again and this
+    // is exactly the reported bug.
+    const who = await app.fetch(
+      req('/api/auth/session', { headers: { cookie: session } })
+    );
+    expect(who.status).toBe(200);
+    expect(await who.json()).toEqual({ email: 'reader@example.com' });
+
+    // And the write on the second relic is attributed to the same address,
+    // with no second link anywhere in the flow.
+    const posted = await app.fetch(
+      req(`/api/relics/${second.id}/comments`, {
+        method: 'POST',
+        headers: { cookie: session },
+        body: JSON.stringify({ ciphertext: 'c2Vjb25k' }),
+      })
+    );
+    expect(posted.status).toBe(201);
+
+    const rows = await app.store.listComments(second.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.author).toBe('reader@example.com');
+    expect(sent).toHaveLength(1);
+  });
+
   test('asking for a link always answers 202, even for garbage, so it is not an address oracle', async () => {
     const sent: Array<{ email: string; link: string }> = [];
     const mailer: Mailer = {
