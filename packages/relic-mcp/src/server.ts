@@ -393,6 +393,20 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             created_at: { type: 'string' },
             display_name: { type: ['string', 'null'] },
             body: { type: ['string', 'null'] },
+            anchor: {
+              type: ['object', 'null'],
+              description:
+                'What the comment marks, or null for a freeform one. ' +
+                '`{kind:"text", quote}` is a passage the reader selected, so ' +
+                'the quote names the line to act on. `{kind:"pin", x, y}` is ' +
+                'a point on the rendered page in unit coordinates.',
+              properties: {
+                kind: { type: 'string', enum: ['text', 'pin'] },
+                quote: { type: 'string' },
+                x: { type: 'number' },
+                y: { type: 'number' },
+              },
+            },
             readable: { type: 'boolean' },
             unreadable_reason: { type: ['string', 'null'] },
           },
@@ -402,6 +416,7 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             'created_at',
             'display_name',
             'body',
+            'anchor',
             'readable',
             'unreadable_reason',
           ],
@@ -1014,6 +1029,21 @@ async function callComment(
 }
 
 /**
+ * The one line that says what a comment is attached to.
+ *
+ * A quote is printed verbatim, because the reader selected those exact words
+ * and an agent's next move is usually to find them. A pin has no words, so it
+ * gets its position rounded to whole percent: more precision than that is
+ * noise a person cannot act on.
+ */
+function markLine(anchor: CommentRecord['anchor']): string {
+  if (anchor === null) return '';
+  if (anchor.kind === 'text') return `on "${anchor.quote}"\n`;
+  const percent = (value: number): number => Math.round(value * 100);
+  return `at ${percent(anchor.x)}% across, ${percent(anchor.y)}% down\n`;
+}
+
+/**
  * The comments as a person would read them, because a JSON array of rows is
  * not a conversation.
  *
@@ -1037,9 +1067,14 @@ function commentTranscript(result: {
       comment.display_name === null
         ? comment.author
         : `${comment.display_name} (${comment.author})`;
-    return comment.readable
-      ? `${comment.created_at} ${who}:\n${comment.body}`
-      : `${comment.created_at} ${who}:\n[unreadable: ${comment.unreadable_reason}]`;
+    if (!comment.readable) {
+      return `${comment.created_at} ${who}:\n[unreadable: ${comment.unreadable_reason}]`;
+    }
+    // The mark goes above the body, because it is what the body is about. A
+    // transcript that printed the remark and withheld the line it points at
+    // would be the same defect this fixed, one layer up.
+    const mark = markLine(comment.anchor);
+    return `${comment.created_at} ${who}:\n${mark}${comment.body}`;
   });
 
   const header =

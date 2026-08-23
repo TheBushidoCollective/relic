@@ -249,6 +249,7 @@ describe('reading comments back', () => {
         created_at: '2026-08-20T00:00:00Z',
         display_name: null,
         body: 'First pass looks right.',
+        anchor: null,
         readable: true,
         unreadable_reason: null,
       },
@@ -258,6 +259,7 @@ describe('reading comments back', () => {
         created_at: '2026-08-20T01:00:00Z',
         display_name: 'Reviewer',
         body: 'Second thought: drop the appendix.',
+        anchor: null,
         readable: true,
         unreadable_reason: null,
       },
@@ -265,6 +267,56 @@ describe('reading comments back', () => {
     const text = JSON.stringify(result['content']);
     expect(text).toMatch(/drop the appendix/);
     expect(text).toMatch(/oldest first/);
+  });
+
+  test('a mark reaches the agent, in the structure and in the transcript', async () => {
+    // The defect this replaces: the anchor decrypted fine and was then
+    // dropped, so an agent could not tell "this line is wrong" from a general
+    // remark, and could not find the line either. Proven live against
+    // production before it was fixed.
+    const relicId = await publishFixture();
+    const commentKey = await deriveCommentKey(
+      decodeKey(await storedKey(relicId))
+    );
+
+    stored.push({
+      comment_id: 'c1',
+      author: 'reader@example.com',
+      created_at: '2026-08-20T00:00:00Z',
+      ciphertext: await encryptComment(commentKey, {
+        body: 'This sentence is the wrong one.',
+        display_name: null,
+        anchor: { kind: 'text', quote: 'the kestrel audits the lighthouse' },
+      }),
+    });
+    stored.push({
+      comment_id: 'c2',
+      author: 'reader@example.com',
+      created_at: '2026-08-20T01:00:00Z',
+      ciphertext: await encryptComment(commentKey, {
+        body: 'And this bit of the diagram.',
+        display_name: null,
+        anchor: { kind: 'pin', x: 0.25, y: 0.8 },
+      }),
+    });
+
+    const result = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relicId,
+    });
+    const structured = result['structuredContent'] as Record<string, unknown>;
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+
+    expect(comments[0]?.['anchor']).toEqual({
+      kind: 'text',
+      quote: 'the kestrel audits the lighthouse',
+    });
+    expect(comments[1]?.['anchor']).toEqual({ kind: 'pin', x: 0.25, y: 0.8 });
+
+    // And in the prose, because a field an agent has to go looking for is
+    // most of the way back to not having it.
+    const text = JSON.stringify(result['content']);
+    expect(text).toContain('on \\"the kestrel audits the lighthouse\\"');
+    expect(text).toContain('at 25% across, 80% down');
   });
 
   test('says so when there are none', async () => {
