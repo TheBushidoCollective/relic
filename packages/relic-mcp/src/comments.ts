@@ -30,6 +30,7 @@
 import {
   COMMENT_BODY_LIMIT_BYTES,
   COMMENT_DISPLAY_NAME_LIMIT_BYTES,
+  type CommentAnchor,
   decodeKey,
   decryptComment,
   deriveCommentKey,
@@ -59,6 +60,16 @@ export interface CommentRecord {
   readonly display_name: string | null;
   /** Null exactly when `readable` is false. */
   readonly body: string | null;
+  /**
+   * What the comment is a mark on, or null for a freeform one.
+   *
+   * Dropping this was a defect rather than an omission. A reviewer's "this
+   * line is wrong" is not actionable without the line, and an agent reading a
+   * thread back could not tell a mark from a general remark, which is the
+   * difference between fixing the right sentence and guessing. It lives inside
+   * the encrypted envelope, so it arrives with the body or not at all.
+   */
+  readonly anchor: CommentAnchor | null;
   readonly readable: boolean;
   /** Null exactly when `readable` is true. */
   readonly unreadable_reason: string | null;
@@ -138,6 +149,7 @@ export async function readComments(
         created_at: createdAt,
         display_name: null,
         body: null,
+        anchor: null,
         readable: false,
         unreadable_reason: 'the row carried no ciphertext',
       });
@@ -152,6 +164,9 @@ export async function readComments(
         created_at: createdAt,
         display_name: plaintext.display_name,
         body: plaintext.body,
+        // Absent and null both mean freeform. One shape crosses to the agent,
+        // so a caller never has to distinguish two ways of saying no mark.
+        anchor: plaintext.anchor ?? null,
         readable: true,
         unreadable_reason: null,
       });
@@ -165,6 +180,7 @@ export async function readComments(
         created_at: createdAt,
         display_name: null,
         body: null,
+        anchor: null,
         readable: false,
         unreadable_reason: `it did not decrypt under this relic's comment key: ${
           (error as Error).message
