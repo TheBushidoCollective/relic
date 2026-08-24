@@ -1844,16 +1844,21 @@ const MARK_QUOTE_DISPLAY_LIMIT = 60;
 export const MARK_PIN_HINT = 'Click the document to place a point';
 
 /**
- * Why a sandboxed relic offers no marks.
+ * Why a sandboxed relic offers no aiming controls yet.
  *
  * The render frame is a different origin with `allow-same-origin` withheld,
- * so this page cannot read a selection inside it and a click inside it never
- * arrives here. A bubble and an armed tool that looked available and then did
- * nothing would be worse than this sentence.
+ * so this page cannot read a selection inside it, and a click inside it never
+ * reaches a listener out here. Controls that looked available and then did
+ * nothing would be worse than one sentence saying so.
+ *
+ * The sentence claims only the selection, because only the selection is
+ * impossible. A pin is painted by this page into its own overlay on the
+ * stage, so pointing at a location in a framed document is unwired rather
+ * than out of reach, and it is not this change's to wire.
  */
 export const MARK_SANDBOX_NOTE =
-  'Marks need the document to render in this page. This one renders in a ' +
-  'sandboxed frame, so a comment here is about the whole relic.';
+  'This document renders in an isolated frame, so text inside it cannot be ' +
+  'selected from this page.';
 
 /**
  * What the composer says the next comment is about.
@@ -1899,16 +1904,17 @@ export interface MarkDeps {
   readonly open: () => void;
   /** Where the reader types, once a target is locked. */
   readonly focusBody: () => void;
-  /**
-   * Reads the selection once the browser has settled it.
-   *
-   * `mouseup` fires before the selection it produced is readable, so a
-   * handler that reads immediately reads the previous one. Injected rather
-   * than called inline so a test can settle it without waiting on a timer.
-   */
-  readonly settle?: (run: () => void) => void;
-  /** Injected for the same reason: a test has no live selection to read. */
-  readonly selection?: () => Selection | null;
+}
+
+/**
+ * Reads the selection the browser has finished settling.
+ *
+ * `mouseup` fires before the selection it produced is readable, so a handler
+ * that reads immediately reads the previous one. Ten milliseconds is what
+ * haiku's review app settled on for the same reason.
+ */
+function afterSelection(run: () => void): void {
+  window.setTimeout(run, 10);
 }
 
 /**
@@ -1922,13 +1928,7 @@ export interface MarkDeps {
  * happened to miss the text.
  */
 export function buildMarkControls(deps: MarkDeps): MarkControls {
-  const settle =
-    deps.settle ??
-    ((run: () => void): void => {
-      window.setTimeout(run, 10);
-    });
-  const readSelection =
-    deps.selection ?? ((): Selection | null => window.getSelection());
+  const readSelection = (): Selection | null => window.getSelection();
 
   let anchor: CommentAnchor | null = null;
   let host: HTMLElement | undefined;
@@ -2140,7 +2140,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       if (next.dataset.markBind === '1') return;
       next.dataset.markBind = '1';
       next.addEventListener('mouseup', () => {
-        settle(offer);
+        afterSelection(offer);
       });
       next.addEventListener('click', place);
     },

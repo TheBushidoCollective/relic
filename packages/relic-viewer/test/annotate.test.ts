@@ -1,0 +1,714 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { deriveCommentKey, encodeKey } from '@relic/format';
+import { commentCipher } from '../src/comments.ts';
+import {
+  buildStageWrap,
+  buildThread,
+  MARK_PIN_HINT,
+  MARK_SANDBOX_NOTE,
+  markTargetLabel,
+} from '../src/main.ts';
+import type { ReadyView, ViewerDeps } from '../src/viewer.ts';
+
+/**
+ * Bun tests run without a DOM, and the thread's existing tests get by with a
+ * stub that records structure. Aiming a mark is not structure: it is a
+ * mouseup, a click, a keystroke and the order they arrive in. So this file
+ * carries a small tree that dispatches events and answers `closest`,
+ * `contains` and `querySelector`.
+ *
+ * It is not a browser and does not pretend to be one. Nothing here proves
+ * where the bubble lands on a screen. What it proves is which target a
+ * sequence of events leaves behind, which is exactly where the reported bug
+ * lived: a selection nobody could see had already chosen it.
+ */
+class Node {
+  readonly tagName: string;
+  className = '';
+  textContent = '';
+  id = '';
+  hidden = false;
+  tabIndex = 0;
+  type = '';
+  title = '';
+  value = '';
+  rows = 0;
+  required = false;
+  disabled = false;
+  maxLength = 0;
+  placeholder = '';
+  autocomplete = '';
+  href = '';
+  rel = '';
+  scrollLeft = 0;
+  scrollTop = 0;
+  scrollWidth = 0;
+  scrollHeight = 0;
+  focused = false;
+  parent: Node | undefined;
+  rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  readonly children: Node[] = [];
+  readonly attributes = new Map<string, string>();
+  readonly dataset: Record<string, string> = {};
+  readonly style: Record<string, unknown> = {
+    setProperty: (): void => {},
+  };
+  private readonly listeners = new Map<string, ((event: unknown) => void)[]>();
+
+  constructor(tag: string) {
+    this.tagName = tag.toUpperCase();
+  }
+
+  readonly classList = {
+    add: (name: string): void => {
+      if (this.classes().includes(name)) return;
+      this.className = `${this.className} ${name}`.trim();
+    },
+    remove: (name: string): void => {
+      this.className = this.classes()
+        .filter((candidate) => candidate !== name)
+        .join(' ');
+    },
+    contains: (name: string): boolean => this.classes().includes(name),
+    toggle: (name: string, on?: boolean): void => {
+      if (on ?? !this.classes().includes(name)) this.classList.add(name);
+      else this.classList.remove(name);
+    },
+  };
+
+  classes(): string[] {
+    return this.className.split(' ').filter((name) => name.length > 0);
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+
+  appendChild(child: Node): Node {
+    child.remove();
+    child.parent = this;
+    this.children.push(child);
+    return child;
+  }
+
+  append(...children: Node[]): void {
+    for (const child of children) this.appendChild(child);
+  }
+
+  replaceChildren(...children: Node[]): void {
+    for (const held of [...this.children]) held.parent = undefined;
+    this.children.length = 0;
+    for (const child of children) this.appendChild(child);
+  }
+
+  remove(): void {
+    const holder = this.parent;
+    if (holder === undefined) return;
+    const at = holder.children.indexOf(this);
+    if (at >= 0) holder.children.splice(at, 1);
+    this.parent = undefined;
+  }
+
+  contains(node: unknown): boolean {
+    let walk = node instanceof Node ? node : undefined;
+    while (walk !== undefined) {
+      if (walk === this) return true;
+      walk = walk.parent;
+    }
+    return false;
+  }
+
+  closest(selector: string): Node | null {
+    const wanted = selector.split(',').map((part) => part.trim());
+    let walk: Node | undefined = this;
+    while (walk !== undefined) {
+      for (const part of wanted) if (matches(walk, part)) return walk;
+      walk = walk.parent;
+    }
+    return null;
+  }
+
+  querySelectorAll(selector: string): Node[] {
+    return descendants(this)
+      .slice(1)
+      .filter((candidate) => matches(candidate, selector));
+  }
+
+  querySelector(selector: string): Node | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  getBoundingClientRect(): typeof this.rect {
+    return this.rect;
+  }
+
+  focus(): void {
+    this.focused = true;
+  }
+
+  scrollIntoView(): void {}
+
+  replaceWith(): void {}
+
+  setPointerCapture(): void {}
+
+  addEventListener(type: string, handler: (event: unknown) => void): void {
+    const held = this.listeners.get(type) ?? [];
+    held.push(handler);
+    this.listeners.set(type, held);
+  }
+
+  /**
+   * Fires up the tree, because the stage listens for events on its content
+   * and the whole question is what a click on a paragraph does.
+   */
+  dispatch(type: string, detail: Record<string, unknown> = {}): void {
+    const event = {
+      type,
+      target: this,
+      preventDefault: (): void => {},
+      stopPropagation: (): void => {},
+      ...detail,
+    };
+    let walk: Node | undefined = this;
+    while (walk !== undefined) {
+      for (const handler of walk.listeners.get(type) ?? []) handler(event);
+      walk = walk.parent;
+    }
+  }
+}
+
+/** `tag`, `.class`, or `tag.class`. Everything the viewer's selectors use. */
+function matches(node: Node, selector: string): boolean {
+  const [tag, ...classes] = selector.split('.');
+  if (
+    tag !== undefined &&
+    tag.length > 0 &&
+    node.tagName !== tag.toUpperCase()
+  ) {
+    return false;
+  }
+  return classes.every((name) => node.classes().includes(name));
+}
+
+function descendants(node: Node): Node[] {
+  return [node, ...node.children.flatMap(descendants)];
+}
+
+function withClass(node: Node, name: string): Node[] {
+  return descendants(node).filter((candidate) =>
+    candidate.classes().includes(name)
+  );
+}
+
+/** Asserts the control exists exactly once before the test acts on it. */
+function only(node: Node, name: string): Node {
+  const found = withClass(node, name);
+  expect(found).toHaveLength(1);
+  return found[0] as Node;
+}
+
+function textOf(node: Node): string {
+  return [node.textContent, ...node.children.map(textOf)].join(' ').trim();
+}
+
+/** The selection a test scripts, in place of one a browser would produce. */
+interface Scripted {
+  collapsed: boolean;
+  ranges: number;
+  text: string;
+  within: Node | undefined;
+}
+
+let scripted: Scripted;
+let documentNode: Node;
+
+function installDom(): void {
+  documentNode = new Node('#document');
+  scripted = { collapsed: true, ranges: 0, text: '', within: undefined };
+  const root = new Node('html');
+  (globalThis as { Element?: unknown }).Element = Node;
+  (globalThis as { HTMLElement?: unknown }).HTMLElement = Node;
+  (globalThis as { document?: unknown }).document = {
+    createElement: (tag: string) => new Node(tag),
+    createElementNS: (_namespace: string, tag: string) => new Node(tag),
+    createTextNode: (text: string) => {
+      const node = new Node('#text');
+      node.textContent = text;
+      return node;
+    },
+    documentElement: root,
+    addEventListener: (type: string, handler: (event: unknown) => void) => {
+      documentNode.addEventListener(type, handler);
+    },
+    visibilityState: 'visible',
+  };
+  (globalThis as { window?: unknown }).window = {
+    innerWidth: 1440,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    // Synchronous, so a settled selection is readable in the same turn. The
+    // deferral exists for the browser's ordering; the ordering under test is
+    // the handler's own.
+    setTimeout: (run: () => void) => {
+      run();
+      return 0;
+    },
+    getSelection: () => ({
+      isCollapsed: scripted.collapsed,
+      rangeCount: scripted.ranges,
+      toString: () => scripted.text,
+      getRangeAt: () => ({
+        commonAncestorContainer: scripted.within,
+        getBoundingClientRect: () => ({
+          left: 120,
+          top: 240,
+          right: 200,
+          bottom: 258,
+          width: 80,
+          height: 18,
+        }),
+      }),
+    }),
+  };
+}
+
+function clearDom(): void {
+  delete (globalThis as { document?: unknown }).document;
+  delete (globalThis as { window?: unknown }).window;
+  delete (globalThis as { Element?: unknown }).Element;
+  delete (globalThis as { HTMLElement?: unknown }).HTMLElement;
+}
+
+const RELIC_ID = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
+const KEY_BYTES = new Uint8Array([
+  9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10,
+]);
+const FRAGMENT = `#r1${encodeKey(KEY_BYTES)}`;
+const USERCONTENT = 'https://relik-usercontent.example';
+
+function view(overrides: Partial<ReadyView> = {}): ReadyView {
+  return {
+    filename: 'notes.md',
+    declaredMimetype: 'text/markdown',
+    content: new TextEncoder().encode('# notes\n\nthe second paragraph\n'),
+    route: 'markdown',
+    downgradeNotice: undefined,
+    shareUrl: `https://relik.example/${RELIC_ID}${FRAGMENT}`,
+    version: 1,
+    currentVersion: 1,
+    ...overrides,
+  };
+}
+
+/** A mounted relic, with the handles a test needs to act on it. */
+interface Mounted {
+  readonly thread: Node;
+  readonly stage: Node;
+  /** A rendered element inside the stage, to select in or click on. */
+  readonly content: Node;
+  /** What the composer currently says the next comment is about. */
+  chip(): string;
+  /** The plaintext of the posted comment, anchor included. */
+  post(body: string): Promise<{ anchor?: unknown }>;
+}
+
+/**
+ * The thread and a stage, wired the way `renderReady` wires them.
+ *
+ * Through `buildThread` rather than through the mark controls alone, so the
+ * wiring is under test too: a chip the composer never carries would satisfy
+ * every assertion about the chip and still leave the reader with nothing.
+ */
+async function mount(overrides: Partial<ReadyView> = {}): Promise<Mounted> {
+  const ready = view(overrides);
+  const sealed: string[] = [];
+  const deps: ViewerDeps = {
+    serviceOrigin: 'https://relik.example',
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'POST' && typeof init.body === 'string') {
+        const wire: unknown = JSON.parse(init.body);
+        if (
+          typeof wire === 'object' &&
+          wire !== null &&
+          'ciphertext' in wire &&
+          typeof wire.ciphertext === 'string'
+        ) {
+          sealed.push(wire.ciphertext);
+        }
+        return new Response(
+          JSON.stringify({ comment_id: 'c1', author: 'ada@example.com' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      // Verified, because the reader who aims a mark is the reader who posts.
+      const body = url.endsWith('/api/auth/session')
+        ? { email: 'ada@example.com' }
+        : [];
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof globalThis.fetch,
+    takeFragment: () => FRAGMENT,
+    stripFragment: () => {},
+    locationHref: `https://relik.example/${RELIC_ID}`,
+    keyVault: {
+      remember: () => {},
+      recall: () => undefined,
+      forget: () => {},
+    },
+  };
+
+  // The viewer reports every thread load through this callback, which makes
+  // it the signal a test can await instead of guessing at a duration. The key
+  // derivation is WebCrypto, so a spin of `Promise.resolve()` outruns it and
+  // this file first reported a composer that had simply not painted yet.
+  let reported = 0;
+  let awaited = 0;
+  let announce: (() => void) | undefined;
+  const handle = buildThread(ready, RELIC_ID, deps, () => {
+    reported += 1;
+    announce?.();
+  });
+  const loaded = async (): Promise<void> => {
+    if (reported <= awaited) {
+      await new Promise<void>((resolve) => {
+        announce = resolve;
+      });
+      announce = undefined;
+    }
+    awaited = reported;
+    // The composer paints in the continuation after the count is reported.
+    for (let turn = 0; turn < 4; turn++) await Promise.resolve();
+  };
+  // The stub tree stands in for the DOM the viewer builds against, which is
+  // the one unchecked cast in this file and the reason the class above exists.
+  const thread = handle.element as unknown as Node;
+  const stage = buildStageWrap(ready, USERCONTENT) as unknown as Node;
+  // A stage with no measurable content cannot place a point at all, which is
+  // a real refusal in `pinFraction` and not one worth tripping over here.
+  stage.rect = {
+    left: 0,
+    top: 0,
+    right: 1000,
+    bottom: 800,
+    width: 1000,
+    height: 800,
+  };
+  stage.scrollWidth = 1000;
+  stage.scrollHeight = 800;
+  handle.attach(stage as unknown as HTMLElement);
+
+  await loaded();
+
+  const rendered = descendants(stage).find((node) => node.tagName === 'P');
+  const content = rendered ?? stage;
+  scripted.within = content;
+
+  return {
+    thread,
+    stage,
+    content,
+    chip: () => textOf(only(thread, 'compose-target')),
+    post: async (body: string) => {
+      const box = only(thread, 'compose-textarea');
+      box.value = body;
+      const form = box.closest('.compose');
+      expect(form).not.toBeNull();
+      form?.dispatch('submit');
+      await loaded();
+      expect(sealed).toHaveLength(1);
+      const cipher = commentCipher(await deriveCommentKey(KEY_BYTES));
+      return cipher.open(sealed[0] as string);
+    },
+  };
+}
+
+/** Puts a live, settled selection over the rendered content. */
+function select(mounted: Mounted, text: string): void {
+  scripted.collapsed = false;
+  scripted.ranges = 1;
+  scripted.text = text;
+  scripted.within = mounted.content;
+  mounted.content.dispatch('mouseup');
+}
+
+describe('what the composer says a comment is about', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('no target reads as the whole document', () => {
+    expect(markTargetLabel(null)).toBe('Commenting on the whole document');
+  });
+
+  test('a point says so, without pretending to quote anything', () => {
+    expect(markTargetLabel({ kind: 'pin', x: 0.4, y: 0.6 })).toBe(
+      'Commenting on a point'
+    );
+  });
+
+  test('a quote is shown, and a long one is abbreviated rather than dropped', () => {
+    expect(markTargetLabel({ kind: 'text', quote: 'the second' })).toBe(
+      'Commenting on "the second"'
+    );
+    const label = markTargetLabel({ kind: 'text', quote: 'x'.repeat(200) });
+    expect(label.length).toBeLessThan(100);
+    expect(label).toContain('…');
+  });
+
+  test('a quote carrying bidirectional controls is stripped, like every other untrusted label', () => {
+    expect(
+      markTargetLabel({ kind: 'text', quote: 'ada\u202egnitirw' })
+    ).toContain('adagnitirw');
+  });
+
+  test('the composer says so before anything has been marked', async () => {
+    // The discoverability half of the bug. Nothing on the page said marks
+    // existed, so this line is the announcement and it is unconditional.
+    const mounted = await mount();
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+
+  test('with no target there is nothing to clear', async () => {
+    const mounted = await mount();
+    expect(withClass(mounted.thread, 'compose-target-clear')).toHaveLength(0);
+  });
+});
+
+describe('aiming a comment at a quote', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('a settled selection offers a target and does not take one', async () => {
+    // The data-integrity half of the bug, in the shape it shipped in: a
+    // selection set the anchor outright, so a stray highlight from ten
+    // minutes ago silently anchored the next comment written.
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+
+    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(1);
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+    const posted = await mounted.post('a comment about nothing in particular');
+    expect(posted.anchor).toBeNull();
+  });
+
+  test('pressing the bubble is what takes it', async () => {
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    only(mounted.stage, 'mark-bubble').dispatch('click');
+
+    expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
+    const posted = await mounted.post('about that paragraph');
+    expect(posted.anchor).toEqual({
+      kind: 'text',
+      quote: 'the second paragraph',
+    });
+  });
+
+  test('pressing it also opens the thread and puts the cursor in the box', async () => {
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    only(mounted.stage, 'mark-bubble').dispatch('click');
+
+    expect(mounted.thread.classes()).toContain('is-open');
+    expect(only(mounted.thread, 'compose-textarea').focused).toBe(true);
+  });
+
+  test('the bubble goes once it has been used, so it cannot be pressed twice', async () => {
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    only(mounted.stage, 'mark-bubble').dispatch('click');
+    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+  });
+
+  test('a selection outside the stage offers nothing', async () => {
+    const mounted = await mount();
+    scripted.collapsed = false;
+    scripted.ranges = 1;
+    scripted.text = 'text from somewhere else';
+    scripted.within = new Node('p');
+    mounted.content.dispatch('mouseup');
+    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+  });
+
+  test('a selection of nothing but whitespace offers nothing', async () => {
+    const mounted = await mount();
+    select(mounted, '   \n  ');
+    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+  });
+
+  test('the collapse of a selection dismisses the offer', async () => {
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    scripted.collapsed = true;
+    documentNode.dispatch('selectionchange');
+    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+  });
+
+  test('clearing puts it back to the whole document', async () => {
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.thread, 'compose-target-clear').dispatch('click');
+
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+    const posted = await mounted.post('about the whole thing after all');
+    expect(posted.anchor).toBeNull();
+  });
+
+  test('escape clears it too', async () => {
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    only(mounted.stage, 'mark-bubble').dispatch('click');
+    documentNode.dispatch('keydown', { key: 'Escape' });
+
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+
+  test('a posted comment spends its target rather than keeping it', async () => {
+    // One comment landing on a mark is the feature. The next one landing on
+    // the same mark, unasked, is the bug wearing the feature's clothes.
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    only(mounted.stage, 'mark-bubble').dispatch('click');
+    await mounted.post('about that paragraph');
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+});
+
+describe('pointing at a place in the document', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('reading clicks do nothing, because the tool is not armed', async () => {
+    // The `.doc` bail this replaces made every click on content a no-op and
+    // every click on the surrounding gutter a pin. Both were wrong; this is
+    // the half that has to stay wrong-free after the bail is gone.
+    const mounted = await mount();
+    mounted.content.dispatch('click', { clientX: 400, clientY: 300 });
+
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+    const posted = await mounted.post('just reading');
+    expect(posted.anchor).toBeNull();
+  });
+
+  test('arming says so on the stage the click has to land on', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+
+    expect(mounted.stage.classes()).toContain('is-pinning');
+    expect(textOf(only(mounted.stage, 'mark-hint'))).toBe(MARK_PIN_HINT);
+  });
+
+  test('a click while armed places the point and disarms', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.content.dispatch('click', { clientX: 400, clientY: 300 });
+
+    expect(mounted.chip()).toContain('Commenting on a point');
+    expect(only(mounted.thread, 'mark-mode').getAttribute('aria-pressed')).toBe(
+      'false'
+    );
+    expect(mounted.stage.classes()).not.toContain('is-pinning');
+    expect(withClass(mounted.stage, 'mark-hint')).toHaveLength(0);
+
+    const posted = await mounted.post('about this spot');
+    expect(posted.anchor).toEqual({ kind: 'pin', x: 0.4, y: 0.375 });
+  });
+
+  test('a second click does not move the point, because the tool disarmed', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.content.dispatch('click', { clientX: 400, clientY: 300 });
+    mounted.content.dispatch('click', { clientX: 800, clientY: 600 });
+
+    const posted = await mounted.post('about this spot');
+    expect(posted.anchor).toEqual({ kind: 'pin', x: 0.4, y: 0.375 });
+  });
+
+  test('pressing the tool again disarms it without placing anything', async () => {
+    const mounted = await mount();
+    const mode = only(mounted.thread, 'mark-mode');
+    mode.dispatch('click');
+    mode.dispatch('click');
+
+    expect(mounted.stage.classes()).not.toContain('is-pinning');
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+
+  test('escape disarms as well as clearing', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    documentNode.dispatch('keydown', { key: 'Escape' });
+
+    expect(mounted.stage.classes()).not.toContain('is-pinning');
+    expect(only(mounted.thread, 'mark-mode').getAttribute('aria-pressed')).toBe(
+      'false'
+    );
+  });
+
+  test('an armed click on an existing pin is that pin, not a new one', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    const pin = new Node('button');
+    pin.className = 'comment-pin';
+    mounted.stage.appendChild(pin);
+    pin.dispatch('click', { clientX: 400, clientY: 300 });
+
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+});
+
+describe('a relic that renders in a sandboxed frame', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  const framed = {
+    route: 'sandboxed-html' as const,
+    filename: 'page.html',
+    declaredMimetype: 'text/html',
+    content: new TextEncoder().encode('<p>hello</p>'),
+  };
+
+  test('offers no controls it cannot honour', async () => {
+    // The frame is a different origin with `allow-same-origin` withheld, so
+    // this page cannot read a selection inside it and a click inside it never
+    // arrives out here. A tool that looked armed and then did nothing would
+    // be worse than saying so.
+    const mounted = await mount(framed);
+    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    expect(withClass(mounted.thread, 'mark-mode')).toHaveLength(0);
+  });
+
+  test('says why, and claims only the selection', async () => {
+    const mounted = await mount(framed);
+    expect(textOf(mounted.thread)).toContain(MARK_SANDBOX_NOTE);
+    // A pin is painted by this page into its own overlay, so the note must
+    // not tell the reader that marking is impossible here.
+    expect(MARK_SANDBOX_NOTE).toContain('cannot be selected');
+    expect(MARK_SANDBOX_NOTE).not.toContain('whole relic');
+  });
+
+  test('still announces what a comment would be about', async () => {
+    const mounted = await mount(framed);
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+
+  test('a selection over the frame is not a target', async () => {
+    const mounted = await mount(framed);
+    scripted.collapsed = false;
+    scripted.ranges = 1;
+    scripted.text = 'hello';
+    scripted.within = mounted.stage;
+    mounted.stage.dispatch('mouseup');
+
+    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+});
