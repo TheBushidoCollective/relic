@@ -355,17 +355,31 @@ export async function publish(
     await reportComplete(deps, relicId);
 
     const url = relicUrl(deps.relicOrigin, relicId, key);
+    const relicExpiresAt =
+      grant['relic_expires_at'] == null
+        ? null
+        : String(grant['relic_expires_at']);
 
     // 4. Record what a republish needs, before success is reported. State a
     //    human cannot rebuild by hand only exists once it is on disk; a
     //    publish that returns without this step is a link that can never be
     //    updated from here, silently.
+    //
+    //    The filename, the timestamp, and the lifetime are recorded with it.
+    //    None is needed to republish, and all three are what makes the relic
+    //    findable afterwards: without them an inventory has to spend one of
+    //    the relic's finite opens to learn its own name back, and the
+    //    publish date is knowledge the service will not hand a client at all,
+    //    so a publish that does not write it down loses it for good.
     try {
       await savePublishState(relicId, {
         key: encodeKey(key),
         publish_token: publishToken,
         version: 1,
         source: sourceLookup.source,
+        filename,
+        published_at: new Date().toISOString(),
+        expires_at: relicExpiresAt,
       });
     } catch (error) {
       // The relic itself is live and the URL works, so both are handed over
@@ -387,10 +401,7 @@ export async function publish(
       version: 1,
       // Null is a real state now, the default one; String(null) would hand
       // the caller the four characters "null" where a date used to be.
-      relic_expires_at:
-        grant['relic_expires_at'] == null
-          ? null
-          : String(grant['relic_expires_at']),
+      relic_expires_at: relicExpiresAt,
       renderer_class: rendererClass,
       filename,
       resolved_path: source.resolvedPath,
