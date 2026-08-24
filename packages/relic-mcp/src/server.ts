@@ -24,6 +24,7 @@ import { type CommentRecord, postComment, readComments } from './comments.ts';
 import {
   type ListResult,
   listRelics,
+  MAX_INLINE_CONTENT_BYTES,
   type RelicRow,
   type ShowResult,
   showRelic,
@@ -587,7 +588,10 @@ export const SHOW_TOOL_DEFINITION = {
         description:
           'Optional. Fetch and decrypt the current version and return it as ' +
           'text. Content that is not valid UTF-8 comes back as its size and ' +
-          'type instead, never as mangled text.',
+          'type instead, never as mangled text, and content over ' +
+          `${MAX_INLINE_CONTENT_BYTES} bytes comes back as its size with no ` +
+          'body, because a truncated one would read as the whole file and ' +
+          'get republished as one.',
       },
     },
     required: ['relic_id'],
