@@ -1844,6 +1844,13 @@ const MARK_QUOTE_DISPLAY_LIMIT = 60;
 export const MARK_PIN_HINT = 'Click the document to place a point';
 
 /**
+ * The clearance between a selection and the button offered above it, in CSS
+ * pixels. Small enough to read as attached to the selection, wide enough that
+ * it does not sit on the words it is about.
+ */
+const MARK_BUBBLE_GAP = 6;
+
+/**
  * Why a sandboxed relic offers no aiming controls yet.
  *
  * The render frame is a different origin with `allow-same-origin` withheld,
@@ -2049,7 +2056,6 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     // children, so an offset measured against the visible box would leave the
     // bubble behind the moment the reader scrolls.
     offered.style.left = `${rect.left - box.left + surface.scrollLeft + rect.width / 2}px`;
-    offered.style.top = `${rect.top - box.top + surface.scrollTop}px`;
     // A press that moved focus would collapse the selection before the click
     // arrived, which is how a selection toolbar loses the thing it points at.
     offered.addEventListener('mousedown', (event) => {
@@ -2061,6 +2067,12 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       aim({ kind: 'text', quote });
     });
     surface.appendChild(offered);
+    // Above the selection, and never above the content box. The stage clips
+    // its overflow, so the first line of every relic would otherwise be
+    // offered a button sitting outside the box it is clipped to. The height is
+    // read after insertion because it is the button's own and not a guess.
+    const above = rect.top - box.top + surface.scrollTop;
+    offered.style.top = `${Math.max(above - offered.offsetHeight - MARK_BUBBLE_GAP, 0)}px`;
     bubble = offered;
   };
 

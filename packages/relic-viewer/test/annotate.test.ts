@@ -10,6 +10,9 @@ import {
 } from '../src/main.ts';
 import type { ReadyView, ViewerDeps } from '../src/viewer.ts';
 
+/** What every element in the stub tree measures, in CSS pixels. */
+const STUB_LAID_OUT_HEIGHT = 28;
+
 /**
  * Bun tests run without a DOM, and the thread's existing tests get by with a
  * stub that records structure. Aiming a mark is not structure: it is a
@@ -45,6 +48,13 @@ class Node {
   scrollWidth = 0;
   scrollHeight = 0;
   focused = false;
+  /**
+   * Bun performs no layout, so every element here measures the same. It has
+   * to be a real number rather than zero: the offer's placement reads its own
+   * height, and a harness that measured nothing would make the clamp that
+   * keeps it inside the clipped stage untestable.
+   */
+  offsetHeight = STUB_LAID_OUT_HEIGHT;
   parent: Node | undefined;
   rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
   readonly children: Node[] = [];
@@ -222,6 +232,8 @@ interface Scripted {
   ranges: number;
   text: string;
   within: Node | undefined;
+  /** Where the selection sits in the viewport, so the clamp can be reached. */
+  top: number;
 }
 
 let scripted: Scripted;
@@ -229,7 +241,13 @@ let documentNode: Node;
 
 function installDom(): void {
   documentNode = new Node('#document');
-  scripted = { collapsed: true, ranges: 0, text: '', within: undefined };
+  scripted = {
+    collapsed: true,
+    ranges: 0,
+    text: '',
+    within: undefined,
+    top: 240,
+  };
   const root = new Node('html');
   (globalThis as { Element?: unknown }).Element = Node;
   (globalThis as { HTMLElement?: unknown }).HTMLElement = Node;
@@ -266,9 +284,9 @@ function installDom(): void {
         commonAncestorContainer: scripted.within,
         getBoundingClientRect: () => ({
           left: 120,
-          top: 240,
+          top: scripted.top,
           right: 200,
-          bottom: 258,
+          bottom: scripted.top + 18,
           width: 80,
           height: 18,
         }),
@@ -528,15 +546,16 @@ describe('aiming a comment at a quote', () => {
   });
 
   test('the offer is placed in the stage own content coordinates', async () => {
-    // Not a claim about pixels on a screen, which this file cannot make. It
-    // is a claim about which coordinate space the offsets are in: the scripted
-    // selection sits at viewport left 120 and top 240 and is 80 wide, and the
-    // stage starts at the viewport origin, so above and centred is 160 by 240.
+    // Not a claim about pixels on a screen, which this file cannot make. It is
+    // a claim about which coordinate space the offsets are in: the scripted
+    // selection sits at viewport left 120, top 240, width 80, the stage starts
+    // at the viewport origin, and the button measures 28 tall with 6 of
+    // clearance. Centred is 160, above is 240 - 28 - 6.
     const mounted = await mount();
     select(mounted, 'the second paragraph');
     const offered = only(mounted.stage, 'mark-bubble');
     expect(offered.style.left).toBe('160px');
-    expect(offered.style.top).toBe('240px');
+    expect(offered.style.top).toBe('206px');
   });
 
   test('a scrolled stage carries the offer with its content', async () => {
@@ -549,7 +568,17 @@ describe('aiming a comment at a quote', () => {
     select(mounted, 'the second paragraph');
     const offered = only(mounted.stage, 'mark-bubble');
     expect(offered.style.left).toBe('190px');
-    expect(offered.style.top).toBe('740px');
+    expect(offered.style.top).toBe('706px');
+  });
+
+  test('a selection on the first line is still offered inside the box', async () => {
+    // The stage clips its overflow, so an offer placed above the content box
+    // is an offer the reader cannot press. The first line of every relic is
+    // that case, which makes it the one worth clamping for.
+    const mounted = await mount();
+    scripted.top = 4;
+    select(mounted, 'notes');
+    expect(only(mounted.stage, 'mark-bubble').style.top).toBe('0px');
   });
 
   test('a selection outside the stage offers nothing', async () => {

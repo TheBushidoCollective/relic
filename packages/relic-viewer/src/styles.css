@@ -167,10 +167,10 @@ body {
   border: 1px solid var(--patina);
   border-radius: 0.35rem;
   box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
-  /* Above the selection and centred on it, so the offsets the script sets are
-     the selection's own top and middle and nothing has to guess at this
-     button's height. */
-  transform: translate(-50%, calc(-100% - 0.35rem));
+  /* Centred on the selection. Only the horizontal axis is a transform: the
+     vertical offset is computed in the script against the button's measured
+     height, so it can be clamped to the top of a stage that clips. */
+  transform: translateX(-50%);
   cursor: pointer;
 }
 
