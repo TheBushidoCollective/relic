@@ -342,7 +342,10 @@ interface Mounted {
  * wiring is under test too: a chip the composer never carries would satisfy
  * every assertion about the chip and still leave the reader with nothing.
  */
-async function mount(overrides: Partial<ReadyView> = {}): Promise<Mounted> {
+async function mount(
+  overrides: Partial<ReadyView> = {},
+  reader: 'verified' | 'anonymous' = 'verified'
+): Promise<Mounted> {
   const ready = view(overrides);
   const sealed: string[] = [];
   const deps: ViewerDeps = {
@@ -364,9 +367,10 @@ async function mount(overrides: Partial<ReadyView> = {}): Promise<Mounted> {
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
       }
-      // Verified, because the reader who aims a mark is the reader who posts.
+      // Verified by default, because the reader who aims a mark is usually
+      // the reader who posts. Anonymous is the state the chip has to survive.
       const body = url.endsWith('/api/auth/session')
-        ? { email: 'ada@example.com' }
+        ? { email: reader === 'verified' ? 'ada@example.com' : null }
         : [];
       return new Response(JSON.stringify(body), {
         status: 200,
@@ -496,6 +500,15 @@ describe('what the composer says a comment is about', () => {
   test('with no target there is nothing to clear', async () => {
     const mounted = await mount();
     expect(withClass(mounted.thread, 'compose-target-clear')).toHaveLength(0);
+  });
+
+  test('it says so to a reader who has not verified an address', async () => {
+    // The chip's job is to announce that annotation exists, and a reader who
+    // has not signed in yet is exactly who needs telling. The identity form
+    // has no box to type in, which is the state this asserts around.
+    const mounted = await mount({}, 'anonymous');
+    expect(withClass(mounted.thread, 'compose-textarea')).toHaveLength(0);
+    expect(mounted.chip()).toContain('Commenting on the whole document');
   });
 });
 
