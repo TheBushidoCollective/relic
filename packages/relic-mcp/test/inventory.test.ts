@@ -365,6 +365,58 @@ describe('relic_list enumerates what nothing else could', () => {
     expect(result.relics[0]?.status_detail).toContain('lifetime');
   });
 
+  test('a recorded lifetime that has run out beats the cheap check', async () => {
+    // The unmetered check cannot see an expiry: the service's record outlives
+    // the content, so it answers for an expired relic. A recorded lifetime is
+    // what stops the row calling that relic reachable, and it costs nothing.
+    disk.set('/work/short.md', new TextEncoder().encode('# short\n'));
+    await publish({ path: '/work/short.md', ttl_days: 1 }, deps);
+    now += 2 * DAY;
+
+    const result = await listRelics({}, deps);
+
+    expect(result.count).toBe(1);
+    expect(result.opens_spent).toBe(0);
+    expect(result.relics[0]?.status).toBe('expired');
+    expect(result.relics[0]?.status_basis).toBe('local');
+    expect(result.relics[0]?.expires_at_known).toBe(true);
+    expect(result.relics[0]?.expires_at).not.toBeNull();
+  });
+
+  test('verify asks the service about a relic whose name is already known', async () => {
+    await publishFile('known.md', '# known\n');
+
+    const cheap = await listRelics({}, deps);
+    expect(cheap.opens_spent).toBe(0);
+    expect(cheap.relics[0]?.status_basis).toBe('record');
+
+    const verified = await listRelics({ verify: true }, deps);
+    expect(verified.opens_spent).toBe(1);
+    expect(verified.relics[0]?.status_basis).toBe('mint');
+    expect(verified.relics[0]?.status_detail).toContain('served version 1');
+    // The recorded name still wins: verify is about the relic's state, not
+    // about re-reading a name that cannot have changed.
+    expect(verified.recovered_filenames).toBe(0);
+    expect(verified.relics[0]?.filename_basis).toBe('recorded');
+  });
+
+  test('refresh re-reads the name from the relic itself', async () => {
+    const seeded = await seedLegacyRelic({
+      filename: 'original.md',
+      body: '# original\n',
+    });
+
+    const first = await listRelics({}, deps);
+    expect(first.recovered_filenames).toBe(1);
+
+    const refreshed = await listRelics({ refresh: true }, deps);
+    expect(refreshed.recovered_filenames).toBe(1);
+    expect(refreshed.opens_spent).toBe(1);
+    expect(refreshed.relics[0]?.filename).toBe('original.md');
+    expect(refreshed.relics[0]?.filename_basis).toBe('envelope');
+    expect(refreshed.relics[0]?.relic_id).toBe(seeded.relicId);
+  });
+
   test('include_expired false reports the count it left out', async () => {
     await seedLegacyRelic({
       filename: 'ephemeral.md',
