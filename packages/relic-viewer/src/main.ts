@@ -1935,8 +1935,6 @@ function afterSelection(run: () => void): void {
  * happened to miss the text.
  */
 export function buildMarkControls(deps: MarkDeps): MarkControls {
-  const readSelection = (): Selection | null => window.getSelection();
-
   let anchor: CommentAnchor | null = null;
   let host: HTMLElement | undefined;
   let bubble: HTMLElement | undefined;
@@ -2025,7 +2023,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   const offer = (): void => {
     const surface = host;
     if (surface === undefined) return;
-    const selection = readSelection();
+    const selection = window.getSelection();
     if (
       selection === null ||
       selection.isCollapsed ||
@@ -2111,7 +2109,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     clear();
   });
   document.addEventListener('selectionchange', () => {
-    const live = readSelection();
+    const live = window.getSelection();
     if (live === null || live.isCollapsed) dismiss();
   });
 
