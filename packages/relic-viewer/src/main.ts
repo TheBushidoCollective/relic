@@ -1868,6 +1868,48 @@ export const MARK_SANDBOX_NOTE =
   'selected from this page.';
 
 /**
+ * The key a provisional mark is painted under.
+ *
+ * A colon cannot occur in a server-minted comment id, which is base64url, so
+ * this can never collide with a real one. That matters because the pairing
+ * handler and the unwrap pass both address marks by this key, and a collision
+ * would light the wrong comment or strand a mark on the page.
+ */
+export const PENDING_MARK_ID = 'pending:target';
+
+/**
+ * Paints the target the reader has aimed but not yet posted.
+ *
+ * Runs inside the same pass as the posted marks rather than beside it. Two
+ * passes would mean two places that decide what the document shows, and the
+ * provisional mark would survive a refresh that removed everything else.
+ */
+export function paintPendingMark(
+  host: HTMLElement,
+  pins: HTMLElement,
+  anchor: CommentAnchor | null
+): void {
+  if (anchor === null) return;
+  if (anchor.kind === 'text') {
+    wrapTextQuote(host, anchor.quote, PENDING_MARK_ID);
+    const painted = host.querySelector(
+      `mark[data-comment-id="${PENDING_MARK_ID}"]`
+    );
+    painted?.classList.add('is-pending');
+    return;
+  }
+  const pin = document.createElement('div');
+  // Not a button: there is no comment to scroll to yet, and a control that
+  // answers a press by doing nothing is the defect this whole change removed.
+  pin.className = 'comment-pin is-pending';
+  pin.dataset.commentId = PENDING_MARK_ID;
+  const offsets = pinOffsets(anchor, host);
+  pin.style.left = `${offsets.left}px`;
+  pin.style.top = `${offsets.top}px`;
+  pins.appendChild(pin);
+}
+
+/**
  * What the composer says the next comment is about.
  *
  * Having no target is a state with wording rather than a blank, because the
@@ -1911,6 +1953,15 @@ export interface MarkDeps {
   readonly open: () => void;
   /** Where the reader types, once a target is locked. */
   readonly focusBody: () => void;
+  /**
+   * Repaints the document's marks, because the target changed.
+   *
+   * A chip that names a quote while the page shows nothing tells the reader
+   * where their comment is going and gives them no way to check it. The
+   * target is painted on the document from the same pass that paints posted
+   * comments, so a provisional mark and a real one cannot drift apart.
+   */
+  readonly repaint: () => void;
 }
 
 /**
@@ -1989,6 +2040,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     dismiss();
     disarm();
     paintChip();
+    deps.repaint();
   };
 
   reset.addEventListener('click', clear);
@@ -1998,6 +2050,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     dismiss();
     disarm();
     paintChip();
+    deps.repaint();
     deps.open();
     deps.focusBody();
   };
@@ -2239,6 +2292,12 @@ export function buildThread(
       const box = composer.querySelector('.compose-textarea');
       if (box instanceof HTMLElement) box.focus();
     },
+    repaint: () => {
+      // The entries it already has, because the target changed and the
+      // conversation did not. Refetching the thread to redraw one provisional
+      // mark would put a network round trip behind a text selection.
+      paintMarks(lastEntries);
+    },
   });
 
   section.append(title, marks.tools, status, list, composer, outcome);
@@ -2327,6 +2386,10 @@ export function buildThread(
       pin.type = 'button';
       pin.className = 'comment-pin';
       pin.textContent = String(number);
+      // Addressable, so hovering the pin can light its comment. Posted pins
+      // and marks now carry the same key, which is what lets one pairing
+      // handler serve both shapes.
+      pin.dataset.commentId = entry.id;
       const offsets = pinOffsets(entry.anchor, host);
       pin.style.left = `${offsets.left}px`;
       pin.style.top = `${offsets.top}px`;
@@ -2341,8 +2404,57 @@ export function buildThread(
       });
       pins.appendChild(pin);
     }
+    paintPendingMark(host, pins, marks.target());
     host.appendChild(pins);
   };
+
+  /**
+   * Lights a comment and the thing it points at, together.
+   *
+   * A thread and a document are two views of one set of remarks, and without
+   * this the reader has to hold the pairing in their head: the sidebar says
+   * what was said and the page says where, and nothing joins them.
+   */
+  const pair = (id: string | undefined, on: boolean): void => {
+    if (host === undefined) return;
+    const selector = id === undefined ? null : `[data-comment-id="${id}"]`;
+    if (selector === null) return;
+    for (const root of [host, list]) {
+      for (const found of root.querySelectorAll(selector)) {
+        found.classList.toggle('is-active', on);
+      }
+    }
+  };
+
+  // Delegated rather than bound per row and per mark, because both are
+  // replaced wholesale on every repaint and a listener attached to the old
+  // element would light nothing at all.
+  const bindPairing = (root: HTMLElement): void => {
+    const enter = (event: Event): void => {
+      if (!(event.target instanceof Element)) return;
+      pair(
+        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
+          .commentId,
+        true
+      );
+    };
+    const leave = (event: Event): void => {
+      if (!(event.target instanceof Element)) return;
+      pair(
+        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
+          .commentId,
+        false
+      );
+    };
+    root.addEventListener('mouseover', enter);
+    root.addEventListener('mouseout', leave);
+    // A pin is a button, so it is in the tab order. Pairing on focus keeps a
+    // keyboard reader from being the only one who cannot see the join.
+    root.addEventListener('focusin', enter);
+    root.addEventListener('focusout', leave);
+  };
+
+  bindPairing(list);
 
   const policyLink = (): HTMLElement => {
     const link = document.createElement('a');
@@ -2636,6 +2748,12 @@ export function buildThread(
     toggle: toggleOpen,
     attach: (next) => {
       host = next;
+      // Once per stage. A second binding would toggle the class twice on one
+      // pointer crossing, which reads as the pairing not working at all.
+      if (next.dataset.pairBind !== '1') {
+        next.dataset.pairBind = '1';
+        bindPairing(next);
+      }
       paintMarks(lastEntries);
       marks.attach(next);
     },

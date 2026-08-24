@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { deriveCommentKey, encodeKey } from '@relic/format';
-import { commentCipher } from '../src/comments.ts';
+import { type CommentAnchor, deriveCommentKey, encodeKey } from '@relic/format';
+import { type CommentCipher, commentCipher } from '../src/comments.ts';
 import {
   buildStageWrap,
   buildThread,
   MARK_PIN_HINT,
   MARK_SANDBOX_NOTE,
   markTargetLabel,
+  PENDING_MARK_ID,
 } from '../src/main.ts';
 import type { ReadyView, ViewerDeps } from '../src/viewer.ts';
 
@@ -192,8 +193,27 @@ class Node {
   }
 }
 
-/** `tag`, `.class`, or `tag.class`. Everything the viewer's selectors use. */
+/**
+ * `tag`, `.class`, `tag.class`, and `[data-*]` with or without a value.
+ *
+ * The attribute half is what pairing needs: a comment, its mark and its pin
+ * are joined by `data-comment-id` and nothing else. It was absent before, so
+ * the pin's existing scroll-to-comment lookup was equally unprovable here.
+ */
 function matches(node: Node, selector: string): boolean {
+  const attribute = /\[([a-z-]+)(?:="([^"]*)")?\]/.exec(selector);
+  if (attribute !== null) {
+    const [whole, name, value] = attribute;
+    const key = (name as string)
+      .replace(/^data-/, '')
+      .replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+    const held = (name as string).startsWith('data-')
+      ? node.dataset[key]
+      : node.attributes.get(name as string);
+    if (held === undefined) return false;
+    if (value !== undefined && held !== value) return false;
+    return matches(node, selector.replace(whole, ''));
+  }
   const [tag, ...classes] = selector.split('.');
   if (
     tag !== undefined &&
@@ -251,6 +271,9 @@ function installDom(): void {
   const root = new Node('html');
   (globalThis as { Element?: unknown }).Element = Node;
   (globalThis as { HTMLElement?: unknown }).HTMLElement = Node;
+  // The argument the walker is asked for. Its value is the platform's, not
+  // ours, so it is spelled out rather than invented.
+  (globalThis as { NodeFilter?: unknown }).NodeFilter = { SHOW_TEXT: 0x4 };
   (globalThis as { document?: unknown }).document = {
     createElement: (tag: string) => new Node(tag),
     createElementNS: (_namespace: string, tag: string) => new Node(tag),
@@ -264,6 +287,19 @@ function installDom(): void {
       documentNode.addEventListener(type, handler);
     },
     visibilityState: 'visible',
+    /**
+     * Truthfully empty rather than convincingly fake.
+     *
+     * Painting a text mark splits a real `Text` node, and this tree carries
+     * `textContent` strings instead. A walker faked over those strings would
+     * report a mark this harness cannot actually produce, so it walks nothing
+     * and the mark is simply not painted here. What that costs is stated where
+     * it matters: the pin half of a provisional target is asserted below, and
+     * the text half is proven in a browser rather than pretended to here.
+     */
+    createTreeWalker: () => ({
+      nextNode: (): unknown => null,
+    }),
   };
   (globalThis as { window?: unknown }).window = {
     innerWidth: 1440,
@@ -300,6 +336,7 @@ function clearDom(): void {
   delete (globalThis as { window?: unknown }).window;
   delete (globalThis as { Element?: unknown }).Element;
   delete (globalThis as { HTMLElement?: unknown }).HTMLElement;
+  delete (globalThis as { NodeFilter?: unknown }).NodeFilter;
 }
 
 const RELIC_ID = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -308,6 +345,14 @@ const KEY_BYTES = new Uint8Array([
 ]);
 const FRAGMENT = `#r1${encodeKey(KEY_BYTES)}`;
 const USERCONTENT = 'https://relik-usercontent.example';
+
+/**
+ * The same comment key the viewer will derive, so a seeded row opens the way
+ * a real one does instead of being handed over already readable.
+ */
+async function seedCipher(): Promise<CommentCipher> {
+  return commentCipher(await deriveCommentKey(KEY_BYTES));
+}
 
 function view(overrides: Partial<ReadyView> = {}): ReadyView {
   return {
@@ -342,9 +387,24 @@ interface Mounted {
  * wiring is under test too: a chip the composer never carries would satisfy
  * every assertion about the chip and still leave the reader with nothing.
  */
+/**
+ * A comment already on the relic when the reader arrives.
+ *
+ * Sealed with the same comment key the viewer derives, so it travels the real
+ * decrypt path rather than arriving pre-opened. Pairing a comment with the
+ * thing it points at needs a comment that exists, and until now every mounted
+ * thread was empty.
+ */
+interface Seed {
+  readonly id: string;
+  readonly body: string;
+  readonly anchor: CommentAnchor;
+}
+
 async function mount(
   overrides: Partial<ReadyView> = {},
-  reader: 'verified' | 'anonymous' = 'verified'
+  reader: 'verified' | 'anonymous' = 'verified',
+  seeds: readonly Seed[] = []
 ): Promise<Mounted> {
   const ready = view(overrides);
   const sealed: string[] = [];
@@ -371,7 +431,20 @@ async function mount(
       // the reader who posts. Anonymous is the state the chip has to survive.
       const body = url.endsWith('/api/auth/session')
         ? { email: reader === 'verified' ? 'ada@example.com' : null }
-        : [];
+        : await Promise.all(
+            seeds.map(async (seed) => ({
+              comment_id: seed.id,
+              author: 'ada@example.com',
+              created_at: '2026-08-24T00:00:00Z',
+              ciphertext: await seedCipher().then((cipher) =>
+                cipher.seal({
+                  body: seed.body,
+                  display_name: null,
+                  anchor: seed.anchor,
+                })
+              ),
+            }))
+          );
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -729,6 +802,110 @@ describe('pointing at a place in the document', () => {
     pin.dispatch('click', { clientX: 400, clientY: 300 });
 
     expect(mounted.chip()).toContain('Commenting on the whole document');
+  });
+});
+
+describe('showing the target before it is posted', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('the sentinel cannot collide with a comment id the server minted', () => {
+    // Ids are base64url, which has no colon in its alphabet. If that ever
+    // stopped holding, the pairing handler would light the wrong comment and
+    // the unwrap pass would strand a mark on the page.
+    expect(PENDING_MARK_ID).toContain(':');
+    expect(PENDING_MARK_ID).not.toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+
+  test('an aimed point is drawn on the document, not just named in the chip', async () => {
+    // The chip alone was the half-fix: it told the reader where their comment
+    // was going and gave them no way to look at it.
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.content.dispatch('click', { clientX: 400, clientY: 300 });
+
+    const pending = withClass(mounted.stage, 'is-pending');
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.dataset['commentId']).toBe(PENDING_MARK_ID);
+  });
+
+  test('it is not a button, because there is no comment to go to yet', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.content.dispatch('click', { clientX: 400, clientY: 300 });
+
+    expect(withClass(mounted.stage, 'is-pending')[0]?.tagName).toBe('DIV');
+  });
+
+  test('clearing the target takes the drawing away with it', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.content.dispatch('click', { clientX: 400, clientY: 300 });
+    documentNode.dispatch('keydown', { key: 'Escape' });
+
+    expect(withClass(mounted.stage, 'is-pending')).toHaveLength(0);
+  });
+
+  test('posting spends the drawing too, so it does not outlive the comment', async () => {
+    const mounted = await mount();
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.content.dispatch('click', { clientX: 400, clientY: 300 });
+    await mounted.post('about this spot');
+
+    expect(withClass(mounted.stage, 'is-pending')).toHaveLength(0);
+  });
+});
+
+describe('pairing a comment with the thing it points at', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  const pinned: Seed = {
+    id: 'c9',
+    body: 'this spot is wrong',
+    anchor: { kind: 'pin', x: 0.4, y: 0.375 },
+  };
+
+  test('a posted pin carries its comment id, which is what makes pairing possible', async () => {
+    const mounted = await mount({}, 'verified', [pinned]);
+
+    const pin = only(mounted.stage, 'comment-pin');
+    expect(pin.dataset['commentId']).toBe('c9');
+  });
+
+  test('hovering the comment lights the pin', async () => {
+    const mounted = await mount({}, 'verified', [pinned]);
+    const row = only(mounted.thread, 'comment');
+
+    row.dispatch('mouseover');
+    expect(only(mounted.stage, 'comment-pin').classes()).toContain('is-active');
+
+    row.dispatch('mouseout');
+    expect(only(mounted.stage, 'comment-pin').classes()).not.toContain(
+      'is-active'
+    );
+  });
+
+  test('hovering the pin lights the comment, because the join runs both ways', async () => {
+    const mounted = await mount({}, 'verified', [pinned]);
+    const pin = only(mounted.stage, 'comment-pin');
+
+    pin.dispatch('mouseover');
+    expect(only(mounted.thread, 'comment').classes()).toContain('is-active');
+
+    pin.dispatch('mouseout');
+    expect(only(mounted.thread, 'comment').classes()).not.toContain(
+      'is-active'
+    );
+  });
+
+  test('focus pairs too, so a keyboard reader sees the same join', async () => {
+    // A pin is a button and therefore in the tab order. Pairing only on hover
+    // would leave the one reader who cannot hover without the association.
+    const mounted = await mount({}, 'verified', [pinned]);
+
+    only(mounted.stage, 'comment-pin').dispatch('focusin');
+    expect(only(mounted.thread, 'comment').classes()).toContain('is-active');
   });
 });
 

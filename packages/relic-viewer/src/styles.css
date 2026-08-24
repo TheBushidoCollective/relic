@@ -123,6 +123,40 @@ body {
   color: inherit;
 }
 
+/* Hovering either half lights both, because a thread and a document are two
+   views of one set of remarks and nothing else joins them. Outline rather
+   than border on the mark: a border would reflow the line under the cursor. */
+.relic-text-mark.is-active {
+  background: color-mix(in srgb, var(--patina) 42%, transparent);
+  outline: 2px solid var(--patina);
+}
+
+.comment-pin.is-active {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
+.comment.is-active {
+  background: color-mix(in srgb, var(--patina) 10%, transparent);
+}
+
+/* The target a reader has aimed and not yet posted. Dashed, because the thing
+   it marks is a sentence they are about to talk about rather than one anybody
+   has said anything about yet. */
+.relic-text-mark.is-pending {
+  background: color-mix(in srgb, var(--patina) 14%, transparent);
+  border-bottom: 2px dashed var(--patina);
+}
+
+.comment-pin.is-pending {
+  background: transparent;
+  border: 2px dashed var(--patina);
+  /* Nothing to press yet, so it must not answer a pointer or take the cursor
+     that says something is pressable. */
+  pointer-events: none;
+  cursor: default;
+}
+
 /* The armed pin tool, on the surface it is armed against. A reader who has
    asked to point at something is told so where they are looking. */
 .stage-wrap.is-pinning {
