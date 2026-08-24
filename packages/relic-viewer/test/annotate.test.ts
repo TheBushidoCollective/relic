@@ -527,6 +527,31 @@ describe('aiming a comment at a quote', () => {
     expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
   });
 
+  test('the offer is placed in the stage own content coordinates', async () => {
+    // Not a claim about pixels on a screen, which this file cannot make. It
+    // is a claim about which coordinate space the offsets are in: the scripted
+    // selection sits at viewport left 120 and top 240 and is 80 wide, and the
+    // stage starts at the viewport origin, so above and centred is 160 by 240.
+    const mounted = await mount();
+    select(mounted, 'the second paragraph');
+    const offered = only(mounted.stage, 'mark-bubble');
+    expect(offered.style.left).toBe('160px');
+    expect(offered.style.top).toBe('240px');
+  });
+
+  test('a scrolled stage carries the offer with its content', async () => {
+    // The regression this defends is the one `pinFraction` already shipped
+    // twice: an offset measured against the visible box belongs to the screen
+    // rather than to the document, and the stage scrolls its own children.
+    const mounted = await mount();
+    mounted.stage.scrollLeft = 30;
+    mounted.stage.scrollTop = 500;
+    select(mounted, 'the second paragraph');
+    const offered = only(mounted.stage, 'mark-bubble');
+    expect(offered.style.left).toBe('190px');
+    expect(offered.style.top).toBe('740px');
+  });
+
   test('a selection outside the stage offers nothing', async () => {
     const mounted = await mount();
     scripted.collapsed = false;
