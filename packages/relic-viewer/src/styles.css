@@ -123,6 +123,67 @@ body {
   color: inherit;
 }
 
+/* The armed pin tool, on the surface it is armed against. A reader who has
+   asked to point at something is told so where they are looking. */
+.stage-wrap.is-pinning {
+  cursor: crosshair;
+}
+
+/* Out of flow deliberately. A hint that took layout space would shift the
+   line under the cursor between arming the tool and the click that places the
+   point, which would move the point off the line it was meant for. */
+.mark-hint {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: 6;
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  background: var(--patina);
+  color: #fff;
+  font-family: var(--sans);
+  font-size: 0.76rem;
+  border-radius: 0 0 0.35rem 0.35rem;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+/*
+ * What a selection offers, rather than what it takes.
+ *
+ * Selecting text used to set the anchor outright, invisibly, so the next
+ * comment written landed on whatever had last been highlighted. Now the
+ * selection puts this here and nothing is aimed until it is pressed.
+ */
+.mark-bubble {
+  position: absolute;
+  z-index: 6;
+  padding: 0.3rem 0.7rem;
+  background: var(--surface);
+  color: var(--patina-ink);
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1px solid var(--patina);
+  border-radius: 0.35rem;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+  /* Above the selection and centred on it, so the offsets the script sets are
+     the selection's own top and middle and nothing has to guess at this
+     button's height. */
+  transform: translate(-50%, calc(-100% - 0.35rem));
+  cursor: pointer;
+}
+
+.mark-bubble:hover {
+  background: var(--patina);
+  color: #fff;
+}
+
+.mark-bubble:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
 /* ---------- the accession band ---------- */
 
 .bar {
@@ -1449,6 +1510,46 @@ body {
   outline-offset: -4px;
 }
 
+/* The tool row, directly under the heading, because arming a tool is the
+   first thing a reader does in here and the second thing is scrolling. */
+.thread-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+}
+
+.mark-mode {
+  padding: 0.35rem 0.7rem;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.mark-mode:hover {
+  border-color: var(--patina);
+  color: var(--patina-ink);
+}
+
+/* The pressed state is the armed state, so it has to be unmistakable: the
+   reader's next click on the document does something different because of it. */
+.mark-mode[aria-pressed="true"] {
+  background: var(--patina);
+  color: #fff;
+  border-color: var(--patina);
+}
+
+.mark-mode:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
 /*
  * Below this width, side by side is twenty characters of relic beside twenty
  * characters of conversation, which is neither reading nor commenting. The
@@ -1599,6 +1700,56 @@ body {
   font-family: var(--mono);
   font-size: 0.8rem;
   overflow-wrap: anywhere;
+}
+
+/*
+ * What the next comment is about, stated before it is written.
+ *
+ * Present in every state, including the state where nothing is marked. The
+ * empty state is the one that had to be added: a composer that said nothing
+ * about its target is a composer where a stray selection quietly aimed the
+ * comment somewhere the reader never chose.
+ */
+.compose-target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  background: var(--ground);
+  border-left: 3px solid var(--patina);
+  font-size: 0.82rem;
+}
+
+.compose-target-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.compose-target-clear {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.4rem;
+  color: var(--patina-ink);
+  font-family: var(--sans);
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.compose-target-clear:hover {
+  border-color: var(--patina);
+  background: var(--surface);
+}
+
+.compose-target-clear:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 1px;
 }
 
 /* The disclosure. Not fine print: a reader learns what commenting publishes
