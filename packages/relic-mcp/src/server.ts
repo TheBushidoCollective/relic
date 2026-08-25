@@ -22,6 +22,14 @@
 
 import { type CommentRecord, postComment, readComments } from './comments.ts';
 import {
+  type ListResult,
+  listRelics,
+  MAX_INLINE_CONTENT_BYTES,
+  type RelicRow,
+  type ShowResult,
+  showRelic,
+} from './inventory.ts';
+import {
   ERROR_CODES,
   errorResponse,
   isSupportedVersion,
@@ -97,6 +105,45 @@ export const REPUBLISH_TOOL_NAME = 'relic_republish';
  * wrong one. This call reads local state and never contacts the service.
  */
 export const LOOKUP_TOOL_NAME = 'relic_lookup_source';
+
+/**
+ * The inventory tools, and why enumeration had to be its own surface.
+ *
+ * `relic_lookup_source` answers "did I publish this file", which is only
+ * askable by somebody holding the file. Every other question a publisher has
+ * later starts from nothing: what have I published, what does that link hold
+ * now, is it still alive. On the file that prompted these, the source index
+ * named four of forty one relics, so thirty seven had a key and a publish
+ * token on disk and no tool that could say their names.
+ *
+ * Two tools rather than one because they cost differently. The list walks
+ * every relic and prefers the unmetered check; the show reaches into one
+ * relic and decrypts it, which is what turns a blind republish into an edit.
+ * Folding them together would make a listing pay a read's price per row.
+ */
+export const LIST_TOOL_NAME = 'relic_list';
+
+export const SHOW_TOOL_NAME = 'relic_show';
+
+/**
+ * Said on both inventory tools, because a row is not a description of a
+ * relic: it is a working key to it.
+ */
+const SHARE_URL_DISCLOSURE =
+  'Every row carries the relic\u2019s share URL including its fragment, and ' +
+  'the fragment is the decryption key, so each row is a credential that ' +
+  'opens the file for anyone who reads it, this transcript included.';
+
+/**
+ * The cost of asking the service, stated on the tools that spend it.
+ *
+ * A publisher who does not know a listing spends opens cannot choose not to,
+ * and the cap is not refillable.
+ */
+const OPEN_COST_DISCLOSURE =
+  'Reaching the service for a relic spends one of its finite opens, which ' +
+  'never come back. Names recovered by decrypting are cached locally, so a ' +
+  'repeat listing spends none.';
 
 /**
  * The comment tools, and why they are two rather than one.
@@ -342,6 +389,300 @@ export const LOOKUP_TOOL_DEFINITION = {
   },
 } as const;
 
+export const LIST_TOOL_DEFINITION = {
+  name: LIST_TOOL_NAME,
+  title: 'List the relics this machine published',
+  description:
+    'List every relic this machine has published, newest first, with its ' +
+    'name, version, lifetime, status, and share URL. This is the only tool ' +
+    'that enumerates: relic_lookup_source finds a relic from the file it ' +
+    'came from, so a relic whose source path is unrecorded or has moved is ' +
+    'invisible to it while still being fully republishable from here. ' +
+    'A relic\u2019s name lives inside its encrypted envelope, so a name this ' +
+    'machine never wrote down is recovered by decrypting the relic rather ' +
+    'than guessed; a name that could not be recovered comes back null with ' +
+    'the reason, never invented. Nothing is dropped: a relic the service ' +
+    'cannot serve is listed with what went wrong, because a short list would ' +
+    'read as having published less. ' +
+    SHARE_URL_DISCLOSURE +
+    ' ' +
+    OPEN_COST_DISCLOSURE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'Optional. Return at most this many of the newest relics. The ' +
+          'total held locally is reported either way.',
+      },
+      include_expired: {
+        type: 'boolean',
+        default: true,
+        description:
+          'Optional, defaults to true. Set false to leave out relics the ' +
+          'service reports expired. How many were left out is still ' +
+          'reported, so they are never silently absent.',
+      },
+      verify: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Optional. Ask the service about every relic rather than only the ' +
+          'ones needing a name recovered. Authoritative, and it spends one ' +
+          'open per relic.',
+      },
+      refresh: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Optional. Re-read every name from the relics themselves, ignoring ' +
+          'the local cache. Spends one open per relic.',
+      },
+    },
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      count: { type: 'integer', minimum: 0 },
+      total: {
+        type: 'integer',
+        minimum: 0,
+        description: 'Relics in local state, before any limit or filter.',
+      },
+      truncated: { type: 'boolean' },
+      excluded_expired: { type: 'integer', minimum: 0 },
+      unreadable_entries: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Relic ids whose stored entry could not be read. Reported rather ' +
+          'than skipped: each one is a relic this machine may no longer be ' +
+          'able to republish.',
+      },
+      findable_by_source: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'How many of `total` relic_lookup_source can find. The gap is what ' +
+          'this tool exists to close.',
+      },
+      recovered_filenames: { type: 'integer', minimum: 0 },
+      opens_spent: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'Opens this call consumed against per-relic download caps. They do ' +
+          'not come back.',
+      },
+      order: { type: 'string' },
+      relics: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            relic_id: { type: 'string' },
+            version: {
+              type: 'integer',
+              minimum: 1,
+              description: 'Versions this machine has published.',
+            },
+            filename: { type: ['string', 'null'] },
+            filename_basis: {
+              type: ['string', 'null'],
+              enum: ['recorded', 'envelope', 'cache', null],
+              description:
+                'Where the name came from. `envelope` means it was recovered ' +
+                'by decrypting the relic itself.',
+            },
+            filename_unrecovered_reason: { type: ['string', 'null'] },
+            mimetype: { type: ['string', 'null'] },
+            published_at: { type: ['string', 'null'] },
+            expires_at: { type: ['string', 'null'] },
+            expires_at_known: {
+              type: 'boolean',
+              description:
+                'False means no lifetime was recorded or learned, so a null ' +
+                'expires_at is unknown rather than "never expires".',
+            },
+            source: { type: ['string', 'null'] },
+            source_indexed: {
+              type: 'boolean',
+              description: 'Whether relic_lookup_source can find this relic.',
+            },
+            share_url: { type: 'string' },
+            status: { type: 'string' },
+            status_basis: {
+              type: 'string',
+              enum: ['mint', 'record', 'local'],
+              description:
+                'Which check produced the status. `record` is the unmetered ' +
+                'one: it proves the service still knows the relic, not that ' +
+                'its bytes still serve.',
+            },
+            status_detail: { type: 'string' },
+          },
+          required: [
+            'relic_id',
+            'version',
+            'filename',
+            'filename_basis',
+            'filename_unrecovered_reason',
+            'mimetype',
+            'published_at',
+            'expires_at',
+            'expires_at_known',
+            'source',
+            'source_indexed',
+            'share_url',
+            'status',
+            'status_basis',
+            'status_detail',
+          ],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: [
+      'count',
+      'total',
+      'truncated',
+      'excluded_expired',
+      'unreadable_entries',
+      'findable_by_source',
+      'recovered_filenames',
+      'opens_spent',
+      'order',
+      'relics',
+    ],
+    additionalProperties: false,
+  },
+} as const;
+
+export const SHOW_TOOL_DEFINITION = {
+  name: SHOW_TOOL_NAME,
+  title: 'Show one relic, including what it holds now',
+  description:
+    'Show one relic this machine published: its name, how many versions the ' +
+    'service holds, whether it still serves, and with include_content the ' +
+    'current decrypted content. Read the content before calling ' +
+    'relic_republish on a relic you did not just write: republish replaces ' +
+    'what the link serves outright, and without reading it first the edit is ' +
+    'blind. ' +
+    VERSION_HISTORY_DISCLOSURE +
+    ' Takes the relic id from relic_list, never the share URL. ' +
+    SHARE_URL_DISCLOSURE +
+    ' Spends one of the relic\u2019s opens.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: {
+        type: 'string',
+        description: 'The 26-character relic id, as relic_list reports it.',
+      },
+      include_content: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Optional. Fetch and decrypt the current version and return it as ' +
+          'text. Content that is not valid UTF-8 comes back as its size and ' +
+          'type instead, never as mangled text, and content over ' +
+          `${MAX_INLINE_CONTENT_BYTES} bytes comes back as its size with no ` +
+          'body, because a truncated one would read as the whole file and ' +
+          'get republished as one.',
+      },
+    },
+    required: ['relic_id'],
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: { type: 'string' },
+      version: {
+        type: 'integer',
+        minimum: 1,
+        description: 'Versions this machine has published.',
+      },
+      versions: {
+        type: ['integer', 'null'],
+        minimum: 1,
+        description:
+          'Versions the service holds. Null when it could not be asked. A ' +
+          'number above `version` means a republish reached the service and ' +
+          'never made it into local state.',
+      },
+      filename: { type: ['string', 'null'] },
+      filename_basis: {
+        type: ['string', 'null'],
+        enum: ['recorded', 'envelope', 'cache', null],
+      },
+      filename_unrecovered_reason: { type: ['string', 'null'] },
+      mimetype: { type: ['string', 'null'] },
+      renderer_class: { type: ['string', 'null'] },
+      content_bytes: { type: ['integer', 'null'], minimum: 0 },
+      content: { type: ['string', 'null'] },
+      content_omitted_reason: { type: ['string', 'null'] },
+      published_at: { type: ['string', 'null'] },
+      expires_at: { type: ['string', 'null'] },
+      expires_at_known: { type: 'boolean' },
+      source: { type: ['string', 'null'] },
+      source_indexed: { type: 'boolean' },
+      share_url: { type: 'string' },
+      status: { type: 'string' },
+      status_basis: { type: 'string', enum: ['mint', 'record', 'local'] },
+      status_detail: { type: 'string' },
+      republish_call: {
+        type: ['object', 'null'],
+        description:
+          'The call that replaces this content, when a source path was ' +
+          'recorded. Null otherwise: any path would be a guess, and ' +
+          'relic_republish takes the file to publish, not the old one.',
+        properties: {
+          name: { type: 'string', const: REPUBLISH_TOOL_NAME },
+          arguments: {
+            type: 'object',
+            properties: {
+              relic_id: { type: 'string' },
+              path: { type: 'string' },
+            },
+            required: ['relic_id', 'path'],
+            additionalProperties: false,
+          },
+        },
+        required: ['name', 'arguments'],
+        additionalProperties: false,
+      },
+    },
+    required: [
+      'relic_id',
+      'version',
+      'versions',
+      'filename',
+      'filename_basis',
+      'filename_unrecovered_reason',
+      'mimetype',
+      'renderer_class',
+      'content_bytes',
+      'content',
+      'content_omitted_reason',
+      'published_at',
+      'expires_at',
+      'expires_at_known',
+      'source',
+      'source_indexed',
+      'share_url',
+      'status',
+      'status_basis',
+      'status_detail',
+      'republish_call',
+    ],
+    additionalProperties: false,
+  },
+} as const;
+
 export const READ_COMMENTS_TOOL_DEFINITION = {
   name: READ_COMMENTS_TOOL_NAME,
   title: "Read a relic's comments",
@@ -539,21 +880,22 @@ Six things that change how you should act:
 
 1. The link is the credential. Anyone holding it, fragment included, can read \
 the file. Do not paste it into a tracker, a log, or a public channel.
-2. Publishing puts the key in this transcript. That is structural rather than \
-a defect, and worth saying plainly when you hand the link over.
-3. Check existing sources with relic_lookup_source. Use relic_republish when \
-found; relic_publish otherwise costs a second URL. \
+2. Publishing puts the key in this transcript. That is structural, and worth \
+saying plainly when you hand the link over.
+3. relic_list shows every relic published from here; relic_lookup_source \
+finds one only from the file it came from. relic_show reads what a link holds \
+now, so an update is an edit, not a guess; relic_republish keeps the URL \
+where relic_publish costs a second URL. \
 ${VERSION_HISTORY_DISCLOSURE}
-4. A relic can be republished only from the machine that published it, which \
-is where its key and publish token are stored. Anywhere else it refuses, and \
-no retry changes that.
-5. Rendered HTML and JSX run in an isolated frame with no network access. \
-Inline the styles, scripts, fonts, and images a page needs, because a CDN \
-reference renders as nothing. Decide that before you write the file.
+4. A relic can be republished only from the machine that published it, where \
+its key and publish token live. Anywhere else it refuses, and no retry \
+changes that.
+5. HTML and JSX render in an isolated frame with no network access, so inline \
+the styles, scripts, fonts, and images a page needs: a CDN reference renders \
+as nothing. Decide before you write the file.
 6. People can comment on a relic. Read them with relic_read_comments before \
 you change reviewed content, and answer with relic_comment. Both take the \
-relic id, work only on the machine that published, and attribute you as the \
-publisher.`;
+relic id and attribute you as the publisher.`;
 
 /**
  * Handle one JSON-RPC message.
@@ -621,6 +963,8 @@ export async function handleMessage(
         result: {
           tools: [
             TOOL_DEFINITION,
+            LIST_TOOL_DEFINITION,
+            SHOW_TOOL_DEFINITION,
             LOOKUP_TOOL_DEFINITION,
             REPUBLISH_TOOL_DEFINITION,
             READ_COMMENTS_TOOL_DEFINITION,
@@ -699,6 +1043,14 @@ async function callTool(
 
   if (params['name'] === LOOKUP_TOOL_NAME) {
     return callLookup(id, params, deps);
+  }
+
+  if (params['name'] === LIST_TOOL_NAME) {
+    return callList(id, params, deps);
+  }
+
+  if (params['name'] === SHOW_TOOL_NAME) {
+    return callShow(id, params, deps);
   }
 
   if (params['name'] === REPUBLISH_TOOL_NAME) {
@@ -859,6 +1211,254 @@ async function callLookup(
   } catch (error) {
     return { jsonrpc: '2.0', id, result: toolError(error) };
   }
+}
+
+async function callList(
+  id: string | number | null,
+  params: Record<string, unknown>,
+  deps: PublishDeps
+): Promise<JsonRpcResponse> {
+  const args = (params['arguments'] ?? {}) as Record<string, unknown>;
+
+  const limit = args['limit'];
+  if (
+    limit !== undefined &&
+    (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1)
+  ) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`limit` must be an integer of 1 or more, or omitted'
+    );
+  }
+
+  for (const name of ['include_expired', 'verify', 'refresh'] as const) {
+    if (args[name] !== undefined && typeof args[name] !== 'boolean') {
+      return errorResponse(
+        id,
+        ERROR_CODES.invalidParams,
+        `\`${name}\` must be a boolean or omitted`
+      );
+    }
+  }
+
+  try {
+    const result = await listRelics(
+      {
+        limit: typeof limit === 'number' ? limit : undefined,
+        include_expired: args['include_expired'] as boolean | undefined,
+        verify: args['verify'] as boolean | undefined,
+        refresh: args['refresh'] as boolean | undefined,
+      },
+      deps
+    );
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        content: [{ type: 'text', text: listTranscript(result) }],
+        structuredContent: result,
+        isError: false,
+      },
+    };
+  } catch (error) {
+    return { jsonrpc: '2.0', id, result: toolError(error) };
+  }
+}
+
+async function callShow(
+  id: string | number | null,
+  params: Record<string, unknown>,
+  deps: PublishDeps
+): Promise<JsonRpcResponse> {
+  const args = (params['arguments'] ?? {}) as Record<string, unknown>;
+  const relicId = args['relic_id'];
+  if (typeof relicId !== 'string' || relicId.length === 0) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`relic_id` is required and must be a string'
+    );
+  }
+
+  const includeContent = args['include_content'];
+  if (includeContent !== undefined && typeof includeContent !== 'boolean') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`include_content` must be a boolean or omitted'
+    );
+  }
+
+  try {
+    const result = await showRelic(
+      { relic_id: relicId, include_content: includeContent },
+      deps
+    );
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        content: [{ type: 'text', text: showTranscript(result) }],
+        structuredContent: result,
+        isError: false,
+      },
+    };
+  } catch (error) {
+    return { jsonrpc: '2.0', id, result: toolError(error) };
+  }
+}
+
+/**
+ * One row as a person reads it.
+ *
+ * The status sentence is printed for anything other than a served relic,
+ * because a row that reads like every other row while meaning "this link is
+ * dead" is the failure the status exists to prevent. The share URL is last on
+ * its own line: it is the credential, and burying it mid-sentence makes it
+ * easy to paste somewhere it should not go.
+ */
+function relicLine(row: RelicRow): string {
+  const name =
+    row.filename ?? `[name unrecovered: ${row.filename_unrecovered_reason}]`;
+  const versions = row.version === 1 ? 'v1' : `v${row.version}`;
+  const when = row.published_at ?? 'date not recorded';
+  const life =
+    row.expires_at !== null
+      ? `expires ${row.expires_at}`
+      : row.expires_at_known
+        ? 'no expiry'
+        : 'lifetime not recorded';
+  const state =
+    row.status === 'reachable' ? '' : `\n  ${row.status}: ${row.status_detail}`;
+  const finding = row.source_indexed
+    ? ''
+    : '\n  not findable by relic_lookup_source';
+  return (
+    `${name} (${row.relic_id}, ${versions}, ${when}, ${life})${state}${finding}` +
+    `\n  ${row.share_url}`
+  );
+}
+
+/**
+ * The listing as a person reads it, with every number that cost something.
+ *
+ * The findable count leads because it is the whole point: a publisher who
+ * believes lookup can find their relics does not know they need this tool
+ * until they need it and it is not there.
+ */
+function listTranscript(result: ListResult): string {
+  if (result.total === 0) {
+    return (
+      'This machine has published no relics, or its publish state was moved ' +
+      'or deleted. A relic published from another machine cannot be listed ' +
+      'here: its key never left that machine.'
+    );
+  }
+
+  const header = [
+    `${result.count} relic(s) of ${result.total} this machine published, ` +
+      'newest first.',
+    `${result.findable_by_source} of ${result.total} can be found by ` +
+      'relic_lookup_source; the rest are reachable only through this list.',
+  ];
+  if (result.truncated) {
+    header.push(`Limited to the newest ${result.count}.`);
+  }
+  if (result.excluded_expired > 0) {
+    header.push(
+      `${result.excluded_expired} expired relic(s) left out at your request, ` +
+        'not missing.'
+    );
+  }
+  if (result.unreadable_entries.length > 0) {
+    header.push(
+      `${result.unreadable_entries.length} stored entr(ies) could not be ` +
+        'read and are not listed below, which means those relics may no ' +
+        `longer be republishable from here: ${result.unreadable_entries.join(
+          ', '
+        )}.`
+    );
+  }
+  if (result.recovered_filenames > 0) {
+    header.push(
+      `${result.recovered_filenames} name(s) were recovered by decrypting ` +
+        'the relics themselves, because this machine never recorded them.'
+    );
+  }
+  if (result.opens_spent > 0) {
+    header.push(
+      `This call spent ${result.opens_spent} open(s), one per relic asked ` +
+        'about. They do not come back; a repeat listing spends none.'
+    );
+  }
+  header.push(
+    'Each line ends with a share URL whose fragment is the decryption key. ' +
+      'Every one of them is now in this transcript and opens the file for ' +
+      'anyone who reads it.'
+  );
+
+  return `${header.join(' ')}\n\n${result.relics
+    .map((row) => relicLine(row))
+    .join('\n\n')}`;
+}
+
+/**
+ * One relic in full, ending with what to do next.
+ *
+ * The republish sentence is here rather than in the schema because it is the
+ * reason the tool exists: reading the content back is what makes replacing it
+ * an edit instead of a guess.
+ */
+function showTranscript(result: ShowResult): string {
+  const lines = [relicLine(result)];
+
+  if (result.versions !== null) {
+    lines.push(
+      result.versions === result.version
+        ? `The service holds ${result.versions} version(s), which matches ` +
+            'this machine\u2019s record.'
+        : `The service holds ${result.versions} version(s) and this machine ` +
+            `recorded ${result.version}. A republish reached the service ` +
+            'without being recorded here, so the local count is behind.'
+    );
+  }
+
+  if (result.mimetype !== null) {
+    lines.push(
+      `Declared type ${result.mimetype}` +
+        (result.renderer_class === null
+          ? ''
+          : `, class ${result.renderer_class}`) +
+        (result.content_bytes === null
+          ? '.'
+          : `, ${result.content_bytes} bytes.`)
+    );
+  }
+
+  if (result.content !== null) {
+    lines.push(
+      'Current content follows. Republishing replaces what the link serves ' +
+        'with whatever file you pass, so edit this and republish it rather ' +
+        'than writing something new from memory.',
+      '---',
+      result.content,
+      '---'
+    );
+  } else if (result.content_omitted_reason !== null) {
+    lines.push(`No content returned: ${result.content_omitted_reason}`);
+  }
+
+  if (result.status === 'reachable') {
+    lines.push(
+      `To change it: write the new content to a file and call ` +
+        `relic_republish with relic_id ${result.relic_id}. The share URL ` +
+        'does not change, so everyone already holding it sees the new ' +
+        `version. ${VERSION_HISTORY_DISCLOSURE}`
+    );
+  }
+
+  return lines.join('\n\n');
 }
 
 async function callRepublish(

@@ -90,6 +90,20 @@ current version, and the download cap is shared across all versions. A relic
 taken down for abuse refuses every future version whatever token is presented,
 because a takedown an abuser could out-publish would not be a takedown.
 
+`relic_list` and `relic_show` are how a publisher finds a relic again. Lookup
+by source only answers when you are still holding the file, so a relic whose
+path was never recorded, or has since moved, was addressable by nothing: on
+one real state file, four of forty one relics were findable and the other
+thirty seven held a key and a publish token that no tool could name. The list
+enumerates every one of them and recovers a name this machine never wrote
+down by decrypting the relic's own envelope rather than guessing from its id,
+reporting a relic the service will not serve with which of removed, expired,
+exhausted or unreachable it is rather than leaving the row out. Every row
+carries the share URL including its fragment, which is the key, so a listing
+is a list of credentials. `relic_show` returns what a link currently serves,
+which is what makes replacing it an edit rather than an overwrite from
+memory.
+
 Two more tools cover comments. `relic_read_comments` and `relic_comment` are
 how an agent takes part in the conversation on a relic rather than only
 creating one. Both take the relic id rather than the share URL, because the

@@ -497,13 +497,14 @@ describe('the MCP surface', () => {
     const tools = (response?.result as { tools: { name: string }[] }).tools;
     expect(tools.map((tool) => tool.name)).toEqual([
       'relic_publish',
+      'relic_list',
+      'relic_show',
       'relic_lookup_source',
       'relic_republish',
       'relic_read_comments',
       'relic_comment',
       'relic_describe_client',
     ]);
-    // The spec's own remedy for cross-server collisions is a name prefix.
     for (const tool of tools) {
       expect(tool.name.startsWith('relic')).toBe(true);
     }

@@ -58,6 +58,50 @@ The result reports the relic as version 1 and its id. The client records that
 id with the source locally, so a later session can recover it with
 `relic_lookup_source`.
 
+## Finding what you published, and reading it back
+
+`relic_lookup_source` only answers when you are holding the file. For every
+other question, start with the inventory:
+
+```
+relic_list()
+```
+
+It is the only tool that enumerates. Every relic this machine published comes
+back newest first, with its name, version, lifetime, status, and share URL,
+whether or not its source path was ever recorded. On the machine this was
+built for, the source index named 4 of 41 relics; the other 37 had a key and a
+publish token on disk and no tool that could say their names.
+
+Four things about a row:
+
+- **A name that was never recorded is recovered, not guessed.** It lives
+  inside the relic's encrypted envelope, so the client mints, reads the first
+  record, and decrypts it here. When that fails the name is `null` with the
+  reason attached. Nothing is inferred from a relic id.
+- **Nothing is dropped.** A relic the service will not serve is listed with
+  what happened: removed, expired, its opens exhausted, or the service
+  unreachable. A short list would read as having published less.
+- **Each row is a credential.** The share URL includes the fragment, which is
+  the key, so a listing puts every one of those keys in the transcript. That
+  is the point of the row and worth saying when you paste one.
+- **Reaching the service spends one of a relic's finite opens.** Recovered
+  names are cached locally, so a repeat listing spends none. `verify: true`
+  asks about every relic and costs an open each; `refresh: true` re-reads
+  every name.
+
+Then read one back before you change it:
+
+```
+relic_show(relic_id: "0a2c...", include_content: true)
+```
+
+That returns what the link currently serves, decrypted here, plus how many
+versions the service holds. Do this before `relic_republish` on anything you
+did not just write. Republishing replaces what the link serves outright, so
+without reading it first the edit is blind: you would be rewriting from memory
+for everyone already holding the URL.
+
 ## Republishing
 
 Call `relic_republish` with the relic id and a new file:

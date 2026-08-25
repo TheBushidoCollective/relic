@@ -63,6 +63,39 @@ export interface PublishState {
    * detection.
    */
   readonly source?: SourceIdentity | undefined;
+  /**
+   * The name written into the encrypted envelope of the newest version this
+   * machine published.
+   *
+   * Recorded from this client on, and absent on every entry written before
+   * it, which is most of them. Absence is legacy state, never an error: the
+   * name also lives inside the relic's own envelope, so an inventory
+   * recovers it by decrypting rather than guessing. It is stored anyway
+   * because recovering it costs one of the relic's finite opens and this
+   * costs nothing.
+   */
+  readonly filename?: string | undefined;
+  /**
+   * When this machine first published the relic, ISO 8601.
+   *
+   * The service knows a publish timestamp and will not tell a client, so
+   * absence here cannot be repaired later from anywhere. It is written once,
+   * at first publish, and a republish never touches it: it answers "when did
+   * I make this", not "when did I last change it".
+   */
+  readonly published_at?: string | undefined;
+  /** When this machine last published a new version, ISO 8601. */
+  readonly updated_at?: string | undefined;
+  /**
+   * The lifetime the first grant fixed, ISO 8601, or null for a relic kept
+   * until it is deleted.
+   *
+   * Null and absent are different answers. Null is the service saying this
+   * relic has no end; absent is this machine never having written it down,
+   * which is every entry older than this client. A lifetime is fixed at the
+   * first grant and never moves, so a recorded value stays true.
+   */
+  readonly expires_at?: string | null | undefined;
 }
 
 interface StateFile {
@@ -340,6 +373,84 @@ export async function loadPublishedSource(
   return { relic_id: relicId, state, source: state.source };
 }
 
+/** One relic this machine published, as the inventory reads it. */
+export interface PublishRecord {
+  readonly relic_id: string;
+  readonly state: PublishState;
+  /**
+   * Whether the top-level source index points at this relic, which is
+   * exactly the question "can relic_lookup_source find it".
+   *
+   * Distinct from `state.source` being present. On this machine's own file
+   * nine entries carry a source and the index names four of them, so an
+   * entry can know where it came from and still be unreachable by the only
+   * tool that searches by source.
+   */
+  readonly source_indexed: boolean;
+}
+
+/**
+ * Every relic this machine published, in the order the file records them.
+ *
+ * That order is publish order: a new relic is appended and a republish
+ * updates its entry in place, so it is the only evidence of sequence for the
+ * entries written before timestamps were recorded. It is preserved here and
+ * reversed by the caller rather than sorted on a field most entries do not
+ * have.
+ *
+ * A single malformed entry is reported rather than thrown, because throwing
+ * would take all 41 rows down over one bad one, and the whole point of an
+ * inventory is that nothing goes missing quietly.
+ */
+export async function loadPublishInventory(): Promise<{
+  readonly records: readonly PublishRecord[];
+  readonly malformed: readonly string[];
+}> {
+  const path = publishStatePath();
+  const parsed = await readWholeFile(path);
+  const relics = parsed?.relics;
+  if (relics === undefined) return { records: [], malformed: [] };
+  if (relics === null || typeof relics !== 'object' || Array.isArray(relics)) {
+    throw new Error(`publish state at ${path} holds malformed relic entries.`);
+  }
+
+  const rawSources = parsed?.sources;
+  if (
+    rawSources !== undefined &&
+    (rawSources === null ||
+      typeof rawSources !== 'object' ||
+      Array.isArray(rawSources))
+  ) {
+    throw new Error(`publish state at ${path} holds a malformed source index.`);
+  }
+  const indexed = new Set(
+    Object.values((rawSources ?? {}) as Record<string, unknown>).filter(
+      (value): value is string => typeof value === 'string'
+    )
+  );
+
+  const records: PublishRecord[] = [];
+  const malformed: string[] = [];
+  for (const [relicId, entry] of Object.entries(
+    relics as Record<string, unknown>
+  )) {
+    let state: PublishState | undefined;
+    try {
+      state = validatePublishStateEntry(entry, relicId);
+    } catch {
+      malformed.push(relicId);
+      continue;
+    }
+    if (state === undefined) continue;
+    records.push({
+      relic_id: relicId,
+      state,
+      source_indexed: indexed.has(relicId),
+    });
+  }
+  return { records, malformed };
+}
+
 /**
  * Record or update one relic's state, preserving every other entry.
  *
@@ -386,7 +497,14 @@ async function writeEntry(relicId: string, state: PublishState): Promise<void> {
       !Array.isArray(oldEntry)
         ? oldEntry
         : {}),
-      ...state,
+      // Undefined members are dropped before the merge, never spread over the
+      // stored entry. Every field added since the first release is optional,
+      // so a caller that rebuilds a state object without one would otherwise
+      // delete the recorded value: `{...state}` carries the key with an
+      // undefined value, JSON.stringify drops the key, and a filename or a
+      // source identity disappears from a write that was only meant to bump
+      // a version number.
+      ...defined(state),
     },
   };
 
@@ -419,6 +537,21 @@ async function writeEntry(relicId: string, state: PublishState): Promise<void> {
     mode: 0o600,
   });
   await rename(temp, path);
+}
+
+/**
+ * The state's members that carry a value, with `null` kept.
+ *
+ * Null is an answer here rather than an absence: an `expires_at` of null is
+ * the service saying this relic has no lifetime, which is different from
+ * this machine never having recorded one.
+ */
+function defined(state: PublishState): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(state)) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
 }
 
 async function readWholeFile(path: string): Promise<StateFile | undefined> {

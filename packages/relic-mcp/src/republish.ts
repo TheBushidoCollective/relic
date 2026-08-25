@@ -155,7 +155,16 @@ export async function republish(
   //    number reported drifts with it, and nothing else does.
   const version = state.version + 1;
   try {
-    await savePublishState(input.relic_id, { ...state, version });
+    // The filename tracks the newest version, because that is the one the
+    // link now serves and the one an inventory should name. `published_at`
+    // is deliberately untouched: it answers when this relic was made, and a
+    // republish overwriting it would erase the only date this machine has.
+    await savePublishState(input.relic_id, {
+      ...state,
+      version,
+      filename,
+      updated_at: new Date().toISOString(),
+    });
   } catch (error) {
     throw new PublishError(
       'local_state_write_failed',
