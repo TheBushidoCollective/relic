@@ -1837,6 +1837,379 @@ export function pinOffsets(
   };
 }
 
+/** How much of a quote the chip shows before it abbreviates. */
+const MARK_QUOTE_DISPLAY_LIMIT = 60;
+
+/** What an armed pin tool tells the reader to do next. */
+export const MARK_PIN_HINT = 'Click the document to place a point';
+
+/**
+ * The clearance between a selection and the button offered above it, in CSS
+ * pixels. Small enough to read as attached to the selection, wide enough that
+ * it does not sit on the words it is about.
+ */
+const MARK_BUBBLE_GAP = 6;
+
+/**
+ * Why a sandboxed relic offers no aiming controls yet.
+ *
+ * The render frame is a different origin with `allow-same-origin` withheld,
+ * so this page cannot read a selection inside it, and a click inside it never
+ * reaches a listener out here. Controls that looked available and then did
+ * nothing would be worse than one sentence saying so.
+ *
+ * The sentence claims only the selection, because only the selection is
+ * impossible. A pin is painted by this page into its own overlay on the
+ * stage, so pointing at a location in a framed document is unwired rather
+ * than out of reach, and it is not this change's to wire.
+ */
+export const MARK_SANDBOX_NOTE =
+  'This document renders in an isolated frame, so text inside it cannot be ' +
+  'selected from this page.';
+
+/**
+ * The key a provisional mark is painted under.
+ *
+ * A colon cannot occur in a server-minted comment id, which is base64url, so
+ * this can never collide with a real one. That matters because the pairing
+ * handler and the unwrap pass both address marks by this key, and a collision
+ * would light the wrong comment or strand a mark on the page.
+ */
+export const PENDING_MARK_ID = 'pending:target';
+
+/**
+ * Paints the target the reader has aimed but not yet posted.
+ *
+ * Runs inside the same pass as the posted marks rather than beside it. Two
+ * passes would mean two places that decide what the document shows, and the
+ * provisional mark would survive a refresh that removed everything else.
+ */
+export function paintPendingMark(
+  host: HTMLElement,
+  pins: HTMLElement,
+  anchor: CommentAnchor | null
+): void {
+  if (anchor === null) return;
+  if (anchor.kind === 'text') {
+    wrapTextQuote(host, anchor.quote, PENDING_MARK_ID);
+    const painted = host.querySelector(
+      `mark[data-comment-id="${PENDING_MARK_ID}"]`
+    );
+    painted?.classList.add('is-pending');
+    return;
+  }
+  const pin = document.createElement('div');
+  // Not a button: there is no comment to scroll to yet, and a control that
+  // answers a press by doing nothing is the defect this whole change removed.
+  pin.className = 'comment-pin is-pending';
+  pin.dataset.commentId = PENDING_MARK_ID;
+  const offsets = pinOffsets(anchor, host);
+  pin.style.left = `${offsets.left}px`;
+  pin.style.top = `${offsets.top}px`;
+  pins.appendChild(pin);
+}
+
+/**
+ * What the composer says the next comment is about.
+ *
+ * Having no target is a state with wording rather than a blank, because the
+ * blank is what shipped: nothing on the page said marks existed, and a reader
+ * who had selected something by accident had no way to find out that the next
+ * comment they wrote was about to land on it.
+ */
+export function markTargetLabel(anchor: CommentAnchor | null): string {
+  if (anchor === null) return 'Commenting on the whole document';
+  if (anchor.kind === 'pin') return 'Commenting on a point';
+  // Display only. The stored quote stays exact, because it is what the
+  // painted mark is matched against when the thread loads.
+  const quote = plainLabel(anchor.quote);
+  const shown =
+    quote.length > MARK_QUOTE_DISPLAY_LIMIT
+      ? `${quote.slice(0, MARK_QUOTE_DISPLAY_LIMIT).trimEnd()}…`
+      : quote;
+  return `Commenting on "${shown}"`;
+}
+
+/** The aiming controls, and the one target they hold between them. */
+export interface MarkControls {
+  /**
+   * The chip the composer carries in every state, including holding no target
+   * at all. That state is the one worth announcing: it answers "can I comment
+   * on a line", and before this there was nothing on the page that did.
+   */
+  readonly chip: HTMLElement;
+  /** The row offering the pin tool, or saying why this relic cannot have one. */
+  readonly tools: HTMLElement;
+  /** Binds a rendered stage, and decides there whether marks can work at all. */
+  attach(host: HTMLElement): void;
+  /** Read once, when a comment is posted. */
+  target(): CommentAnchor | null;
+  /** Back to the whole document, with the pin tool disarmed. */
+  clear(): void;
+}
+
+export interface MarkDeps {
+  /** Aiming a mark is the start of writing one, so the thread comes open. */
+  readonly open: () => void;
+  /** Where the reader types, once a target is locked. */
+  readonly focusBody: () => void;
+  /**
+   * Repaints the document's marks, because the target changed.
+   *
+   * A chip that names a quote while the page shows nothing tells the reader
+   * where their comment is going and gives them no way to check it. The
+   * target is painted on the document from the same pass that paints posted
+   * comments, so a provisional mark and a real one cannot drift apart.
+   */
+  readonly repaint: () => void;
+}
+
+/**
+ * Reads the selection the browser has finished settling.
+ *
+ * `mouseup` fires before the selection it produced is readable, so a handler
+ * that reads immediately reads the previous one. Ten milliseconds is what
+ * haiku's review app settled on for the same reason.
+ */
+function afterSelection(run: () => void): void {
+  window.setTimeout(run, 10);
+}
+
+/**
+ * The controls that let a reader aim a comment, and see what it is aimed at.
+ *
+ * Before this the target was set by any selection and rendered nowhere, so a
+ * stray selection silently anchored the next comment to an unrelated line and
+ * nothing on the page said so. Three changes fix that and they are one unit: a
+ * selection now only offers a target, the composer always names the target it
+ * holds, and a point is placed by an armed tool rather than by whichever click
+ * happened to miss the text.
+ */
+export function buildMarkControls(deps: MarkDeps): MarkControls {
+  let anchor: CommentAnchor | null = null;
+  let host: HTMLElement | undefined;
+  let bubble: HTMLElement | undefined;
+  let mode: HTMLElement | undefined;
+  let hint: HTMLElement | undefined;
+
+  const chip = document.createElement('div');
+  chip.className = 'compose-target';
+  // Polite: a target arriving is worth announcing to a reader who cannot see
+  // the chip change, and never worth interrupting one mid sentence.
+  chip.setAttribute('aria-live', 'polite');
+
+  const tools = document.createElement('div');
+  tools.className = 'thread-tools';
+
+  // One element rather than one per repaint, because there is one clear
+  // control and its listener is attached once.
+  const reset = document.createElement('button');
+  reset.type = 'button';
+  reset.className = 'compose-target-clear';
+  reset.textContent = 'Clear';
+  reset.setAttribute('aria-label', 'Comment on the whole document instead');
+
+  const dismiss = (): void => {
+    bubble?.remove();
+    bubble = undefined;
+  };
+
+  /** The button's own pressed state is the armed state, so there is one. */
+  const armed = (): boolean => mode?.getAttribute('aria-pressed') === 'true';
+
+  const disarm = (): void => {
+    mode?.setAttribute('aria-pressed', 'false');
+    host?.classList.remove('is-pinning');
+    hint?.remove();
+    hint = undefined;
+  };
+
+  const paintChip = (): void => {
+    const label = document.createElement('span');
+    label.className = 'compose-target-label';
+    label.textContent = markTargetLabel(anchor);
+    if (anchor === null) {
+      chip.replaceChildren(label);
+      return;
+    }
+    chip.replaceChildren(label, reset);
+  };
+
+  const clear = (): void => {
+    anchor = null;
+    dismiss();
+    disarm();
+    paintChip();
+    deps.repaint();
+  };
+
+  reset.addEventListener('click', clear);
+
+  const aim = (next: CommentAnchor): void => {
+    anchor = next;
+    dismiss();
+    disarm();
+    paintChip();
+    deps.repaint();
+    deps.open();
+    deps.focusBody();
+  };
+
+  const arm = (): void => {
+    const surface = host;
+    if (mode === undefined || surface === undefined) return;
+    mode.setAttribute('aria-pressed', 'true');
+    surface.classList.add('is-pinning');
+    const said = document.createElement('p');
+    said.className = 'mark-hint';
+    said.setAttribute('aria-live', 'polite');
+    said.textContent = MARK_PIN_HINT;
+    // On the stage rather than in the sidebar, and out of flow. The reader is
+    // looking at the document, the sidebar is not on the row at all at narrow
+    // width, and a hint that took layout space would shift the line under the
+    // cursor between arming and the click that places the point.
+    surface.appendChild(said);
+    hint = said;
+  };
+
+  /** Offers a target for a settled selection, and offers nothing otherwise. */
+  const offer = (): void => {
+    const surface = host;
+    if (surface === undefined) return;
+    const selection = window.getSelection();
+    if (
+      selection === null ||
+      selection.isCollapsed ||
+      selection.rangeCount === 0
+    ) {
+      dismiss();
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!surface.contains(range.commonAncestorContainer)) {
+      dismiss();
+      return;
+    }
+    const quote = selection.toString().trim();
+    if (quote.length === 0) {
+      dismiss();
+      return;
+    }
+
+    dismiss();
+    const rect = range.getBoundingClientRect();
+    const box = surface.getBoundingClientRect();
+    const offered = document.createElement('button');
+    offered.type = 'button';
+    offered.className = 'mark-bubble';
+    offered.textContent = 'Comment';
+    // Content coordinates, not viewport ones: the stage scrolls its own
+    // children, so an offset measured against the visible box would leave the
+    // bubble behind the moment the reader scrolls.
+    offered.style.left = `${rect.left - box.left + surface.scrollLeft + rect.width / 2}px`;
+    // A press that moved focus would collapse the selection before the click
+    // arrived, which is how a selection toolbar loses the thing it points at.
+    offered.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    // The quote is captured here rather than re-read on click, so what gets
+    // anchored is what the bubble appeared for.
+    offered.addEventListener('click', () => {
+      aim({ kind: 'text', quote });
+    });
+    surface.appendChild(offered);
+    // Above the selection, and never above the content box. The stage clips
+    // its overflow, so the first line of every relic would otherwise be
+    // offered a button sitting outside the box it is clipped to. The height is
+    // read after insertion because it is the button's own and not a guess.
+    const above = rect.top - box.top + surface.scrollTop;
+    offered.style.top = `${Math.max(above - offered.offsetHeight - MARK_BUBBLE_GAP, 0)}px`;
+    bubble = offered;
+  };
+
+  /** Places a point, but only for a click the reader armed the tool for. */
+  const place = (event: MouseEvent): void => {
+    const surface = host;
+    if (surface === undefined || !armed()) return;
+    if (!(event.target instanceof Element)) return;
+    // An existing mark, the bubble and the conversation are controls. Only the
+    // document itself takes a point.
+    if (event.target.closest('.comment-pin, .mark-bubble, .thread')) return;
+    const rect = surface.getBoundingClientRect();
+    const fraction = pinFraction(
+      {
+        left: rect.left,
+        top: rect.top,
+        scrollLeft: surface.scrollLeft,
+        scrollTop: surface.scrollTop,
+        scrollWidth: surface.scrollWidth,
+        scrollHeight: surface.scrollHeight,
+      },
+      event.clientX,
+      event.clientY
+    );
+    // A click the stage cannot place leaves the tool armed, because nothing
+    // was placed and disarming would read as though something had been.
+    if (fraction === undefined) return;
+    aim({ kind: 'pin', ...fraction });
+  };
+
+  // Bound to the document once, here rather than in `attach`, because a
+  // comparison closing rebuilds the stage and attaches again: listeners added
+  // there would accumulate one copy per visit.
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    clear();
+  });
+  document.addEventListener('selectionchange', () => {
+    const live = window.getSelection();
+    if (live === null || live.isCollapsed) dismiss();
+  });
+
+  paintChip();
+
+  return {
+    chip,
+    tools,
+    target: () => anchor,
+    clear,
+    attach: (next) => {
+      // Both belonged to the stage that is being replaced.
+      dismiss();
+      disarm();
+      host = next;
+
+      // The boundary, read from the DOM rather than from the route, because a
+      // component that will not compile falls back to its own source and that
+      // source renders right here in the page where a mark can reach it.
+      if (next.querySelector('iframe.usercontent-frame') !== null) {
+        mode = undefined;
+        tools.replaceChildren(line('thread-note', MARK_SANDBOX_NOTE));
+        return;
+      }
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'mark-mode';
+      toggle.textContent = 'Point at something';
+      toggle.setAttribute('aria-pressed', 'false');
+      toggle.addEventListener('click', () => {
+        if (armed()) disarm();
+        else arm();
+      });
+      mode = toggle;
+      tools.replaceChildren(toggle);
+
+      if (next.dataset.markBind === '1') return;
+      next.dataset.markBind = '1';
+      next.addEventListener('mouseup', () => {
+        afterSelection(offer);
+      });
+      next.addEventListener('click', place);
+    },
+  };
+}
+
 /**
  * The thread, in the service-origin chrome.
  *
@@ -1846,7 +2219,7 @@ export function pinOffsets(
  * around it can, and it is also the only side of the boundary that holds the
  * key the bodies are sealed under.
  */
-function buildThread(
+export function buildThread(
   view: ReadyView,
   relicId: string,
   deps: ViewerDeps,
@@ -1905,7 +2278,29 @@ function buildThread(
   outcome.className = 'thread-outcome';
   outcome.setAttribute('aria-live', 'polite');
 
-  section.append(title, status, list, composer, outcome);
+  // The aiming controls, built here because two places carry a piece of them:
+  // what a comment is about belongs in the composer, and arming the pin tool
+  // belongs in the sidebar beside the conversation it will join.
+  const marks = buildMarkControls({
+    open: () => {
+      setOpen(true);
+    },
+    focusBody: () => {
+      // Absent for a reader who has not verified an address yet, and that is
+      // the state the chip exists for: the target is announced even when
+      // there is nothing yet to type it into.
+      const box = composer.querySelector('.compose-textarea');
+      if (box instanceof HTMLElement) box.focus();
+    },
+    repaint: () => {
+      // The entries it already has, because the target changed and the
+      // conversation did not. Refetching the thread to redraw one provisional
+      // mark would put a network round trip behind a text selection.
+      paintMarks(lastEntries);
+    },
+  });
+
+  section.append(title, marks.tools, status, list, composer, outcome);
 
   // The one place the in-memory fragment is already carried on a ready view.
   // Reading it back from here rather than adding a second copy to `ReadyView`
@@ -1915,7 +2310,6 @@ function buildThread(
   let cipher: CommentCipher | undefined;
   let session: SessionState = { kind: 'unknown' };
   let host: HTMLElement | undefined;
-  let pendingAnchor: CommentAnchor | null = null;
   let lastEntries: readonly CommentEntry[] = [];
   /** Puts the width where the sidebar and the divider both read it. */
   const applyWidth = (width: number): number => {
@@ -1992,6 +2386,10 @@ function buildThread(
       pin.type = 'button';
       pin.className = 'comment-pin';
       pin.textContent = String(number);
+      // Addressable, so hovering the pin can light its comment. Posted pins
+      // and marks now carry the same key, which is what lets one pairing
+      // handler serve both shapes.
+      pin.dataset.commentId = entry.id;
       const offsets = pinOffsets(entry.anchor, host);
       pin.style.left = `${offsets.left}px`;
       pin.style.top = `${offsets.top}px`;
@@ -2006,8 +2404,57 @@ function buildThread(
       });
       pins.appendChild(pin);
     }
+    paintPendingMark(host, pins, marks.target());
     host.appendChild(pins);
   };
+
+  /**
+   * Lights a comment and the thing it points at, together.
+   *
+   * A thread and a document are two views of one set of remarks, and without
+   * this the reader has to hold the pairing in their head: the sidebar says
+   * what was said and the page says where, and nothing joins them.
+   */
+  const pair = (id: string | undefined, on: boolean): void => {
+    if (host === undefined) return;
+    const selector = id === undefined ? null : `[data-comment-id="${id}"]`;
+    if (selector === null) return;
+    for (const root of [host, list]) {
+      for (const found of root.querySelectorAll(selector)) {
+        found.classList.toggle('is-active', on);
+      }
+    }
+  };
+
+  // Delegated rather than bound per row and per mark, because both are
+  // replaced wholesale on every repaint and a listener attached to the old
+  // element would light nothing at all.
+  const bindPairing = (root: HTMLElement): void => {
+    const enter = (event: Event): void => {
+      if (!(event.target instanceof Element)) return;
+      pair(
+        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
+          .commentId,
+        true
+      );
+    };
+    const leave = (event: Event): void => {
+      if (!(event.target instanceof Element)) return;
+      pair(
+        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
+          .commentId,
+        false
+      );
+    };
+    root.addEventListener('mouseover', enter);
+    root.addEventListener('mouseout', leave);
+    // A pin is a button, so it is in the tab order. Pairing on focus keeps a
+    // keyboard reader from being the only one who cannot see the join.
+    root.addEventListener('focusin', enter);
+    root.addEventListener('focusout', leave);
+  };
+
+  bindPairing(list);
 
   const policyLink = (): HTMLElement => {
     const link = document.createElement('a');
@@ -2051,7 +2498,7 @@ function buildThread(
     const heading = document.createElement('h3');
     heading.className = 'compose-title';
     heading.textContent = 'Leave a comment';
-    form.appendChild(heading);
+    form.append(heading, marks.chip);
 
     if (session.kind === 'unknown') {
       form.appendChild(
@@ -2137,6 +2584,7 @@ function buildThread(
     form.append(
       heading,
       identity,
+      marks.chip,
       line('compose-note', IDENTITY_DISCLOSURE),
       policyLink()
     );
@@ -2180,9 +2628,12 @@ function buildThread(
       const draft = {
         body: body.value,
         display_name: name.value.trim().length > 0 ? name.value.trim() : null,
-        anchor: pendingAnchor,
+        anchor: marks.target(),
       };
-      pendingAnchor = null;
+      // The target is spent. Leaving it set would aim the reader's next
+      // comment at the last thing they marked, which is the bug this whole
+      // change exists to remove, one comment later.
+      marks.clear();
       post.disabled = true;
       outcome.replaceChildren(line('thread-note', 'Encrypting and posting.'));
       void postComment(relicId, draft, deps, sealer).then(async (result) => {
@@ -2297,39 +2748,14 @@ function buildThread(
     toggle: toggleOpen,
     attach: (next) => {
       host = next;
+      // Once per stage. A second binding would toggle the class twice on one
+      // pointer crossing, which reads as the pairing not working at all.
+      if (next.dataset.pairBind !== '1') {
+        next.dataset.pairBind = '1';
+        bindPairing(next);
+      }
       paintMarks(lastEntries);
-      if (host.dataset.commentBind === '1') return;
-      host.dataset.commentBind = '1';
-      host.addEventListener('mouseup', () => {
-        const selection = window.getSelection();
-        if (selection === null || selection.isCollapsed) return;
-        if (host === undefined || !host.contains(selection.anchorNode)) return;
-        const quote = selection.toString().trim();
-        if (quote.length === 0) return;
-        pendingAnchor = { kind: 'text', quote };
-        setOpen(true);
-      });
-      host.addEventListener('click', (event) => {
-        if (!(event.target instanceof Element)) return;
-        if (event.target.closest('.comment-pin, .doc, .thread')) return;
-        if (host === undefined) return;
-        const rect = host.getBoundingClientRect();
-        const fraction = pinFraction(
-          {
-            left: rect.left,
-            top: rect.top,
-            scrollLeft: host.scrollLeft,
-            scrollTop: host.scrollTop,
-            scrollWidth: host.scrollWidth,
-            scrollHeight: host.scrollHeight,
-          },
-          event.clientX,
-          event.clientY
-        );
-        if (fraction === undefined) return;
-        pendingAnchor = { kind: 'pin', ...fraction };
-        setOpen(true);
-      });
+      marks.attach(next);
     },
   };
 }
