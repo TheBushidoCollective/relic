@@ -8,6 +8,7 @@ import {
   deadFromProblem,
   load,
   routeFor,
+  routeForClass,
   shareUrlFor,
   type ViewerDeps,
 } from '../src/viewer.ts';
@@ -625,6 +626,18 @@ describe('the declared versus sniffed rule', () => {
     expect(routeFor('x.svg', 'image/svg+xml', svg).route).toBe(
       'sandboxed-html'
     );
+  });
+
+  test("routeForClass('media') routes to in-browser media player", () => {
+    expect(routeForClass('media')).toBe('media');
+  });
+
+  test('media files route to media playback instead of download', () => {
+    const dummy = utf8('fake media content');
+    expect(routeFor('video.mp4', 'video/mp4', dummy).route).toBe('media');
+    expect(routeFor('audio.mp3', 'audio/mpeg', dummy).route).toBe('media');
+    expect(routeFor('clip.webm', 'video/webm', dummy).route).toBe('media');
+    expect(routeFor('track.wav', 'audio/wav', dummy).route).toBe('media');
   });
 });
 

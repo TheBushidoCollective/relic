@@ -51,12 +51,12 @@ import {
 } from './publish.ts';
 import { republish } from './republish.ts';
 
+export type { JsonRpcRequest, JsonRpcResponse };
 export {
   LEGACY_PROTOCOL_VERSIONS,
   PROTOCOL_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
 };
-export type { JsonRpcRequest, JsonRpcResponse };
 
 /**
  * `relic_publish`, prefixed with the product name.

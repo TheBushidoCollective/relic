@@ -1887,8 +1887,9 @@ describe('magic-link identity', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.email).toBe('reader@example.com');
 
+    const link = sent[0]?.link ?? '';
     const followed = await app.fetch(
-      req(new URL(sent[0]!.link).pathname + new URL(sent[0]!.link).search, {
+      req(new URL(link).pathname + new URL(link).search, {
         redirect: 'manual',
       })
     );
@@ -2043,7 +2044,8 @@ describe('magic-link identity', () => {
         body: JSON.stringify({ email: 'reader@example.com' }),
       })
     );
-    const url = new URL(sent[0]!.link);
+    const link = sent[0]?.link ?? '';
+    const url = new URL(link);
     const path = url.pathname + url.search;
 
     const first = await app.fetch(req(path, { redirect: 'manual' }));
@@ -2086,8 +2088,9 @@ describe('magic-link identity', () => {
         }),
       })
     );
+    const link = sent[0]?.link ?? '';
     const followed = await app.fetch(
-      req(new URL(sent[0]!.link).pathname + new URL(sent[0]!.link).search, {
+      req(new URL(link).pathname + new URL(link).search, {
         redirect: 'manual',
       })
     );
@@ -2120,8 +2123,9 @@ describe('magic-link identity', () => {
         }),
       })
     );
+    const link = sent[0]?.link ?? '';
     const followed = await app.fetch(
-      req(new URL(sent[0]!.link).pathname + new URL(sent[0]!.link).search, {
+      req(new URL(link).pathname + new URL(link).search, {
         redirect: 'manual',
       })
     );

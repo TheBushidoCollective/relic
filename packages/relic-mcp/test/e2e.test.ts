@@ -494,7 +494,11 @@ describe('the MCP surface', () => {
       { jsonrpc: '2.0', id: 1, method: 'tools/list' },
       deps
     );
-    const tools = (response?.result as { tools: { name: string }[] }).tools;
+    const result =
+      response && 'result' in response
+        ? (response.result as { tools: { name: string }[] })
+        : { tools: [] };
+    const tools = result.tools;
     expect(tools.map((tool) => tool.name)).toEqual([
       'relic_publish',
       'relic_list',
@@ -555,8 +559,11 @@ describe('the MCP surface', () => {
       },
       deps
     );
-    const text = (response?.result as { content: { text: string }[] })
-      .content[0]?.text as string;
+    const result =
+      response && 'result' in response
+        ? (response.result as { content: { text: string }[] })
+        : { content: [] };
+    const text = result.content[0]?.text as string;
 
     expect(text).toContain('AES-128-GCM');
     expect(text).toContain('RFC 8188');
@@ -715,17 +722,21 @@ describe('the MCP surface', () => {
       },
       deps
     );
-    expect(
-      (legacy?.result as { serverInfo: { name: string } }).serverInfo.name
-    ).toBe('relic');
+    const legacyResult =
+      legacy && 'result' in legacy
+        ? (legacy.result as { serverInfo: { name: string } })
+        : { serverInfo: { name: '' } };
+    expect(legacyResult.serverInfo.name).toBe('relic');
 
     const discover = await handleMessage(
       { jsonrpc: '2.0', id: 2, method: 'server/discover' },
       deps
     );
-    expect(
-      (discover?.result as { protocolVersions: string[] }).protocolVersions
-    ).toContain('2026-07-28');
+    const discoverResult =
+      discover && 'result' in discover
+        ? (discover.result as { protocolVersions: string[] })
+        : { protocolVersions: [] };
+    expect(discoverResult.protocolVersions).toContain('2026-07-28');
   });
 
   test('publish result discloses retained history without changing its structured shape', async () => {
@@ -1217,9 +1228,11 @@ describe('republish refusals', () => {
       },
       deps
     );
-    const relicId = (
-      published?.result as { structuredContent: { relic_id: string } }
-    ).structuredContent.relic_id;
+    const publishedResult =
+      published && 'result' in published
+        ? (published.result as { structuredContent: { relic_id: string } })
+        : { structuredContent: { relic_id: '' } };
+    const relicId = publishedResult.structuredContent.relic_id;
     const stored = await readStoredState();
     const entry = stored.relics[relicId];
     expect(entry).toBeDefined();

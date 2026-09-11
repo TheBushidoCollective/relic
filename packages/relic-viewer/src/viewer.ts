@@ -66,6 +66,7 @@ export type RenderRoute =
   | 'image'
   | 'sandboxed-html'
   | 'sandboxed-jsx'
+  | 'media'
   | 'download';
 
 export interface DeadView {
@@ -699,7 +700,7 @@ export function routeFor(
   };
 }
 
-function routeForClass(cls: RendererClass): RenderRoute {
+export function routeForClass(cls: RendererClass): RenderRoute {
   switch (cls) {
     case 'markdown':
       return 'markdown';
@@ -707,6 +708,8 @@ function routeForClass(cls: RendererClass): RenderRoute {
       return 'code';
     case 'image':
       return 'image';
+    case 'media':
+      return 'media';
     case 'html':
       return 'sandboxed-html';
     case 'jsx':
@@ -714,7 +717,7 @@ function routeForClass(cls: RendererClass): RenderRoute {
       // rather than markup. Never inline on this origin.
       return 'sandboxed-jsx';
     default:
-      // Media, archives, and arbitrary binaries are download-only in the
+      // Archives and arbitrary binaries are download-only in the
       // first release. The framing keeps range decryption available so this
       // can change without a new container.
       return 'download';
