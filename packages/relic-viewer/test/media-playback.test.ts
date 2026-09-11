@@ -64,7 +64,10 @@ class ElementStub {
     this.children.splice(0, this.children.length, ...children);
   }
 
-  addEventListener(event: string, listener: (...args: unknown[]) => void): void {
+  addEventListener(
+    event: string,
+    listener: (...args: unknown[]) => void
+  ): void {
     const list = this.listeners.get(event) ?? [];
     list.push(listener);
     this.listeners.set(event, list);

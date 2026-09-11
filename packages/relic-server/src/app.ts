@@ -1304,7 +1304,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     rawId: string,
     commentId: string,
     request: Request,
-    now: number
+    _now: number
   ): Promise<Response> {
     let relicId: string;
     try {
