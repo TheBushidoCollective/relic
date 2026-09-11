@@ -1665,6 +1665,7 @@ function shell(config: RelicConfig, title: string): Response {
         "script-src 'self'",
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' blob: data:",
+        "media-src 'self' blob: data:",
         // The shell links a manifest, the server serves it, and the service
         // worker precaches it, but a manifest fetch falls back to default-src
         // when manifest-src is absent, so 'none' was refusing it. Observed in

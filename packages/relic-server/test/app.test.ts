@@ -218,6 +218,14 @@ describe('the shell', () => {
       .then((r) => r.headers.get('content-security-policy'));
     expect(csp).toContain("manifest-src 'self'");
   });
+
+  test('permits media blobs rendered by the player, which default-src none refused', async () => {
+    const { id } = await publish();
+    const csp = await app
+      .fetch(req(`/${id}`))
+      .then((r) => r.headers.get('content-security-policy'));
+    expect(csp).toContain("media-src 'self' blob: data:");
+  });
 });
 
 describe('reserved segments beat ids at the router', () => {
