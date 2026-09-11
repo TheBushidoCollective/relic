@@ -759,6 +759,62 @@ body {
   background: var(--surface);
 }
 
+.doc-media {
+  max-width: 52rem;
+  margin: 2rem auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.media-player {
+  max-width: 100%;
+  width: 100%;
+  background: #000;
+  border: 1px solid var(--rule);
+}
+
+.media-video {
+  max-height: 48rem;
+}
+
+.media-audio {
+  background: var(--surface);
+}
+
+.media-meta-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  gap: 1rem;
+}
+
+.media-meta-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.media-meta-name {
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.media-meta-details {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--ink-soft);
+  word-break: break-word;
+}
+
 .doc-html,
 .doc-jsx {
   max-width: none;

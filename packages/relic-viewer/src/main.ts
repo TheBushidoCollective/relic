@@ -836,6 +836,114 @@ function renderDownloadView(view: ReadyView): HTMLElement {
   return wrapper;
 }
 
+const AUDIO_EXTENSIONS: Record<string, true> = {
+  mp3: true,
+  wav: true,
+  aac: true,
+  ogg: true,
+  flac: true,
+  m4a: true,
+  weba: true,
+  opus: true,
+};
+
+function isAudioMedia(mimetype: string, filename: string): boolean {
+  const mime = mimetype.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (mime.startsWith('audio/')) return true;
+  const ext = filename.toLowerCase().split('.').pop() ?? '';
+  return AUDIO_EXTENSIONS[ext] === true;
+}
+
+export function renderMediaView(view: ReadyView): HTMLElement {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'doc doc-media';
+
+  const blob = new Blob([view.content as unknown as BlobPart], {
+    type: view.declaredMimetype,
+  });
+  const blobUrl = URL.createObjectURL(blob);
+
+  let revoked = false;
+  const revoke = (): void => {
+    if (!revoked) {
+      revoked = true;
+      URL.revokeObjectURL(blobUrl);
+    }
+  };
+
+  wrapper.addEventListener('cleanup', revoke);
+
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('unload', revoke, { once: true });
+  }
+
+  if (
+    typeof MutationObserver !== 'undefined' &&
+    typeof document !== 'undefined' &&
+    document.body
+  ) {
+    const observer = new MutationObserver(() => {
+      if (document.contains && !document.contains(wrapper)) {
+        observer.disconnect();
+        revoke();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  const isAudio = isAudioMedia(view.declaredMimetype, view.filename);
+
+  let player: HTMLVideoElement | HTMLAudioElement;
+  if (isAudio) {
+    const audio = document.createElement('audio');
+    audio.className = 'media-player media-audio';
+    audio.controls = true;
+    audio.setAttribute('controls', '');
+    audio.preload = 'metadata';
+    audio.setAttribute('preload', 'metadata');
+    audio.src = blobUrl;
+    player = audio;
+  } else {
+    const video = document.createElement('video');
+    video.className = 'media-player media-video';
+    video.controls = true;
+    video.setAttribute('controls', '');
+    video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.preload = 'metadata';
+    video.setAttribute('preload', 'metadata');
+    video.src = blobUrl;
+    player = video;
+  }
+
+  wrapper.appendChild(player);
+
+  const strip = document.createElement('div');
+  strip.className = 'media-meta-strip';
+
+  const info = document.createElement('div');
+  info.className = 'media-meta-info';
+
+  const name = document.createElement('span');
+  name.className = 'media-meta-name';
+  name.textContent = view.filename.length > 0 ? view.filename : 'Untitled';
+
+  const details = document.createElement('span');
+  details.className = 'media-meta-details';
+  details.textContent = `${view.declaredMimetype} · ${formatBytes(view.content.length)}`;
+
+  info.append(name, details);
+
+  const downloadBtn = button('Download', ICONS.download, () =>
+    downloadContent(view)
+  );
+
+  strip.append(info, downloadBtn);
+  wrapper.appendChild(strip);
+
+  return wrapper;
+}
+
 export function buildCurrentStage(
   view: ReadyView,
   usercontentOrigin: string
@@ -861,6 +969,9 @@ export function buildCurrentStage(
       break;
     case 'image':
       main.appendChild(renderImageView(view));
+      break;
+    case 'media':
+      main.appendChild(renderMediaView(view));
       break;
     case 'sandboxed-html':
       main.appendChild(renderSandboxedHtml(view, usercontentOrigin));
