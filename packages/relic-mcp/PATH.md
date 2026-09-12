@@ -75,3 +75,32 @@ RELISTED opens_spent=0
 NO_TOKEN_IN_OUTPUT true
 INVENTORY_PATH_OK
 ```
+
+## The unfurl card a pasted link produces
+
+Run from the repository root, after `bun run --cwd packages/relic-viewer build`:
+
+```bash
+bun packages/relic-mcp/test/unfurl-card-path.ts
+```
+
+The command puts the real app server on a loopback socket serving the real
+built viewer assets, publishes through `relic_publish` with no title argument
+so the filename becomes the title, and reads the served head over HTTP. It
+asserts the Open Graph and Twitter block lands after the character-set
+declaration and before the first `link` or `script` tag, because an unfurler
+range-fetches the head and metadata outside that range produces no card at
+all. It then publishes the same file with an empty title and proves the name
+reaches no field on the relic row, fetches the card image and reads 1200x630
+out of its PNG header, and confirms neither shell fetch spent an open.
+Success ends with:
+
+```text
+PUBLISHED relic_id=<id> title=quarterly-review.md
+HEAD_ORDER charset=<n> og=<n> twitter=<n> title=<n> link=<n> script=<n>
+CARD_TITLE og:title=quarterly-review.md title=… · Relic
+DECLINED relic_id=<id> row_title=absent card=constant
+CARD_IMAGE bytes=<n> dimensions=1200x630 cache=immutable
+NO_MINT opens_spent=0 mint_log=0
+UNFURL_CARD_PATH_OK
+```

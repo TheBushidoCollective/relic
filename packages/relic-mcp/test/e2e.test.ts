@@ -288,7 +288,7 @@ describe('the whole loop', () => {
     expect([...(viewed.opened?.content ?? [])]).toEqual([...big]);
   });
 
-  test('the filename override reaches the envelope, not the server', async () => {
+  test('the filename override reaches the envelope, and the server as the title', async () => {
     writeFile('/work/tmp-xyz.md', 'hello');
     const result = await publish(
       { path: 'tmp-xyz.md', filename: 'Q3-layoffs-final.md' },
@@ -301,10 +301,37 @@ describe('the whole loop', () => {
       'Q3-layoffs-final.md'
     );
 
-    // The server must hold nothing finer than the class and the client name.
+    // This assertion was the reverse of itself until the plaintext title
+    // landed, and `Q3-layoffs-final.md` was the example that argued against
+    // it. The reversal is deliberate and it is bounded: the name crosses as
+    // the title and nowhere else on the row, and the local path it was read
+    // from still never crosses at all.
     const row = await app.store.getRelic(result.relic_id);
+    expect(row?.title).toBe('Q3-layoffs-final.md');
+    expect(JSON.stringify(row)).not.toContain('tmp-xyz');
+  });
+
+  test('an empty title keeps the name off the server entirely', async () => {
+    writeFile('/work/tmp-xyz.md', 'hello');
+    const result = await publish(
+      { path: 'tmp-xyz.md', filename: 'Q3-layoffs-final.md', title: '' },
+      deps
+    );
+
+    now += 10 * 60 * 1000;
+    const viewed = await open(result.url);
+    // The envelope still carries it, because that is inside the ciphertext.
+    expect(viewed.opened?.envelope.entries[0]?.filename).toBe(
+      'Q3-layoffs-final.md'
+    );
+
+    // The opt-out is the whole defence for defaulting the title to the
+    // filename, so it is proven at the row rather than at the argument.
+    const row = await app.store.getRelic(result.relic_id);
+    expect(row?.title).toBeUndefined();
     expect(JSON.stringify(row)).not.toContain('Q3-layoffs-final');
     expect(JSON.stringify(row)).not.toContain('tmp-xyz');
+    expect(result.title).toBeNull();
   });
 });
 
@@ -332,15 +359,18 @@ describe('what the server never learns', () => {
     expect(new TextDecoder().decode(stored)).not.toContain(secret);
   });
 
-  test('the server stores the class and the client name, and nothing finer', async () => {
+  test('the server stores the class, the client name, and the title, and nothing finer', async () => {
     writeFile('/work/notes.md', 'hello');
     const result = await publish({ path: 'notes.md' }, deps);
 
     const row = await app.store.getRelic(result.relic_id);
     expect(row?.rendererClass).toBe('markdown');
     expect(row?.publishingClient).toBe('relic-mcp/0.1.0 (test)');
+    // The title is the filename by default and it is the only place the name
+    // appears. The declared mimetype is still barred outright: it lives in
+    // the encrypted envelope header and has no reason to cross.
+    expect(row?.title).toBe('notes.md');
     expect(JSON.stringify(row)).not.toContain('text/markdown');
-    expect(JSON.stringify(row)).not.toContain('notes.md');
   });
 });
 
