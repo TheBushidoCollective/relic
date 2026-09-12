@@ -49,6 +49,12 @@ export interface RelicRow {
   objectCrc32c?: string | undefined;
   /** Mints consumed against the per-relic cap, across all versions. */
   mintsUsed: number;
+  /**
+   * The one plaintext field about a relic the service holds. Publisher-declared,
+   * stored in the clear so previews show a human-chosen name rather than a
+   * blank card. A removal must take it with the row.
+   */
+  title?: string | undefined;
 }
 
 export interface Tombstone {
@@ -196,7 +202,8 @@ export interface RelicStore {
   beginVersion(
     id: string,
     rendererClass: RendererClass,
-    declaredSizeBytes: number
+    declaredSizeBytes: number,
+    titleUpdate?: { readonly title: string | undefined }
   ): Promise<RelicRow | undefined>;
 
   getTombstone(id: string): Promise<Tombstone | undefined>;
@@ -262,10 +269,12 @@ export class MemoryStore implements RelicStore {
   async beginVersion(
     id: string,
     rendererClass: RendererClass,
-    declaredSizeBytes: number
+    declaredSizeBytes: number,
+    titleUpdate?: { readonly title: string | undefined }
   ): Promise<RelicRow | undefined> {
     const row = this.relics.get(id);
     if (row === undefined) return undefined;
+    const nextTitle = titleUpdate !== undefined ? titleUpdate.title : row.title;
     const next: RelicRow = {
       ...row,
       version: row.version + 1,
@@ -274,6 +283,7 @@ export class MemoryStore implements RelicStore {
       publishedAt: undefined,
       objectLength: undefined,
       objectCrc32c: undefined,
+      title: nextTitle,
     };
     this.relics.set(id, next);
     return next;

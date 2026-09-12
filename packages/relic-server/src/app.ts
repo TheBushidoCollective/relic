@@ -18,6 +18,7 @@ import {
   encryptedSize,
   InvalidRelicIdError,
   isRendererClass,
+  isStorableTitle,
   MAX_HEADER_BYTES,
   parseRelicId,
   RESERVED_SEGMENTS,
@@ -115,7 +116,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
 
     if (segments.length === 1 && head !== undefined) {
       // The shell only. No mint, no counter, no cap.
-      return shell(config, head);
+      return shell(config, head, store, now);
     }
 
     return new Response('Not found', { status: 404 });
@@ -225,6 +226,17 @@ export function createApp(options: AppOptions = {}): RelicApp {
 
     const asset = await assets.get(name);
     if (asset === undefined) return new Response('Not found', { status: 404 });
+
+    if (name.endsWith('.png')) {
+      return new Response(asset.body as unknown as BodyInit, {
+        headers: {
+          'content-type': asset.contentType,
+          'cache-control': 'public, max-age=31536000, immutable',
+          'referrer-policy': 'no-referrer',
+          'x-content-type-options': 'nosniff',
+        },
+      });
+    }
 
     return textResponse(asset.body, request, {
       'content-type': asset.contentType,
@@ -462,6 +474,21 @@ export function createApp(options: AppOptions = {}): RelicApp {
       return refuse('invalid_publish_metadata', { relic_id: relicId });
     }
 
+    let title: string | undefined;
+    if ('title' in body && body['title'] !== undefined) {
+      if (typeof body['title'] !== 'string') {
+        return refuse('invalid_publish_metadata', { relic_id: relicId });
+      }
+      const trimmed = body['title'].trim();
+      if (trimmed.length === 0) {
+        title = undefined;
+      } else if (!isStorableTitle(trimmed)) {
+        return refuse('invalid_publish_metadata', { relic_id: relicId });
+      } else {
+        title = trimmed;
+      }
+    }
+
     const declared = Number(body['declared_size_bytes']);
     if (!Number.isSafeInteger(declared) || declared < 0) {
       return refuse('invalid_publish_metadata', { relic_id: relicId });
@@ -519,6 +546,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       version: 1,
       publishTokenHash: await sha256Hex(publishToken),
       mintsUsed: 0,
+      title,
     });
 
     // The grant signs the object's exact byte length, so the upload has to be
@@ -655,6 +683,21 @@ export function createApp(options: AppOptions = {}): RelicApp {
       return refuse('invalid_publish_metadata', { relic_id: relicId });
     }
 
+    let titleUpdate: { readonly title: string | undefined } | undefined;
+    if ('title' in body && body['title'] !== undefined) {
+      if (typeof body['title'] !== 'string') {
+        return refuse('invalid_publish_metadata', { relic_id: relicId });
+      }
+      const trimmed = body['title'].trim();
+      if (trimmed.length === 0) {
+        titleUpdate = { title: undefined };
+      } else if (!isStorableTitle(trimmed)) {
+        return refuse('invalid_publish_metadata', { relic_id: relicId });
+      } else {
+        titleUpdate = { title: trimmed };
+      }
+    }
+
     const declared = Number(body['declared_size_bytes']);
     if (!Number.isSafeInteger(declared) || declared < 0) {
       return refuse('invalid_publish_metadata', { relic_id: relicId });
@@ -693,7 +736,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
     const next = await store.beginVersion(
       relicId,
       rendererClass as RendererClass,
-      declared
+      declared,
+      titleUpdate
     );
     if (next === undefined) {
       return refuse('relic_not_found', { relic_id: relicId });
@@ -1637,23 +1681,89 @@ function relicExpiryIso(epochMillis: number | undefined): string | null {
   return epochMillis === undefined ? null : iso(epochMillis);
 }
 
-function shell(config: RelicConfig, title: string): Response {
+const CARD_DESCRIPTION =
+  'An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.';
+
+const CARD_IMAGE_ALT =
+  "Relic's accession label with an empty field stack: a relic's record with nothing filled in.";
+
+const FALLBACK_TITLE = 'A relic';
+
+async function shell(
+  config: RelicConfig,
+  relicId: string,
+  store?: RelicStore,
+  now = Date.now()
+): Promise<Response> {
   // A static shell. No mint happens here, which is what keeps non-executing
   // link fetchers off the open counter and the download cap.
+  let storedTitle: string | undefined;
+  let canonicalId: string | undefined;
+
+  try {
+    canonicalId = parseRelicId(relicId);
+  } catch {
+    canonicalId = undefined;
+  }
+
+  if (store !== undefined && canonicalId !== undefined) {
+    try {
+      const tombstone = await store.getTombstone(canonicalId);
+      if (tombstone === undefined) {
+        const row = await store.getRelic(canonicalId);
+        if (row !== undefined) {
+          const isExpired = row.expiresAt !== undefined && now >= row.expiresAt;
+          if (!isExpired && row.title !== undefined && row.title.length > 0) {
+            storedTitle = row.title;
+          }
+        }
+      }
+    } catch {
+      // A store read failure must still serve the shell with the constant card,
+      // never a 500.
+      storedTitle = undefined;
+    }
+  }
+
+  const serviceOrigin = config.serviceOrigin.replace(/\/+$/, '');
+  const ogUrl =
+    canonicalId !== undefined
+      ? `${serviceOrigin}/${canonicalId}`
+      : `${serviceOrigin}/`;
+  const ogImage = `${serviceOrigin}/assets/card.v1.png`;
+  const cardTitle = storedTitle ?? FALLBACK_TITLE;
+  const documentTitle =
+    storedTitle !== undefined ? `${storedTitle} · Relic` : 'Relic';
+
   const body = `<!doctype html>
 <meta charset="utf-8">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Relic">
+<meta property="og:title" content="${escapeHtml(cardTitle)}">
+<meta property="og:description" content="${escapeHtml(CARD_DESCRIPTION)}">
+<meta property="og:url" content="${escapeHtml(ogUrl)}">
+<meta property="og:image" content="${escapeHtml(ogImage)}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${escapeHtml(CARD_IMAGE_ALT)}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${escapeHtml(cardTitle)}">
+<meta name="twitter:description" content="${escapeHtml(CARD_DESCRIPTION)}">
+<meta name="twitter:image" content="${escapeHtml(ogImage)}">
+<title>${escapeHtml(documentTitle)}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1f6b64">
-<title>Relic</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/styles.css">
-<div id="relic-root" data-relic-id="${escapeHtml(title)}" data-usercontent-origin="${escapeHtml(
+<div id="relic-root" data-relic-id="${escapeHtml(relicId)}" data-usercontent-origin="${escapeHtml(
     new URL(config.usercontentOrigin).origin
   )}"></div>
 <script type="module" src="/assets/viewer.js"></script>
 <script type="module" src="/assets/register-sw.js"></script>
 `;
+
   return new Response(body, {
     headers: {
       'content-type': 'text/html; charset=utf-8',
@@ -1666,11 +1776,6 @@ function shell(config: RelicConfig, title: string): Response {
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' blob: data:",
         "media-src 'self' blob: data:",
-        // The shell links a manifest, the server serves it, and the service
-        // worker precaches it, but a manifest fetch falls back to default-src
-        // when manifest-src is absent, so 'none' was refusing it. Observed in
-        // production as Chrome reporting a csp-blocked request of type
-        // Manifest, which means the install path has never worked.
         "manifest-src 'self'",
         `connect-src 'self' ${new URL(config.serviceOrigin).origin} https:`,
         `frame-src ${new URL(config.usercontentOrigin).origin}`,
@@ -2004,7 +2109,9 @@ site data for this origin removes every remembered key.
   serves the contexts it was built for.
 - **Open activity, correlated with the publishing IP address.** Upload IP and
   timestamp are retained for abuse response regardless.
-
+- **A title, in the clear.** The publishing tool defaults it to your
+  filename. We store it, the relic's page carries it in its metadata, and
+  every link preview shows it.
 This moves us from knowing nothing to knowing what kind of thing you published
 and roughly how often it was fetched. It is metadata. It is never content.
 
@@ -2015,6 +2122,21 @@ the class, we learn something like "an image of roughly 2.4 MB". We do not pad
 to size buckets, because that cost is paid in egress by every recipient on
 every fetch, forever.
 
+## The title is not encrypted
+
+A relic carries a plaintext title so that a pasted link previews as something
+legible rather than as a blank card on an unfamiliar domain, which is what a
+phishing link looks like. The publishing tool defaults that title to your
+filename.
+
+It is the one thing about your relic that anyone who fetches the link can read
+without the key: the chat client drawing a preview, a mail scanner following
+the URL, a crawler that ignores our robots file, and us. **If the name is the
+sensitive part, publish without a title.** The content is unaffected either
+way; it is encrypted before it leaves your machine.
+
+A relic that is removed or has expired stops serving its title with the rest
+of it.
 ## The key enters your AI session transcript
 
 The publish tool returns the full URL including the fragment, because handing

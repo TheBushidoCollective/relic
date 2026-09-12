@@ -146,6 +146,84 @@ describe('gcsStore', () => {
     expect(found?.rendererClass).toBe('html');
   });
 
+  test('a relic title survives being written and read back', async () => {
+    const store = storeOn(fakeGcs());
+    await store.putRelic(row({ title: 'GCS Title' }));
+
+    const found = await store.getRelic('gdk6rpv49hftg5216ev7dejesc');
+    expect(found?.title).toBe('GCS Title');
+  });
+
+  test('rows written without a title key read back with title undefined', async () => {
+    const gcs = fakeGcs();
+    const legacyRowJson = JSON.stringify({
+      id: 'gdk6rpv49hftg5216ev7dejesc',
+      publishIp: '203.0.113.7',
+      grantedAt: 1000,
+      expiresAt: 9_000_000,
+      rendererClass: 'html',
+      publishingClient: 'relic-mcp',
+      declaredSizeBytes: 1024,
+      version: 1,
+      publishTokenHash: 'f'.repeat(64),
+      mintsUsed: 0,
+    });
+    await gcs.fetch(
+      'https://gcs.test/upload/storage/v1/b/relics/o?name=m%2Frelic%2Fgdk6rpv49hftg5216ev7dejesc.json',
+      {
+        method: 'POST',
+        body: legacyRowJson,
+      }
+    );
+    const store = storeOn(gcs);
+    const found = await store.getRelic('gdk6rpv49hftg5216ev7dejesc');
+    expect(found?.id).toBe('gdk6rpv49hftg5216ev7dejesc');
+    expect(found?.title).toBeUndefined();
+  });
+
+  test('beginVersion preserves, clears, or replaces title across generations', async () => {
+    const store = storeOn(fakeGcs());
+    await store.putRelic(row({ title: 'Original Title' }));
+
+    // Absent titleUpdate leaves stored title unchanged
+    const v2 = await store.beginVersion(
+      'gdk6rpv49hftg5216ev7dejesc',
+      'html',
+      2048
+    );
+    expect(v2?.version).toBe(2);
+    expect(v2?.title).toBe('Original Title');
+
+    const readV2 = await store.getRelic('gdk6rpv49hftg5216ev7dejesc');
+    expect(readV2?.title).toBe('Original Title');
+
+    // titleUpdate with title: undefined clears the title
+    const v3 = await store.beginVersion(
+      'gdk6rpv49hftg5216ev7dejesc',
+      'html',
+      4096,
+      { title: undefined }
+    );
+    expect(v3?.version).toBe(3);
+    expect(v3?.title).toBeUndefined();
+
+    const readV3 = await store.getRelic('gdk6rpv49hftg5216ev7dejesc');
+    expect(readV3?.title).toBeUndefined();
+
+    // titleUpdate with a new title replaces it
+    const v4 = await store.beginVersion(
+      'gdk6rpv49hftg5216ev7dejesc',
+      'html',
+      8192,
+      { title: 'Replaced Title' }
+    );
+    expect(v4?.version).toBe(4);
+    expect(v4?.title).toBe('Replaced Title');
+
+    const readV4 = await store.getRelic('gdk6rpv49hftg5216ev7dejesc');
+    expect(readV4?.title).toBe('Replaced Title');
+  });
+
   // The whole point of the change: a second reader is a different instance.
   test('a second store over the same bucket sees the relic', async () => {
     const gcs = fakeGcs();

@@ -208,7 +208,8 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
     async beginVersion(
       id: string,
       rendererClass: RendererClass,
-      declaredSizeBytes: number
+      declaredSizeBytes: number,
+      titleUpdate?: { readonly title: string | undefined }
     ): Promise<RelicRow | undefined> {
       return mutateRelic(id, (row) => ({
         ...row,
@@ -218,6 +219,7 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         publishedAt: undefined,
         objectLength: undefined,
         objectCrc32c: undefined,
+        title: titleUpdate !== undefined ? titleUpdate.title : row.title,
       }));
     },
 
