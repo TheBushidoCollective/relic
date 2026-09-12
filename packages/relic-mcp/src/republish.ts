@@ -15,6 +15,7 @@ import {
   deriveRendererClass,
   encryptRelic,
   isValidRelicId,
+  normalizeTitle,
   type RendererClass,
 } from '@relic/format';
 import {
@@ -37,6 +38,11 @@ export interface RepublishInput {
   readonly path: string;
   readonly filename?: string | undefined;
   /**
+   * Optional plaintext title for the new version. Defaults to the new
+   * version's filename. Pass "" to clear the relic's title.
+   */
+  readonly title?: string | undefined;
+  /**
    * Forwarded on the republish body when set and omitted when unset, the
    * grant's own convention. A relic's lifetime is fixed at its first grant,
    * so the service does not read it here today; carrying it keeps the
@@ -58,6 +64,11 @@ export interface RepublishResult {
   readonly relic_expires_at: string | null;
   readonly renderer_class: RendererClass;
   readonly filename: string;
+  /**
+   * Stored by the service in the clear for link previews. Null when cleared
+   * or published without a title.
+   */
+  readonly title: string | null;
   readonly resolved_path: string;
   readonly report_url: string;
   readonly disclosure_url: string;
@@ -108,7 +119,7 @@ export async function republish(
 
   const source = await readSource(input.path, deps.files);
   const filename = input.filename ?? source.basename;
-
+  const normalizedTitle = normalizeTitle(input.title ?? filename);
   // Same rule as a first publish: the class comes from bytes in hand, never
   // from a tool input, so the taxonomy stays machine-attested.
   const rendererClass = deriveRendererClass(source.bytes, filename);
@@ -135,6 +146,7 @@ export async function republish(
       renderer_class: rendererClass,
       declared_size_bytes: source.bytes.length,
       declared_ciphertext_bytes: container.length,
+      title: normalizedTitle,
       ...(input.ttl_days === undefined ? {} : { ttl_days: input.ttl_days }),
     }
   );
@@ -184,6 +196,7 @@ export async function republish(
         : String(grant['relic_expires_at']),
     renderer_class: rendererClass,
     filename,
+    title: normalizedTitle.length === 0 ? null : normalizedTitle,
     resolved_path: source.resolvedPath,
     report_url: String(grant['report_url']),
     disclosure_url: String(grant['disclosure_url']),

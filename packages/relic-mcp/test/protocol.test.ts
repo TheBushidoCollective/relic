@@ -206,6 +206,8 @@ describe('the handshake carries instructions', () => {
   const facts = [
     // The link is the credential.
     /credential/i,
+    // A relic carries an unencrypted plaintext title.
+    /plaintext title/i,
     // The key reaches the transcript on every publish.
     /transcript/i,
     // A fresh publish costs a second URL, and local lookup recovers the id.
@@ -243,9 +245,9 @@ describe('the handshake carries instructions', () => {
   test('stay short, because they cost context every session', async () => {
     const { INSTRUCTIONS } = await import('../src/server.ts');
     // The ceiling moved once, from 1200, when comments added a sixth item.
-    // Six items is the budget: what it buys is an agent that knows comments
-    // exist, and an agent never told never reads one. A seventh item is a
-    // reason to cut, not a reason to move this number again.
+    // When the title disclosure added a seventh item, it was paid for by
+    // tightening the list rather than by moving the number, and the number
+    // has still never moved twice.
     expect(INSTRUCTIONS.length).toBeLessThan(1400);
   });
 
@@ -260,6 +262,7 @@ describe('the handshake carries instructions', () => {
     expect(skill).toMatch(/transcript/i);
     expect(skill).toMatch(/second URL/i);
     expect(skill).toMatch(/relic_lookup_source/);
+    expect(skill).toMatch(/plaintext title/i);
     expect(skill).toMatch(/no network access/i);
     expect(skill).toMatch(/machine that published/i);
     expect(skill).toMatch(/every version it has ever held/i);
