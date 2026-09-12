@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   encodeKey,
+  MAX_TITLE_CHARS,
   openRelic,
   parseFragment,
   parseRelicId,
@@ -28,7 +29,9 @@ import {
 } from '../src/publish.ts';
 import { republish } from '../src/republish.ts';
 import {
+  describeClient,
   handleMessage,
+  INSTRUCTIONS,
   REPUBLISH_TOOL_DEFINITION,
   REPUBLISH_TOOL_NAME,
   TOOL_DEFINITION,
@@ -548,6 +551,9 @@ describe('the MCP surface', () => {
     expect(result.structuredContent['plaintext_transmitted_to_service']).toBe(
       false
     );
+    expect(result.structuredContent['plaintext_title']).toBe(
+      'relic title, defaulting to the source filename, stored by the service in the clear and shown by every link preview'
+    );
   });
   test('describe_client states the transcript leak, not just the good news', async () => {
     const response = await handleMessage(
@@ -576,6 +582,7 @@ describe('the MCP surface', () => {
     expect(Object.keys(schema.properties)).toEqual([
       'path',
       'filename',
+      'title',
       'ttl_days',
       'force_new',
     ]);
@@ -771,6 +778,7 @@ describe('the MCP surface', () => {
       'renderer_class',
       'report_url',
       'resolved_path',
+      'title',
       'url',
       'version',
     ]);
@@ -839,6 +847,7 @@ describe('republish', () => {
       'relic_id',
       'path',
       'filename',
+      'title',
       'ttl_days',
     ]);
     expect(schema.required).toEqual(['relic_id', 'path']);
@@ -897,6 +906,7 @@ describe('republish', () => {
       'renderer_class',
       'report_url',
       'resolved_path',
+      'title',
       'version',
     ]);
   });
@@ -1305,6 +1315,203 @@ describe('guessMimetype', () => {
     expect(guessMimetype('a.wat', 'code')).toBe('text/plain');
     expect(guessMimetype('noextension', 'binary')).toBe(
       'application/octet-stream'
+    );
+  });
+});
+
+describe('plaintext title in link previews', () => {
+  test('a publish with no title argument sends the normalized filename on the grant body', async () => {
+    writeFile('/work/my document.md', '# hello');
+    const grants: Record<string, unknown>[] = [];
+
+    const result = await publish(
+      { path: 'my document.md' },
+      { ...deps, fetch: captureGrants(grants) }
+    );
+
+    expect(grants).toHaveLength(1);
+    // Asserted against the captured request body, not the result.
+    expect(grants[0]?.['title']).toBe('my document.md');
+    expect(result.title).toBe('my document.md');
+  });
+
+  test('an explicit title overrides the filename and is normalized', async () => {
+    writeFile('/work/report.md', '# content');
+
+    const longTitle = `Line 1\nLine 2 ${'a'.repeat(200)}`;
+    const result = await publish({ path: 'report.md', title: longTitle }, deps);
+
+    // Newline collapses to a space, and length truncates to MAX_TITLE_CHARS.
+    expect(result.title).toHaveLength(MAX_TITLE_CHARS);
+    expect(result.title?.startsWith('Line 1 Line 2 a')).toBe(true);
+    expect(result.title).not.toContain('\n');
+    expect(result.title).not.toBe(longTitle);
+  });
+
+  test('title: "" sends "" and reports title: null on both publish and republish', async () => {
+    writeFile('/work/secret.md', '# confidential');
+    const grants: Record<string, unknown>[] = [];
+
+    const pubResult = await publish(
+      { path: 'secret.md', title: '' },
+      { ...deps, fetch: captureGrants(grants) }
+    );
+
+    expect(grants).toHaveLength(1);
+    expect(grants[0]?.['title']).toBe('');
+    expect(pubResult.title).toBeNull();
+
+    const republishBodies: Record<string, unknown>[] = [];
+    const uploads: string[] = [];
+
+    const repubResult = await republish(
+      { relic_id: pubResult.relic_id, path: 'secret.md', title: '' },
+      { ...deps, fetch: captureRepublish(republishBodies, uploads) }
+    );
+
+    expect(republishBodies).toHaveLength(1);
+    expect(republishBodies[0]?.['title']).toBe('');
+    expect(repubResult.title).toBeNull();
+  });
+
+  test('the publish result text names the title and how to suppress it, and the untitled result text says it went out untitled', async () => {
+    writeFile('/work/notes.md', '# notes');
+
+    // Titled publish.
+    const resp1 = await handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'relic_publish',
+          arguments: { path: 'notes.md', title: 'Important Report' },
+        },
+      },
+      deps
+    );
+    const result1 = resp1?.result as {
+      content: { text: string }[];
+      structuredContent: { relic_id: string };
+    };
+    const text1 = result1.content[0]?.text ?? '';
+    expect(text1).toContain(
+      'The title "Important Report" is not encrypted: the service stores it and every link preview shows it. Pass an empty title to publish without one.'
+    );
+
+    // Untitled publish.
+    const resp2 = await handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'relic_publish',
+          arguments: { path: 'notes.md', title: '', force_new: true },
+        },
+      },
+      deps
+    );
+    const result2 = resp2?.result as { content: { text: string }[] };
+    const text2 = result2.content[0]?.text ?? '';
+    expect(text2).toContain(
+      'Published without a title, so a link preview shows only that it is a relic.'
+    );
+
+    // Titled republish.
+    const relicId = result1.structuredContent.relic_id;
+    const resp3 = await handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'relic_republish',
+          arguments: {
+            relic_id: relicId,
+            path: 'notes.md',
+            title: 'Updated Report',
+          },
+        },
+      },
+      deps
+    );
+    const result3 = resp3?.result as { content: { text: string }[] };
+    const text3 = result3.content[0]?.text ?? '';
+    expect(text3).toContain(
+      'The title "Updated Report" is not encrypted: the service stores it and every link preview shows it. Pass an empty title to publish without one.'
+    );
+
+    // Untitled republish.
+    const resp4 = await handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: {
+          name: 'relic_republish',
+          arguments: { relic_id: relicId, path: 'notes.md', title: '' },
+        },
+      },
+      deps
+    );
+    const result4 = resp4?.result as { content: { text: string }[] };
+    const text4 = result4.content[0]?.text ?? '';
+    expect(text4).toContain(
+      'Published without a title, so a link preview shows only that it is a relic.'
+    );
+  });
+
+  test('describeClient() no longer contains the string Not your filename and does say the title is stored in the clear', () => {
+    const desc = describeClient(deps);
+    expect(desc).not.toContain('Not your filename');
+    expect(desc).toContain('stored in the clear');
+  });
+
+  test('INSTRUCTIONS carries the title fact', () => {
+    expect(INSTRUCTIONS).toMatch(/plaintext title/i);
+    expect(INSTRUCTIONS).toContain('A relic carries a plaintext title');
+  });
+
+  test('validates that title must be a string if provided', async () => {
+    writeFile('/work/notes.md', '# notes');
+
+    const pubResp = await handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'tools/call',
+        params: {
+          name: 'relic_publish',
+          arguments: { path: 'notes.md', title: 123 },
+        },
+      },
+      deps
+    );
+    expect(pubResp?.error?.code).toBe(-32602);
+    expect(pubResp?.error?.message).toContain(
+      '`title` must be a string or omitted'
+    );
+
+    const repubResp = await handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 11,
+        method: 'tools/call',
+        params: {
+          name: 'relic_republish',
+          arguments: {
+            relic_id: '0123456789abcdefghjkmnpqst',
+            path: 'notes.md',
+            title: true,
+          },
+        },
+      },
+      deps
+    );
+    expect(repubResp?.error?.code).toBe(-32602);
+    expect(repubResp?.error?.message).toContain(
+      '`title` must be a string or omitted'
     );
   });
 });

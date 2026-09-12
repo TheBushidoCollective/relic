@@ -47,6 +47,10 @@ every version.
 Optional arguments worth knowing:
 
 - `filename` overrides the display name shown to the recipient.
+- `title` sets a plaintext title shown in link previews and in the browser
+  tab. It defaults to `filename`. It is NOT encrypted: the service stores it
+  and anyone who fetches the link sees it, with or without the key. Pass `""`
+  to publish without a title.
 - `ttl_days` gives the link a lifetime in days, 1 to 3650. A relic is kept
   until it is deleted unless you set one. Shorter is better for anything
   sensitive: when the content should stop being available, say when.
@@ -114,7 +118,8 @@ The new file becomes version 2, then 3, and so on, encrypted under the same
 key as version 1. **The share URL does not change**: everyone holding the
 existing link now sees the new content, and there is no new link to hand out.
 `relic_id` is the 26-character id the original publish returned, not the URL.
-Optional `filename` overrides the display name in the new version.
+Optional `filename` overrides the display name in the new version; optional
+`title` replaces the plaintext title (pass `""` to remove it).
 
 Two things to know before promising an update:
 
