@@ -193,6 +193,9 @@ export const TOOL_DEFINITION = {
     'so the existing URL keeps working. ' +
     VERSION_HISTORY_DISCLOSURE +
     ' The encryption key is generated locally and never sent to the service. ' +
+    'The relic carries a plaintext title, which defaults to the filename and ' +
+    'is NOT encrypted: the service stores it and every link preview shows ' +
+    'it. Pass an empty string to publish without one. ' +
     'Takes a filesystem path, never ' +
     'inline content.',
   inputSchema: {
@@ -207,6 +210,14 @@ export const TOOL_DEFINITION = {
         description:
           'Optional. Overrides the name written into the encrypted envelope ' +
           'header. Defaults to the basename of `path`.',
+      },
+      title: {
+        type: 'string',
+        description:
+          'Optional. A plaintext title for the relic, shown in link previews ' +
+          'and in the browser tab. Defaults to the filename. NOT encrypted: ' +
+          'the service stores it and anyone who fetches the link sees it, ' +
+          'with or without the key. Pass "" to publish without a title.',
       },
       ttl_days: {
         type: 'integer',
@@ -242,6 +253,7 @@ export const TOOL_DEFINITION = {
       relic_expires_at: { type: ['string', 'null'] },
       renderer_class: { type: 'string' },
       filename: { type: 'string' },
+      title: { type: ['string', 'null'] },
       resolved_path: { type: 'string' },
       report_url: { type: 'string' },
       disclosure_url: { type: 'string' },
@@ -253,6 +265,7 @@ export const TOOL_DEFINITION = {
       'relic_expires_at',
       'renderer_class',
       'filename',
+      'title',
       'resolved_path',
       'report_url',
       'disclosure_url',
@@ -288,6 +301,12 @@ export const REPUBLISH_TOOL_DEFINITION = {
           'Optional. Overrides the name written into the encrypted envelope ' +
           'header of the new version. Defaults to the basename of `path`.',
       },
+      title: {
+        type: 'string',
+        description:
+          "Optional. Replaces the relic's plaintext title. Defaults to " +
+          'the new version\'s filename. Pass "" to remove the title.',
+      },
       ttl_days: {
         type: 'integer',
         minimum: 1,
@@ -313,6 +332,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
       relic_expires_at: { type: ['string', 'null'] },
       renderer_class: { type: 'string' },
       filename: { type: 'string' },
+      title: { type: ['string', 'null'] },
       resolved_path: { type: 'string' },
       report_url: { type: 'string' },
       disclosure_url: { type: 'string' },
@@ -323,6 +343,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
       'relic_expires_at',
       'renderer_class',
       'filename',
+      'title',
       'resolved_path',
       'report_url',
       'disclosure_url',
@@ -860,12 +881,12 @@ export const CAPABILITIES = { tools: {} } as const;
  * The plugin ships a skill with the same facts, but a skill only reaches
  * Claude Code, and only when somebody installs the plugin rather than wiring
  * this server directly. Every other client saw tool descriptions and nothing
- * else, which left six things an agent cannot read off a schema.
+ * else, which left seven things an agent cannot read off a schema.
  *
- * Item five is one of the two reasons this exists at all rather than living
+ * Item six is one of the two reasons this exists at all rather than living
  * only in a tool result. The publish result arrives after the file is
  * written, which is too late for an agent that already linked a stylesheet
- * from a CDN. Item six is the other: an agent that never learns comments
+ * from a CDN. Item seven is the other: an agent that never learns comments
  * exist never reads one. Both land before the work, which is the only moment
  * either can be acted on.
  *
@@ -876,26 +897,25 @@ export const INSTRUCTIONS = `Relic encrypts a file on this machine and uploads \
 only ciphertext. The key lives in the URL fragment, which browsers never send \
 to a server.
 
-Six things that change how you should act:
+Seven things that change how you should act:
 
-1. The link is the credential. Anyone holding it, fragment included, can read \
-the file. Do not paste it into a tracker, a log, or a public channel.
-2. Publishing puts the key in this transcript. That is structural, and worth \
-saying plainly when you hand the link over.
-3. relic_list shows every relic published from here; relic_lookup_source \
-finds one only from the file it came from. relic_show reads what a link holds \
-now, so an update is an edit, not a guess; relic_republish keeps the URL \
+1. The link is the credential: anyone holding it, fragment included, can read \
+the file. Do not paste it into a tracker, log, or public channel.
+2. A relic carries a plaintext title, defaulting to the filename, and it is \
+not encrypted: the service stores it and every link preview shows it. Pass \
+title: "" when the name itself is sensitive.
+3. Publishing puts the key in this transcript. That is structural: say so \
+plainly when handing the link over.
+4. Check sources with relic_lookup_source; relic_republish keeps the URL \
 where relic_publish costs a second URL. \
 ${VERSION_HISTORY_DISCLOSURE}
-4. A relic can be republished only from the machine that published it, where \
-its key and publish token live. Anywhere else it refuses, and no retry \
-changes that.
-5. HTML and JSX render in an isolated frame with no network access, so inline \
-the styles, scripts, fonts, and images a page needs: a CDN reference renders \
-as nothing. Decide before you write the file.
-6. People can comment on a relic. Read them with relic_read_comments before \
-you change reviewed content, and answer with relic_comment. Both take the \
-relic id and attribute you as the publisher.`;
+5. A relic can be republished only from the machine that published it, where \
+its key and publish token live. Anywhere else it refuses.
+6. HTML and JSX render in an isolated frame with no network access, so inline \
+styles, scripts, fonts, and images: a CDN reference renders as nothing.
+7. People can comment on a relic. Read with relic_read_comments before \
+changing reviewed content, and answer with relic_comment. Both take the \
+relic id and attribute you as publisher.`;
 
 /**
  * Handle one JSON-RPC message.
@@ -1022,6 +1042,9 @@ async function callTool(
           key_origin: 'crypto.getRandomValues on this machine',
           key_transmitted_to_service: false,
           plaintext_transmitted_to_service: false,
+          plaintext_title:
+            'relic title, defaulting to the source filename, stored by the ' +
+            'service in the clear and shown by every link preview',
           ciphertext_destination: 'object storage, via a signed URL',
           local_publish_state:
             'relic id, source identity, key, and publish token per relic, ' +
@@ -1086,6 +1109,15 @@ async function callTool(
   const filename =
     typeof args['filename'] === 'string' ? args['filename'] : undefined;
 
+  const rawTitle = args['title'];
+  if (rawTitle !== undefined && typeof rawTitle !== 'string') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`title` must be a string or omitted'
+    );
+  }
+  const title = typeof rawTitle === 'string' ? rawTitle : undefined;
   const ttlDays = parseTtlDays(args['ttl_days']);
   if (!ttlDays.ok) {
     return errorResponse(
@@ -1110,6 +1142,7 @@ async function callTool(
       {
         path,
         filename,
+        title,
         ttl_days: ttlDays.days,
         force_new: forceNew === true,
       },
@@ -1129,6 +1162,11 @@ async function callTool(
             text:
               `Published ${result.filename} as version 1 of a new relic.\n\n` +
               `${result.url}\n\n` +
+              `${
+                result.title !== null
+                  ? `The title "${result.title}" is not encrypted: the service stores it and every link preview shows it. Pass an empty title to publish without one.`
+                  : 'Published without a title, so a link preview shows only that it is a relic.'
+              }\n\n` +
               // No lifetime is the default, so the agent relaying this needs
               // a sentence that says so, not a date-shaped hole.
               (result.relic_expires_at === null
@@ -1488,6 +1526,15 @@ async function callRepublish(
   const filename =
     typeof args['filename'] === 'string' ? args['filename'] : undefined;
 
+  const rawTitle = args['title'];
+  if (rawTitle !== undefined && typeof rawTitle !== 'string') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`title` must be a string or omitted'
+    );
+  }
+  const title = typeof rawTitle === 'string' ? rawTitle : undefined;
   const ttlDays = parseTtlDays(args['ttl_days']);
   if (!ttlDays.ok) {
     return errorResponse(
@@ -1500,7 +1547,7 @@ async function callRepublish(
 
   try {
     const result = await republish(
-      { relic_id: relicId, path, filename, ttl_days: ttlDays.days },
+      { relic_id: relicId, path, filename, title, ttl_days: ttlDays.days },
       deps
     );
     return {
@@ -1519,6 +1566,11 @@ async function callRepublish(
               'The share URL is unchanged: everyone holding the existing ' +
               'link, including its fragment, now sees this content. There ' +
               'is no new link to hand out.\n\n' +
+              `${
+                result.title !== null
+                  ? `The title "${result.title}" is not encrypted: the service stores it and every link preview shows it. Pass an empty title to publish without one.`
+                  : 'Published without a title, so a link preview shows only that it is a relic.'
+              }\n\n` +
               (result.relic_expires_at === null
                 ? 'The relic does not expire; it is kept until it is deleted.'
                 : `Expires ${result.relic_expires_at}.`) +
@@ -1792,15 +1844,16 @@ What happens when you publish a file:
    nonces, and a per-record authentication tag.
 4. Only ciphertext is uploaded, straight to object storage under a signed URL.
    It does not pass through ${deps.serviceOrigin}.
-5. The service is told three things and nothing more: a coarse renderer class
-   from a seven-value list, the name of this client, and the exact byte length
-   of the ciphertext. Not your filename, not the mimetype, not the contents.
+5. The service is told four things and nothing more: a coarse renderer class
+   from an eight-value list, the name of this client, the exact byte length
+   of the ciphertext, and the title, which defaults to the filename and is
+   stored in the clear. Not the mimetype, not the contents.
 6. You get back a URL whose fragment carries the key. Fragments are never sent
    to a server by a browser.
 
 What the service operator can see: that a relic exists, roughly how big it is,
-what coarse class it was declared as, the publishing IP, and when it was
-fetched. Never the contents, and never the key.
+what coarse class it was declared as, the title, the publishing IP, and when it
+was fetched. Never the contents, and never the key.
 
 What this keeps on disk: for each relic you publish, its id, source identity,
 key, and publish token, in a 0600 file under your user config directory. The

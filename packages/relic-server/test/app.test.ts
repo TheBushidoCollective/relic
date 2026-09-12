@@ -15,6 +15,7 @@ import {
   type RelicApp,
   stripToRelicId,
 } from '../src/app.ts';
+import { memoryAssets } from '../src/assets.ts';
 import { ciphertextHash, MemoryStorage } from '../src/storage.ts';
 import { MemoryStore } from '../src/store.ts';
 
@@ -56,6 +57,7 @@ async function publish(
     rendererClass?: string;
     size?: number;
     ttlDays?: number;
+    title?: string;
   } = {}
 ): Promise<{ id: string; key: Uint8Array; grant: Record<string, unknown> }> {
   const challengeResponse = await app.fetch(
@@ -80,6 +82,7 @@ async function publish(
         declared_size_bytes: options.size ?? 12,
         declared_ciphertext_bytes: encryptedSize(options.size ?? 12),
         ...(options.ttlDays === undefined ? {} : { ttl_days: options.ttlDays }),
+        ...(options.title === undefined ? {} : { title: options.title }),
       }),
     })
   );
@@ -114,7 +117,7 @@ async function encrypted(text: string, key: Uint8Array): Promise<Uint8Array> {
 async function republish(
   id: string,
   token: string | undefined,
-  options: { rendererClass?: string; size?: number } = {}
+  options: { rendererClass?: string; size?: number; title?: string } = {}
 ): Promise<Response> {
   return app.fetch(
     req(`/api/relics/${id}/republish`, {
@@ -124,6 +127,7 @@ async function republish(
         renderer_class: options.rendererClass ?? 'markdown',
         declared_size_bytes: options.size ?? 12,
         declared_ciphertext_bytes: encryptedSize(options.size ?? 12),
+        ...(options.title === undefined ? {} : { title: options.title }),
       }),
     })
   );
@@ -225,6 +229,209 @@ describe('the shell', () => {
       .fetch(req(`/${id}`))
       .then((r) => r.headers.get('content-security-policy'));
     expect(csp).toContain("media-src 'self' blob: data:");
+  });
+
+  test('the head byte order: Open Graph block appears before <script, <style, <link, or <title, and after <meta charset', async () => {
+    const { id } = await publish({ title: 'Byte Order Test' });
+    const response = await app.fetch(req(`/${id}`));
+    const body = await response.text();
+
+    const charsetIdx = body.indexOf('<meta charset="utf-8">');
+    const ogTypeIdx = body.indexOf('<meta property="og:type"');
+    const ogSiteNameIdx = body.indexOf('<meta property="og:site_name"');
+    const ogTitleIdx = body.indexOf('<meta property="og:title"');
+    const ogDescIdx = body.indexOf('<meta property="og:description"');
+    const ogUrlIdx = body.indexOf('<meta property="og:url"');
+    const ogImageIdx = body.indexOf('<meta property="og:image"');
+    const twitterCardIdx = body.indexOf('<meta name="twitter:card"');
+    const titleIdx = body.indexOf('<title>');
+    const linkIdx = body.indexOf('<link');
+    const scriptIdx = body.indexOf('<script');
+
+    expect(charsetIdx).toBeGreaterThanOrEqual(0);
+    expect(ogTypeIdx).toBeGreaterThan(charsetIdx);
+    expect(ogSiteNameIdx).toBeGreaterThan(ogTypeIdx);
+    expect(ogTitleIdx).toBeGreaterThan(ogSiteNameIdx);
+    expect(ogDescIdx).toBeGreaterThan(ogTitleIdx);
+    expect(ogUrlIdx).toBeGreaterThan(ogDescIdx);
+    expect(ogImageIdx).toBeGreaterThan(ogUrlIdx);
+    expect(twitterCardIdx).toBeGreaterThan(ogImageIdx);
+    expect(titleIdx).toBeGreaterThan(twitterCardIdx);
+    expect(linkIdx).toBeGreaterThan(titleIdx);
+    expect(scriptIdx).toBeGreaterThan(linkIdx);
+
+    const styleIdx = body.indexOf('<style');
+    if (styleIdx >= 0) {
+      expect(styleIdx).toBeGreaterThan(twitterCardIdx);
+    }
+  });
+
+  test('a relic published with a title emits it in og:title, twitter:title, and <title>', async () => {
+    const { id } = await publish({ title: 'My Custom Document' });
+    const response = await app.fetch(req(`/${id}`));
+    const body = await response.text();
+
+    expect(body).toContain(
+      '<meta property="og:title" content="My Custom Document">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:title" content="My Custom Document">'
+    );
+    expect(body).toContain('<title>My Custom Document · Relic</title>');
+  });
+
+  test('a relic published without a title emits fallback A relic and bare Relic', async () => {
+    const { id } = await publish();
+    const response = await app.fetch(req(`/${id}`));
+    const body = await response.text();
+
+    expect(body).toContain('<meta property="og:title" content="A relic">');
+    expect(body).toContain('<meta name="twitter:title" content="A relic">');
+    expect(body).toContain('<title>Relic</title>');
+    expect(body).not.toContain('· Relic');
+  });
+
+  test('a title containing quotes and angle brackets cannot break out', async () => {
+    const hostileTitle = 'hello "evil" <script>alert(1)</script>';
+    const { id } = await publish({ title: hostileTitle });
+    const response = await app.fetch(req(`/${id}`));
+    const body = await response.text();
+
+    expect(body).not.toContain(hostileTitle);
+    expect(body).toContain(
+      '<meta property="og:title" content="hello &quot;evil&quot; &lt;script&gt;alert(1)&lt;/script&gt;">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:title" content="hello &quot;evil&quot; &lt;script&gt;alert(1)&lt;/script&gt;">'
+    );
+    expect(body).toContain(
+      '<title>hello &quot;evil&quot; &lt;script&gt;alert(1)&lt;/script&gt; · Relic</title>'
+    );
+  });
+
+  test('a tombstoned relic serves the constant card and does not leak stored title', async () => {
+    const { id } = await publish({ title: 'Secret Tombstoned Title' });
+    await app.store.putTombstone({
+      id,
+      publishIp: '198.51.100.10',
+      publishedAt: now,
+      publishingClient: 'test',
+      rendererClass: 'markdown',
+      ciphertextHash: 'hash',
+      deletedAt: now,
+      reasonClass: 'abuse',
+      operator: 'test-op',
+      reportReference: undefined,
+    });
+
+    const response = await app.fetch(req(`/${id}`));
+    const body = await response.text();
+
+    expect(body).not.toContain('Secret Tombstoned Title');
+    expect(body).toContain('<meta property="og:title" content="A relic">');
+    expect(body).toContain('<meta name="twitter:title" content="A relic">');
+    expect(body).toContain('<title>Relic</title>');
+  });
+
+  test('an expired relic serves the constant card and does not leak stored title', async () => {
+    const { id } = await publish({ title: 'Secret Expired Title', ttlDays: 1 });
+    now += 2 * 86_400 * 1000;
+
+    const response = await app.fetch(req(`/${id}`));
+    const body = await response.text();
+
+    expect(body).not.toContain('Secret Expired Title');
+    expect(body).toContain('<meta property="og:title" content="A relic">');
+    expect(body).toContain('<meta name="twitter:title" content="A relic">');
+    expect(body).toContain('<title>Relic</title>');
+  });
+
+  test('an unknown id serves the constant card and leaks nothing', async () => {
+    const unknownId = generateRelicId();
+    const response = await app.fetch(req(`/${unknownId}`));
+    const body = await response.text();
+
+    expect(body).toContain('<meta property="og:title" content="A relic">');
+    expect(body).toContain('<meta name="twitter:title" content="A relic">');
+    expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain(`https://relic.example/${unknownId}`);
+  });
+
+  test('a reserved-word-shaped non-id serves the constant card with origin root and leaks nothing', async () => {
+    await app.store.putRelic({
+      id: 'not-a-valid-id',
+      publishIp: '198.51.100.10',
+      grantedAt: now,
+      expiresAt: undefined,
+      rendererClass: 'markdown',
+      publishingClient: 'test',
+      declaredSizeBytes: 12,
+      version: 1,
+      publishTokenHash: 'hash',
+      mintsUsed: 0,
+      title: 'Secret NonId Title',
+    });
+
+    const response = await app.fetch(req('/not-a-valid-id'));
+    const body = await response.text();
+
+    expect(body).not.toContain('Secret NonId Title');
+    expect(body).toContain('<meta property="og:title" content="A relic">');
+    expect(body).toContain('<meta name="twitter:title" content="A relic">');
+    expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain(
+      '<meta property="og:url" content="https://relic.example/">'
+    );
+  });
+
+  test('serving /{id} for a titled relic still writes no mint log entry and leaves mintsUsed at 0', async () => {
+    const { id } = await publish({ title: 'Uncounted Title' });
+    const before = await app.store.readMintLog();
+
+    const response = await app.fetch(req(`/${id}`));
+    expect(response.status).toBe(200);
+
+    expect(await app.store.readMintLog()).toHaveLength(before.length);
+    expect((await app.store.getRelic(id))?.mintsUsed).toBe(0);
+  });
+
+  test('/assets/card.v1.png is served image/png with immutable cache policy and no content-encoding', async () => {
+    const customApp = createApp({
+      assets: memoryAssets({
+        'card.v1.png': new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+        'viewer.js': 'console.log("viewer")',
+        'styles.css': 'body { margin: 0; }',
+      }),
+    });
+
+    const request = new Request('https://relic.example/assets/card.v1.png', {
+      headers: { 'accept-encoding': 'gzip, br' },
+    });
+    const response = await customApp.fetch(request);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('image/png');
+    expect(response.headers.get('cache-control')).toBe(
+      'public, max-age=31536000, immutable'
+    );
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('content-encoding')).toBeNull();
+
+    const jsResponse = await customApp.fetch(
+      new Request('https://relic.example/assets/viewer.js', {
+        headers: { 'accept-encoding': 'gzip, br' },
+      })
+    );
+    expect(jsResponse.headers.get('cache-control')).toBe('no-store');
+    expect(jsResponse.headers.get('content-encoding')).toBe('gzip');
+
+    const cssResponse = await customApp.fetch(
+      new Request('https://relic.example/assets/styles.css', {
+        headers: { 'accept-encoding': 'gzip, br' },
+      })
+    );
+    expect(cssResponse.headers.get('cache-control')).toBe('no-store');
+    expect(cssResponse.headers.get('content-encoding')).toBe('gzip');
   });
 });
 
@@ -471,6 +678,45 @@ describe('the grant', () => {
     );
     expect(response.status).toBe(400);
     expect((await response.json()).code).toBe('invalid_publish_metadata');
+  });
+
+  test('grant title validation and storage', async () => {
+    const nonString = await grantFor({ title: 12345 });
+    expect(nonString.status).toBe(400);
+    expect((await nonString.json()).code).toBe('invalid_publish_metadata');
+
+    const tooLong = await grantFor({ title: 'a'.repeat(129) });
+    expect(tooLong.status).toBe(400);
+    expect((await tooLong.json()).code).toBe('invalid_publish_metadata');
+
+    const withControl = await grantFor({ title: 'line1\nline2' });
+    expect(withControl.status).toBe(400);
+    expect((await withControl.json()).code).toBe('invalid_publish_metadata');
+
+    const validId = generateRelicId();
+    const validRes = await grantFor({ relic_id: validId, title: 'Good Title' });
+    expect(validRes.status).toBe(200);
+    const validRow = await app.store.getRelic(validId);
+    expect(validRow?.title).toBe('Good Title');
+
+    const trimmedId = generateRelicId();
+    const trimmedRes = await grantFor({
+      relic_id: trimmedId,
+      title: '   Trimmed Title   ',
+    });
+    expect(trimmedRes.status).toBe(200);
+    const trimmedRow = await app.store.getRelic(trimmedId);
+    expect(trimmedRow?.title).toBe('Trimmed Title');
+
+    const emptyId = generateRelicId();
+    const emptyRes = await grantFor({ relic_id: emptyId, title: '' });
+    expect(emptyRes.status).toBe(200);
+    expect((await app.store.getRelic(emptyId))?.title).toBeUndefined();
+
+    const spaceId = generateRelicId();
+    const spaceRes = await grantFor({ relic_id: spaceId, title: '    ' });
+    expect(spaceRes.status).toBe(200);
+    expect((await app.store.getRelic(spaceId))?.title).toBeUndefined();
   });
 
   test('never overwrites: a colliding id is refused with 409', async () => {
@@ -1047,6 +1293,33 @@ describe('republish and versions', () => {
     // republish in flight must not be able to destroy the servable bytes.
     expect(await storage.stat(id)).toBeDefined();
     expect(await storage.stat(`${id}/v2`)).toBeUndefined();
+  });
+
+  test('republish with no title key leaves stored title, empty string clears it, and value replaces it', async () => {
+    const { id, grant } = await publish({ title: 'Initial Title' });
+    const token = grant['publish_token'] as string;
+
+    const res1 = await republish(id, token, { rendererClass: 'html' });
+    expect(res1.status).toBe(200);
+    const row1 = await app.store.getRelic(id);
+    expect(row1?.version).toBe(2);
+    expect(row1?.title).toBe('Initial Title');
+
+    const res2 = await republish(id, token, { title: 'Second Title' });
+    expect(res2.status).toBe(200);
+    const row2 = await app.store.getRelic(id);
+    expect(row2?.version).toBe(3);
+    expect(row2?.title).toBe('Second Title');
+
+    const res3 = await republish(id, token, { title: '   ' });
+    expect(res3.status).toBe(200);
+    const row3 = await app.store.getRelic(id);
+    expect(row3?.version).toBe(4);
+    expect(row3?.title).toBeUndefined();
+
+    const res4 = await republish(id, token, { title: 'bad\0title' });
+    expect(res4.status).toBe(400);
+    expect((await res4.json()).code).toBe('invalid_publish_metadata');
   });
 
   test('completion and mint serve the new version bytes', async () => {

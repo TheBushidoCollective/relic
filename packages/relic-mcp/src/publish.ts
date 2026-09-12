@@ -18,6 +18,7 @@ import {
   encryptRelic,
   generateKey,
   generateRelicId,
+  normalizeTitle,
   type RendererClass,
   relicUrl,
 } from '@relic/format';
@@ -105,6 +106,12 @@ export interface PublishInput {
   readonly path: string;
   readonly filename?: string | undefined;
   /**
+   * Optional plaintext title shown in link previews and the browser tab.
+   * Defaults to the filename. Stored by the service in the clear so unfurlers
+   * can render a card. Pass "" to publish without a title.
+   */
+  readonly title?: string | undefined;
+  /**
    * A publisher-chosen lifetime in days. Undefined means the relic is kept
    * until someone deletes it. The field is omitted from the grant entirely
    * when unset, so the server's default decides, never a zero that happens
@@ -130,6 +137,11 @@ export interface PublishResult {
   readonly relic_expires_at: string | null;
   readonly renderer_class: RendererClass;
   readonly filename: string;
+  /**
+   * Stored by the service in the clear for link previews. Null when published
+   * without a title.
+   */
+  readonly title: string | null;
   readonly resolved_path: string;
   readonly report_url: string;
   readonly disclosure_url: string;
@@ -280,7 +292,7 @@ export async function publish(
   }
 
   const filename = input.filename ?? source.basename;
-
+  const normalizedTitle = normalizeTitle(input.title ?? filename);
   // The class is derived from bytes this process already holds, never taken as
   // a tool input. Exposing it as a parameter would make the taxonomy
   // model-attested, and the metric's second clause would then have an
@@ -317,6 +329,7 @@ export async function publish(
         publishing_client: deps.clientName,
         declared_size_bytes: source.bytes.length,
         declared_ciphertext_bytes: container.length,
+        title: normalizedTitle,
         // Omitted rather than sent as anything, so an unset lifetime is the
         // server's default (kept until deleted) and never a value this
         // client guessed on the publisher's behalf.
@@ -404,6 +417,7 @@ export async function publish(
       relic_expires_at: relicExpiresAt,
       renderer_class: rendererClass,
       filename,
+      title: normalizedTitle.length === 0 ? null : normalizedTitle,
       resolved_path: source.resolvedPath,
       report_url: String(grant['report_url']),
       disclosure_url: String(grant['disclosure_url']),

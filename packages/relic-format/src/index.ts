@@ -15,3 +15,4 @@ export * from './fragment.ts';
 export * from './id.ts';
 export * from './renderer-class.ts';
 export * from './rfc8188.ts';
+export * from './title.ts';
