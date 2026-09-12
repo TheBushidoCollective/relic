@@ -23,7 +23,7 @@ Minimum required to make the metric computable, all **server-side**, none from a
 1. **A coarse renderer class declared at publish time by the local client**, which already holds the plaintext: one of `markdown`, `code`, `html`, `image`, `media`, `archive`, `binary`. Stored against the relic ID.
 2. **Open counts taken at signed-URL mint time.**
 3. **Publishing client name**, so "does this serve the segments Artifacts cannot" is answerable at all.
-
+4. **An optional publisher-declared plaintext title** (defaulting to the source filename), stored server-side to populate link preview cards and viewer titles (`og:title`), reversing the prior rule that the server stores no title or filename per `docs/decisions.md`.
 **Why the class supports a claim about *opened* relics, not just published ones:** the class is stored against the relic ID, every open event names that ID, so joining them yields the class distribution of the opened population directly. The class is immutable for the relic's life, because republish-to-same-URL and versioning are non-goals, so one relic has exactly one plaintext and therefore exactly one true class. Nothing drifts between publish and open. The taxonomy also cuts exactly on the wedge boundary: renderable is `{markdown, code, html, image}`, download-only is `{media, archive, binary}`.
 
 ## The publisher-versus-recipient confound is PERMANENT. Do not treat it as solved.
@@ -44,7 +44,7 @@ Publishing-IP exclusion fails **asymmetrically**, in the direction that hides a 
 
 ## The cost, stated plainly
 
-This leaks a coarse content category, a client name, and IP-correlated open activity to the operator. It is metadata, not content, and the operator still cannot read a single byte of any relic. But it is a real reduction from "the operator knows nothing" to "the operator knows what kind of thing you published and roughly how often it was fetched." It must appear in a published privacy statement. Per [[abuse-liability-of-hosting-uninspectable-content]], upload IP and timestamp are already retained for abuse response, so the IP-correlation cost is largely pre-existing.
+This leaks a coarse content category, an optional publisher-declared plaintext title (defaulting to the source filename), a client name, and IP-correlated open activity to the operator. The title is stored in the clear to populate link unfurls, while the content stays encrypted and the operator still cannot read a byte of the file itself. But it is a real reduction from "the operator knows nothing" to "the operator knows what kind of thing you published, its declared title or filename, and roughly how often it was fetched." It must appear in a published privacy statement. Per [[abuse-liability-of-hosting-uninspectable-content]], upload IP and timestamp are already retained for abuse response, so the IP-correlation cost is largely pre-existing.
 
 **This does not conflict with the no-analytics rule on the viewing origin.** Every item is captured by the server at publish or at signed-URL mint. No script runs on the viewing origin to produce any of it. Do not read this decision as license to add one.
 

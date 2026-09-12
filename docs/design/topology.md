@@ -461,7 +461,7 @@ The most consequential unfurler range-fetches the head. Slack, in its own words 
 
 > The four required properties for every page are
 
-`og:title`, `og:type`, `og:image`, and `og:url`, all carrying constant values per `viewer.md` §6.2, since a per-relic value would be either a fabrication or a leak.
+`og:title`, `og:type`, `og:image`, and `og:url`. While `og:type` (`website`) and `og:image` carry constant values, `og:title` carries a publisher-declared plaintext title (defaulting to the source filename) or the fallback `A relic`, reversing the prior all-constant rule per `docs/decisions.md`.
 
 **The failure it prevents.** If the metadata falls outside the fetched range the unfurl produces no card, and `viewer.md` §6.2 names what that looks like: **a blank card on an unfamiliar domain is the visual shape of a phishing link.** Getting the byte order wrong in a template produces exactly the phishing-shaped card the constant metadata exists to prevent, silently, on every channel that range-fetches.
 
@@ -469,7 +469,7 @@ The most consequential unfurler range-fetches the head. Slack, in its own words 
 
 > Responses to these requests are cached globally across the service for around 30 minutes.
 
-So the image is fetched per unfurl rather than per open, bounded per client by that client's cache window, and it is the one asset on the service origin whose volume scales with link pastes rather than with relic opens. **It is served from a long-cacheable static path with an immutable cache policy**, so repeat unfurls are served from cache rather than from the bucket.
+So the image is fetched per unfurl rather than per open, bounded per client by that client's cache window, and it is the one asset on the service origin whose volume scales with link pastes rather than with relic opens. **It is served from the static path `/assets/card.v1.png` under an immutable cache policy (`public, max-age=31536000, immutable`)**, so repeat unfurls are served from cache rather than from the bucket. The version sits in the filename, so a redesign ships as `card.v2.png` and the shell's constant moves with it.
 
 ## 6. Edge fidelity (`service.md` 7.1)
 

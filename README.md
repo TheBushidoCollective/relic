@@ -37,8 +37,10 @@ runs in your browser, can use your CPU, and can render whatever it wants.
 The viewer says so on the page before the content renders, and so does
 `/policy`.
 
-`/policy` states the whole trade, and the frame conditions the telemetry on
-that statement being readable before anybody publishes.
+`/policy` states the whole trade: the telemetry, the optional plaintext title
+stored in the clear for unfurl cards, and what the operator learns. The frame
+conditions the telemetry on that statement being readable before anybody
+publishes.
 
 ## The packages
 
@@ -75,15 +77,17 @@ restart.
 
 ## Connecting the MCP server
 
-Relic exposes `relic_publish`, which takes a filesystem path and never inline
-content, and `relic_describe_client`, which explains what the client does with
-your file without reading it or contacting anything.
+Relic exposes `relic_publish`, which takes a filesystem path (and optional
+`title` for link unfurls) and never inline content, and `relic_describe_client`,
+which explains what the client does with your file without reading it or
+contacting anything.
 
 It also exposes `relic_republish`, which posts a new version of a file to an
-existing relic's URL. It takes the relic id and a path; the publish token is
-never an argument and never printed, because the client stored it beside the
-relic's key at first publish and reads it back from there. The server issued
-that token once and keeps only its hash, so the machine that published is the
+existing relic's URL. It takes the relic id and a path (with an optional `title`
+to replace or clear the card title); the publish token is never an argument and
+never printed, because the client stored it beside the relic's key at first
+publish and reads it back from there. The server issued that token once and keeps
+only its hash, so the machine that published is the
 only machine that can republish: lose that state and nobody, the operator
 included, can authorize another version. Opening the link always serves the
 current version, and the download cap is shared across all versions. A relic

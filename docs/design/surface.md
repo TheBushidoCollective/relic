@@ -16,7 +16,7 @@ Every number in recipient-facing copy below is taken from a sibling and cited to
 
 ## 1. The art direction: continuous form
 
-**One direction, committed. The surface is a records office's continuous-form output handled under an archivist's protocol.** Not a reliquary and not reverence. A handling protocol documents an item's transit through custody: received, held under stated conditions, released a bounded number of times, then out of custody. That is a relic's actual life, and it is the framing that reconciles a name meaning old and static with payloads that are new and expire in 72 hours (`docs/design/storage.md` 7.2). The mandatory TTL and the 64-open cap stop being limitations to apologize for and become the custody terms the document states about itself, which is what an archivist's form does.
+**One direction, committed. The surface is a records office's continuous-form output handled under an archivist's protocol.** Not a reliquary and not reverence. A handling protocol documents an item's transit through custody: received, held under stated conditions, released a bounded number of times, then out of custody. That is a relic's actual life, and it is the framing that reconciles a name meaning old and static with payloads that are new and expire in 72 hours (`docs/design/storage.md` 7.2) [Amendment: the mandatory 72-hour TTL was reversed in `docs/decisions.md`; a relic is kept until deleted, though a publisher may set a lifetime]. The mandatory TTL and the 64-open cap stop being limitations to apologize for and become the custody terms the document states about itself, which is what an archivist's form does.
 
 **Two materials, and only two.**
 
@@ -41,7 +41,7 @@ Every number in recipient-facing copy below is taken from a sibling and cited to
 **Which surfaces carry imagery, stated rather than assumed.**
 
 - **The viewing origin's chrome carries no raster imagery at all.** The locked CSP blocks external resources and the locked precondition bars third-party anything, so every mark is inline SVG from the viewer's own bundle. This is a constraint honestly met, not a style choice.
-- **The service origin serves exactly one constant raster:** the unfurl card image at `og:image`, identical for every relic per `viewer.md` 6.2, from the long-cacheable immutable static path `docs/design/topology.md` 5.3 decides. It is fetched per unfurl rather than per open, and Slack states its own caching: "Responses to these requests are cached globally across the service for around 30 minutes" ([Slack](https://api.slack.com/robots)). One image, art-directed once, is the whole raster budget on that origin.
+- **The service origin serves exactly one constant raster:** the unfurl card image at `og:image`, served for every relic from the long-cacheable immutable static path `docs/design/topology.md` 5.3 decides. (The image remains constant for every relic, but the metadata as a whole is no longer identical: `og:title` carries a publisher-declared plaintext title or fallback, reversing the identical-metadata rule per `docs/decisions.md`.) It is fetched per unfurl rather than per open, and Slack states its own caching: "Responses to these requests are cached globally across the service for around 30 minutes" ([Slack](https://api.slack.com/robots)). One image, art-directed once, is the whole raster budget on that origin.
 - **The marketing site, the published disclosure statement, and `/abuse` carry imagery freely.** They are not under the viewing origin's CSP, and they are where the art direction is shown rather than merely applied.
 
 **The banned defaults, named, and why this is not each of them.** No warm cream ground, no serif display, no terracotta or amber accent, and no rounded cards with an accent rail: the ground is a cold banded stock, the type is a single machine face (section 2), and the accent is a stamp ink restricted to three uses. No near-black with one acid pop: dark mode is a green-shifted charcoal carrying the same banding, and the accent is a desaturated indigo used for state rather than for emphasis. No blueprint hairlines or cyan grid: the rules are form rules at one weight, in a paper grey, and there is no grid drawn anywhere. No purple-to-blue gradient hero: there are no gradients in the system. No Inter and no Space Grotesk. No emoji as icons. Nothing is centred, nothing is glassmorphic, and no corner is rounded.
@@ -361,14 +361,21 @@ At exactly one:
 
 ### 7.8 The unfurl card
 
-`viewer.md` 6.2 fixes the metadata as identical for every relic, since a per-relic value would be a fabrication or a leak, and names the failure mode: a blank card on an unfamiliar domain is the visual shape of a phishing link. The four properties Open Graph requires are fixed by the protocol, which states that "The four required properties for every page are" `og:title`, `og:type`, `og:image`, and `og:url` ([Open Graph](https://ogp.me/)).
+`viewer.md` 6.2 originally fixed the metadata as identical for every relic, reasoning that a per-relic value would be a fabrication or a leak, and named the failure mode: a blank card on an unfamiliar domain is the visual shape of a phishing link. That rule was reversed in `docs/decisions.md`: the image, description, and site name remain constant, while `og:title` carries a publisher-declared plaintext title (or the fallback `A relic` when untitled). The four properties Open Graph requires are fixed by the protocol, which states that "The four required properties for every page are" `og:title`, `og:type`, `og:image`, and `og:url` ([Open Graph](https://ogp.me/)).
 
-The card is a recipient-facing surface and its copy is this document's. It has one job: make an unfamiliar domain legible before anyone clicks, without describing content it cannot see.
+The card is a recipient-facing surface and its copy is this document's. It has one job: make an unfamiliar domain legible before anyone clicks, without describing content it cannot see. The card renders the per-relic plaintext title, or `A relic` when untitled:
+
+When titled:
+
+> **{title}**
+> An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.
+
+When untitled (fallback):
 
 > **A relic**
-> An encrypted file. It opens in your browser and expires in 72 hours.
+> An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.
 
-The image is the one constant raster from section 1: the form's banded stock with an empty field stack and a blank custody line, which is honest, because a blank card is precisely what the architecture guarantees and the design can say so rather than hide it. `docs/design/topology.md` 5.3 decides the markup order and the cacheable path; neither is redefined here.
+The image is the one constant raster from section 1: the shipped card keeps the empty field stack and the blank custody line, which is honest, because a blank record is precisely what the architecture guarantees and the design can say so rather than hide it. Note on implementation: the card is drawn in the shipped viewer's accession-label palette rather than the banded stock specified above, following `packages/relic-viewer/src/styles.css`, with image alt text "Relic's accession label with an empty field stack: a relic's record with nothing filled in." `docs/design/topology.md` 5.3 decides the markup order and the cacheable path; neither is redefined here.
 
 ## 8. The report form's personal-data category
 
