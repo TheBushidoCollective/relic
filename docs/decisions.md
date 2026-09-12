@@ -90,9 +90,10 @@ The length leak appears in the published disclosure statement, as
 
 **None is set.** `format.md` 3.2 already bars anything content-descriptive
 from object metadata, and section 4 item 6 asks only whether any is needed at
-all. Nothing needs it: the renderer class and the client name go to the app
-server in the grant request body and live on the relic row, and the CRC32C
-the mint response returns is non-editable metadata GCS computes on its own.
+all. Nothing needs it: the renderer class, the client name, and the optional
+publisher-declared plaintext title go to the app server in the grant request body
+and live on the relic row, and the CRC32C the mint response returns is
+non-editable metadata GCS computes on its own.
 
 So the grant signs no `x-goog-meta-*` header, and the blocklist scanner reads
 object bytes only.
@@ -235,3 +236,25 @@ claim them:
 ## 2026-08-18: Pre-render statement demoted to a compact marker
 
 The pre-render statement in the viewer (previously a banner above the content) was demoted to a compact marker in the header chrome. Its original justification was that rendered content could reach the network, allowing the author to learn the recipient's IP, user agent, and open time. Since that egress was removed by the strict CSP applied to the frame, the risk described by the banner is gone. A banner shouting about a removed risk trains recipients to ignore real ones. The page now carries a quiet marker in the header chrome stating "Runs author code, isolated" (linked to `/policy` for the full statement) rather than a block layout banner.
+
+## 2026-09-12: Open Graph card metadata and per-relic plaintext title
+
+`docs/spec/viewer.md` §6.2 originally ruled that Open Graph and Twitter Card metadata was identical for every relic, asserting that "a per-relic value would either be a fabrication or a leak," and `docs/spec/format.md` §3.2 treated server-side storage of a filename as a frame violation.
+
+**The repo owner authorised an explicit reversal of that rule.** The blank preview card produced on link unfurls on unfamiliar domains presented the visual shape of a phishing link, creating recipient distrust before the relic could ever be opened. To solve this, a per-relic plaintext title is now permitted.
+
+**What stays constant and what becomes per-relic.**
+- `og:image`, `og:description`, `og:type`, and `og:site_name` remain constant across all relics. `og:type` is `website`, `og:site_name` is `Relic`, and `og:description` is the constant text: "An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+- `og:title` and the viewer document `<title>` carry the publisher-declared plaintext title (defaulting to the source filename). When titled, `<title>` renders as `{title} · Relic` (using a U+00B7 middle dot, never a dash). When untitled, the fallback title is `A relic` for `og:title` and `twitter:title`, and `Relic` for `<title>`.
+- `og:url` carries `{serviceOrigin}/{id}` when the path segment is a valid relic id, or the service origin root otherwise.
+- Twitter Card tags mirror their Open Graph equivalents: `twitter:card` is `summary_large_image`, with `twitter:title`, `twitter:description`, and `twitter:image`.
+
+**Image asset path and cache policy.**
+The preview card image is served from `/assets/card.v1.png` (a 1200x630 PNG, located in `packages/relic-viewer/public/card.v1.png`). Cache policy is the single exception to the server's blanket `no-store`: `cache-control: public, max-age=31536000, immutable`, alongside `referrer-policy: no-referrer` and `x-content-type-options: nosniff`. Versioning lives in the filename so future asset designs can ship as `card.v2.png` without cache collisions. The image is never gzipped.
+
+**Disclosure obligations and security invariants.**
+- Storing the title in plaintext on the relic row is an acknowledged metadata leak. The published disclosure statement (`/policy` per `docs/spec/service.md` §5) must explicitly state that the publisher-declared title is stored server-side in the clear and served on link unfurls and the viewer document `<title>`.
+- Declining the title is the publisher's choice, not the operator's: a publisher can pass an empty title or clear it on republish, reverting to the constant fallback metadata.
+- Tombstoned, expired, unknown, or malformed relics stop serving the stored title immediately, serving the constant fallback metadata (`A relic`).
+- Serving metadata on `/{id}` continues to mint nothing, increment no open counters, and consume no download cap.
+- The `X-Robots-Tag: noindex` header and `robots.txt` disallow posture remain intact on `/{id}`: unfurlers parse Open Graph tags regardless, while compliant search indexers do not index.
