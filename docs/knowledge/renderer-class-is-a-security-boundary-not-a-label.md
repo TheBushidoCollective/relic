@@ -3,7 +3,7 @@ topic: renderer-class-is-a-security-boundary-not-a-label
 created_at: 2026-07-30T04:25:59.364721+00:00
 updated_at: 2026-07-30T04:31:01.665153+00:00
 ---
-The frame's seven-value renderer taxonomy (`markdown`, `code`, `html`, `image`, `media`, `archive`, `binary`) was introduced as telemetry. **It is a publisher assertion, and it must never route the viewer.** Every gap or misuse here is a potential key-disclosure path.
+The frame's eight-value renderer taxonomy (`markdown`, `code`, `html`, `jsx`, `image`, `media`, `archive`, `binary`) was introduced as telemetry. **It is a publisher assertion, and it must never route the viewer.** Every gap or misuse here is a potential key-disclosure path.
 
 ## CORRECTION to an earlier version of this topic
 
@@ -15,7 +15,7 @@ The tamper-evidence argument answers the wrong threat. The threat is not the ope
 
 ## The rule
 
-**The class is telemetry and nothing else. The viewer never routes on it.**
+**The class is telemetry and recipient-facing display copy on the unfurl card. It is still never a routing input, and the viewer never routes on it.**
 
 Routing comes from magic-byte sniffing after decryption, treated as a hint that can only reach a *less* privileged path, plus the following disagreement rule:
 
@@ -62,3 +62,4 @@ The object fetch goes client-to-GCS on a signed URL, so **the app server cannot 
 - **Unknown class values fail to download-only**, never best-effort, so a client newer than the viewer degrades safely.
 - **`postMessage` to the sandbox uses an exact target origin, never `"*"`.** A `postMessage` with target `"*"` carrying a decrypted relic hands the whole plaintext to whatever occupies that frame, which is worse than leaking one relic's key.
 - **The filename is content, not a category, and storing it is now a conceded frame violation and a disclosed risk.** Server-side storage of it exceeds the frame's original telemetry leakage (`Q3-layoffs-final.xlsx` is not a coarse class, it reveals the subject of an encrypted file). The repo owner reversed the prohibition per `docs/decisions.md` so link unfurls can display a per-relic title (defaulting to the source filename) rather than a phishing-like blank card. This is a deliberate, conceded trade: the plaintext title is stored in the clear and disclosed in `/policy`. It remains the most sensitive metadata the server holds, exactly because a name like `Q3-layoffs-final.xlsx` leaks context before decryption.
+- **The renderer class is now recipient-facing display copy as well as telemetry.** Emitting the class in the unfurl card's `og:description`, `twitter:description`, and fallback `<title>` gives the field a new audience: recipients before they click, rather than operators in telemetry alone. This does not change the routing boundary: `routeFor` in the viewer never consumes the class, so a publisher lying about the class misleads the preview card but cannot trick the viewer into escalating privilege. What changed is the viewing-origin boundary: the class is now in the document `<head>`, and the viewer's non-reliance on it is guarded by tests on the built viewer bundle rather than by total absence from the origin.

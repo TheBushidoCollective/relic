@@ -41,7 +41,7 @@ Every number in recipient-facing copy below is taken from a sibling and cited to
 **Which surfaces carry imagery, stated rather than assumed.**
 
 - **The viewing origin's chrome carries no raster imagery at all.** The locked CSP blocks external resources and the locked precondition bars third-party anything, so every mark is inline SVG from the viewer's own bundle. This is a constraint honestly met, not a style choice.
-- **The service origin serves exactly one constant raster:** the unfurl card image at `og:image`, served for every relic from the long-cacheable immutable static path `docs/design/topology.md` 5.3 decides. (The image remains constant for every relic, but the metadata as a whole is no longer identical: `og:title` carries a publisher-declared plaintext title or fallback, reversing the identical-metadata rule per `docs/decisions.md`.) It is fetched per unfurl rather than per open, and Slack states its own caching: "Responses to these requests are cached globally across the service for around 30 minutes" ([Slack](https://api.slack.com/robots)). One image, art-directed once, is the whole raster budget on that origin.
+- **The service origin serves exactly one constant raster:** the unfurl card image at `og:image`, served for every relic from the long-cacheable immutable static path `docs/design/topology.md` 5.3 decides. (The image remains constant for every relic, but the metadata as a whole is no longer identical: `og:title` carries a publisher-declared plaintext title or per-class fallback, and `og:description` reveals the coarse renderer class, reversing the identical-metadata rule per `docs/decisions.md`.) It is fetched per unfurl rather than per open, and Slack states its own caching: "Responses to these requests are cached globally across the service for around 30 minutes" ([Slack](https://api.slack.com/robots)). One image, art-directed once, is the whole raster budget on that origin, keeping the immutable cache policy and one-raster budget intact.
 - **The marketing site, the published disclosure statement, and `/abuse` carry imagery freely.** They are not under the viewing origin's CSP, and they are where the art direction is shown rather than merely applied.
 
 **The banned defaults, named, and why this is not each of them.** No warm cream ground, no serif display, no terracotta or amber accent, and no rounded cards with an accent rail: the ground is a cold banded stock, the type is a single machine face (section 2), and the accent is a stamp ink restricted to three uses. No near-black with one acid pop: dark mode is a green-shifted charcoal carrying the same banding, and the accent is a desaturated indigo used for state rather than for emphasis. No blueprint hairlines or cyan grid: the rules are form rules at one weight, in a paper grey, and there is no grid drawn anywhere. No purple-to-blue gradient hero: there are no gradients in the system. No Inter and no Space Grotesk. No emoji as icons. Nothing is centred, nothing is glassmorphic, and no corner is rounded.
@@ -361,21 +361,32 @@ At exactly one:
 
 ### 7.8 The unfurl card
 
-`viewer.md` 6.2 originally fixed the metadata as identical for every relic, reasoning that a per-relic value would be a fabrication or a leak, and named the failure mode: a blank card on an unfamiliar domain is the visual shape of a phishing link. That rule was reversed in `docs/decisions.md`: the image, description, and site name remain constant, while `og:title` carries a publisher-declared plaintext title (or the fallback `A relic` when untitled). The four properties Open Graph requires are fixed by the protocol, which states that "The four required properties for every page are" `og:title`, `og:type`, `og:image`, and `og:url` ([Open Graph](https://ogp.me/)).
+`viewer.md` 6.2 originally fixed the metadata as identical for every relic, reasoning that a per-relic value would be a fabrication or a leak, and named the failure mode: a blank card on an unfamiliar domain is the visual shape of a phishing link. That rule was reversed in `docs/decisions.md`: `og:image`, `og:type`, and `og:site_name` remain constant, while `og:title` carries a publisher-declared plaintext title (or a per-class fallback when untitled) and `og:description` reveals the coarse renderer class. The four properties Open Graph requires are fixed by the protocol, which states that "The four required properties for every page are" `og:title`, `og:type`, `og:image`, and `og:url` ([Open Graph](https://ogp.me/)).
 
-The card is a recipient-facing surface and its copy is this document's. It has one job: make an unfamiliar domain legible before anyone clicks, without describing content it cannot see. The card renders the per-relic plaintext title, or `A relic` when untitled:
+The card is a recipient-facing surface and its copy is this document's. It has one job: make an unfamiliar domain legible before anyone clicks, without describing content it cannot see. The card renders the per-relic title (or per-class fallback when untitled) and a description revealing what kind of thing the relic is:
 
-When titled:
+When titled, the card title is `{title}`. When untitled, the fallback title is `{Class} relic` (for example, `A Markdown relic` or `An archive relic`).
 
-> **{title}**
-> An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.
+The description pairs a class phrase with a tail split strictly by whether Relic renders it in the browser (`isRenderable` from `@relic/format`):
 
-When untitled (fallback):
+Renderable classes (`markdown`, `code`, `html`, `jsx`, `image`):
+
+> **{title or fallback title}**
+> A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.
+> (or "A source code file...", "An HTML page...", "A JSX component...", "An image..." followed by the renderable tail)
+
+Download-only classes (`media`, `archive`, `binary`):
+
+> **{title or fallback title}**
+> An archive. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it.
+> (or "An audio or video file...", "A binary file..." followed by the download-only tail)
+
+When untitled and the class is unknown, tombstoned, expired, or malformed, the card falls back to the constant unknown text:
 
 > **A relic**
 > An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.
 
-The image is the one constant raster from section 1: the shipped card keeps the empty field stack and the blank custody line, which is honest, because a blank record is precisely what the architecture guarantees and the design can say so rather than hide it. Note on implementation: the card is drawn in the shipped viewer's accession-label palette rather than the banded stock specified above, following `packages/relic-viewer/src/styles.css`, with image alt text "Relic's accession label with an empty field stack: a relic's record with nothing filled in." `docs/design/topology.md` 5.3 decides the markup order and the cacheable path; neither is redefined here.
+The image is the one constant raster from section 1: the shipped card keeps the empty field stack and the blank custody line, which is honest, because a blank record is precisely what the architecture guarantees and the design can say so rather than hide it. Serving this single constant raster for every relic preserves the one-raster budget on the service origin and the immutable cache policy (`public, max-age=31536000, immutable`). Note on implementation: the card is drawn in the shipped viewer's accession-label palette rather than the banded stock specified above, following `packages/relic-viewer/src/styles.css`, with image alt text "Relic's accession label with an empty field stack: a relic's record with nothing filled in." `docs/design/topology.md` 5.3 decides the markup order and the cacheable path; neither is redefined here.
 
 ## 8. The report form's personal-data category
 
