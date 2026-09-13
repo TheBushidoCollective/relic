@@ -90,16 +90,22 @@ so the filename becomes the title, and reads the served head over HTTP. It
 asserts the Open Graph and Twitter block lands after the character-set
 declaration and before the first `link` or `script` tag, because an unfurler
 range-fetches the head and metadata outside that range produces no card at
-all. It then publishes the same file with an empty title and proves the name
-reaches no field on the relic row, fetches the card image and reads 1200x630
-out of its PNG header, and confirms neither shell fetch spent an open.
+all. It also asserts that the card reveals the relic's coarse renderer class
+across renderable and download-only types, catching description drift between
+browser and download tails and proving the class reaches the card even when
+the publisher declines a title. It then publishes the same file with an empty
+title and proves the name reaches no field on the relic row, fetches the card
+image and reads 1200x630 out of its PNG header, and confirms neither shell
+fetch spent an open.
 Success ends with:
 
 ```text
 PUBLISHED relic_id=<id> title=quarterly-review.md
 HEAD_ORDER charset=<n> og=<n> twitter=<n> title=<n> link=<n> script=<n>
 CARD_TITLE og:title=quarterly-review.md title=… · Relic
-DECLINED relic_id=<id> row_title=absent card=constant
+CARD_DESCRIPTION class=markdown tail=browser
+DECLINED relic_id=<id> row_title=absent card=A Markdown relic
+ARCHIVE_CARD class=archive tail=download title=An archive relic
 CARD_IMAGE bytes=<n> dimensions=1200x630 cache=immutable
 NO_MINT opens_spent=0 mint_log=0
 UNFURL_CARD_PATH_OK
