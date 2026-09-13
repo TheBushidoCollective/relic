@@ -1,18 +1,24 @@
 /**
- * Unfurl card copy for relics.
+ * The unfurl card's copy, and the only place it is written.
  *
- * What the card may and may not carry:
- * The card presents Open Graph and Twitter metadata to give recipients
- * enough context to decide whether to open an unfamiliar link. It reveals
- * a coarse renderer class and an optional publisher-declared title, but
- * never plaintext contents or private filenames.
+ * What the card carries: the relic's coarse renderer class, and the
+ * publisher-declared title when there is one. The publishing client defaults
+ * that title to the source filename, so the card can name a file, and a
+ * publisher who declines a title removes it. The class is not declinable,
+ * because it is derived from the bytes rather than chosen.
  *
- * Why the renderer class is allowed where the filename is not:
- * The filename can leak sensitive details about content or context, which
- * format.md treats as a frame violation. By contrast, the renderer class
- * is one of eight coarse values already conceded to the operator on grant,
- * and knowing whether a link is a Markdown document, an HTML page, or an
- * archive is necessary information for the recipient before opening.
+ * What it never carries: the contents, the envelope header's authoritative
+ * filename and declared mimetype, which stay inside the AEAD, and anything
+ * finer than the eight-value class.
+ *
+ * Why the class is allowed here at all. It is the coarse category the frame
+ * already concedes to the operator on the grant, so the card is a new
+ * audience for a field the service has always held rather than a new field.
+ * What the recipient gets for it is the thing the card exists to give them:
+ * on an unfamiliar domain, knowing a link holds an archive or an HTML page
+ * is the difference between a decision and a guess. The cost, and the
+ * boundary that replaces the class's former absence from this origin, is
+ * recorded in `spec/format.md` 3.6.
  */
 
 import { isRenderable, type RendererClass } from '@relic/format';
