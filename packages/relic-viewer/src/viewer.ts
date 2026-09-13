@@ -650,9 +650,13 @@ export interface RouteDecision {
  * decrypted bytes. When they disagree, route to the least privileged path
  * either type would allow, and say so.
  *
- * The renderer class is not an input here and never reaches this origin. A
- * publisher-asserted routing input on the origin holding the fragment secret
- * is exactly the shape that turns a lie into fragment theft in one step.
+ * The renderer class is emitted into the served head as card metadata, but
+ * it is not an input here. This function's parameters are the whole routing
+ * surface, so routing on the class would require an explicit signature change
+ * rather than a silent edit. A publisher-asserted routing input on the origin
+ * holding the fragment secret is exactly the shape that turns a lie into
+ * fragment theft in one step. The guard test in card-metadata-guard.test.ts
+ * enforces that the built bundles never read the card metadata.
  */
 export function routeFor(
   filename: string,
