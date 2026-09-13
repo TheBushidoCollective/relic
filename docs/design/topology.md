@@ -461,7 +461,7 @@ The most consequential unfurler range-fetches the head. Slack, in its own words 
 
 > The four required properties for every page are
 
-`og:title`, `og:type`, `og:image`, and `og:url`. While `og:type` (`website`) and `og:image` carry constant values, `og:title` carries a publisher-declared plaintext title (defaulting to the source filename) or the fallback `A relic`, reversing the prior all-constant rule per `docs/decisions.md`.
+`og:title`, `og:type`, `og:image`, and `og:url`. While `og:type` (`website`) and `og:image` carry constant values, `og:title` carries a publisher-declared plaintext title (defaulting to the source filename) or a per-class fallback, and `og:description` carries per-class copy revealing the coarse renderer class, reversing the prior all-constant rule per `docs/decisions.md`. The image remains the single constant raster at `/assets/card.v1.png` across all relics, preserving the one-raster budget on the service origin and the immutable cache policy.
 
 **The failure it prevents.** If the metadata falls outside the fetched range the unfurl produces no card, and `viewer.md` §6.2 names what that looks like: **a blank card on an unfamiliar domain is the visual shape of a phishing link.** Getting the byte order wrong in a template produces exactly the phishing-shaped card the constant metadata exists to prevent, silently, on every channel that range-fetches.
 

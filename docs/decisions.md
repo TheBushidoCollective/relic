@@ -258,3 +258,41 @@ The preview card image is served from `/assets/card.v1.png` (a 1200x630 PNG, loc
 - Tombstoned, expired, unknown, or malformed relics stop serving the stored title immediately, serving the constant fallback metadata (`A relic`).
 - Serving metadata on `/{id}` continues to mint nothing, increment no open counters, and consume no download cap.
 - The `X-Robots-Tag: noindex` header and `robots.txt` disallow posture remain intact on `/{id}`: unfurlers parse Open Graph tags regardless, while compliant search indexers do not index.
+
+## 2026-09-13: Open Graph card reveals coarse renderer class
+
+The unfurl card introduced yesterday (PR #69) revealed a relic's title but said nothing about what kind of thing it was: the description remained one constant sentence for every relic. The owner's steer: "relics should still reveal WHAT they are in the OG. Just not the content."
+
+**The coarse renderer class on the card.** The service already holds the coarse renderer class on the relic row (`markdown`, `code`, `html`, `jsx`, `image`, `media`, `archive`, `binary`), declared at publish time and previously used only for server-side telemetry. The card now reveals this class in its description and fallback title.
+
+**What stays constant and what becomes per-class.**
+- `og:image` remains the single constant raster at `/assets/card.v1.png` (with its constant dimension and alt tags). `og:type` (`website`), `og:site_name` (`Relic`), and `twitter:card` (`summary_large_image`) remain constant. The one-raster budget on the service origin and the immutable cache policy (`public, max-age=31536000, immutable`) stay intact.
+- `og:description` and `twitter:description` now reveal the coarse renderer class. The copy combines a phrase naming the kind of thing, one space, and a tail split strictly by `isRenderable` from `@relic/format`:
+  - `markdown`: "A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+  - `code`: "A source code file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+  - `html`: "An HTML page. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+  - `jsx`: "A JSX component. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+  - `image`: "An image. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+  - `media`: "An audio or video file. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it."
+  - `archive`: "An archive. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it."
+  - `binary`: "A binary file. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it."
+- `og:title`, `twitter:title`, and the viewer `<title>` use the publisher-declared plaintext title when present. When untitled, the fallback title is now per class:
+  - `markdown`: `A Markdown relic`
+  - `code`: `A code relic`
+  - `html`: `An HTML relic`
+  - `jsx`: `A JSX relic`
+  - `image`: `An image relic`
+  - `media`: `A media relic`
+  - `archive`: `An archive relic`
+  - `binary`: `A binary relic`
+- For an untitled relic, the document `<title>` renders as `{Class} relic · Relic` (using a U+00B7 middle dot, never a dash).
+- When a relic is unknown, tombstoned, expired, or malformed, or if a store read fails, it serves the constant fallback metadata: `A relic` for `og:title` and `twitter:title`, `Relic` for `<title>`, and `An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.` for `og:description` and `twitter:description`.
+
+**Declining a title does not hide the class.** The title is publisher-declared and declinable: a publisher can pass an empty title or clear it on republish. The class is derived from the decrypted bytes by the publishing client and is not declinable.
+
+**Converting the format.md 3.6 boundary from an absence into a tested guard.**
+- `docs/spec/format.md` §3.6 originally argued that the renderer class must never reach the viewing origin, keeping it out of reach to prevent fragment theft if the viewer ever routed on a publisher-asserted class.
+- Emitting the class in `/{id}`'s head as card metadata puts the class on the viewing origin's document for the first time.
+- The container still does not carry the class. What actually protects routing is `routeFor`'s inputs in `packages/relic-viewer/src/viewer.ts` (`filename`, `declaredMimetype`, `content`), which derive strictly from the envelope header inside the AEAD plus magic-byte sniffing of the decrypted content, resolving disagreements to the least-privileged tier. The class is not a parameter of `routeFor`, so routing on it would require a signature change rather than a silent edit.
+- The absence of the class from the origin was a second, weaker belt, and this change spends it deliberately so recipients can see what kind of thing a link holds before opening it.
+- The replacement guard is a test on the built viewer bundles ensuring they never read the card metadata from the DOM. A tested boundary is weaker than an architectural impossibility, and the project documents that trade honestly.

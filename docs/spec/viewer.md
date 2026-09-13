@@ -17,11 +17,13 @@ Each is a case where every component behaves correctly and an unspecified bounda
 3. **A redirect without a fragment hands the key to its target**, with no bug in any component. Closed by 1.7.
 4. **The viewing origin writes the key or the ID down**, into a `Referer`, a console line, storage, or an error object. Closed by 1.8.
 
-### 1.1 The renderer class never routes, and it never arrives
+### 1.1 The renderer class never routes
 
-`format.md` §3.6 settled that the container carries no renderer class and that the class must never be sent to the viewer. So the viewer has no class to route on and must not ask for one.
+`format.md` §3.6 settled that the container carries no renderer class. While the class now reaches the viewing origin's document `<head>` as Open Graph and Twitter Card metadata for link unfurls, it never routes the viewer, and the viewer has no class to route on and must not ask for one or read it from the document head.
 
 The reasoning gets stated here because an earlier version of the recorded knowledge got it backwards and somebody will re-derive it. The class is a publisher assertion. If the viewer routes on it, a publisher declares `image` on an HTML payload and wins inline rendering on the origin holding the fragment, and that content reads `location.hash`. Fragment theft in one step.
+
+What actually protects routing is `routeFor`'s inputs, which are the envelope header inside the AEAD plus a sniff of the decrypted bytes, resolving disagreement to the least privileged tier; the class is not a parameter of that function. A test on the built viewer bundles verifies that the viewer code never reads the card metadata from the DOM.
 
 **Publisher-attestation inside the ciphertext does not fix this.** Attestation defeats operator forgery. It does nothing about a publisher lying, and the publisher is the threat. A malicious publisher signs an honest-looking lie, and the AEAD tag proves only that the operator didn't alter it.
 
@@ -264,15 +266,49 @@ Shim to parent: a `ready` handshake, a rendered-or-failed ack that names blocked
 
 The fragment never reaches a server, so no unfurler can describe the content, and **a blank card on an unfamiliar domain is the visual shape of a phishing link.**
 
-`/{id}` serves deliberate Open Graph and Twitter Card metadata describing what Relic is without pretending to describe the encrypted payload. Open Graph's required properties are `og:title`, `og:type`, `og:image`, and `og:url`, with `og:description` and `og:site_name` optional ([Open Graph](https://ogp.me/)).
+`/{id}` serves deliberate Open Graph and Twitter Card metadata describing what Relic is and revealing what kind of thing the link holds, without pretending to describe the encrypted payload. Open Graph's required properties are `og:title`, `og:type`, `og:image`, and `og:url`, with `og:description` and `og:site_name` optional ([Open Graph](https://ogp.me/)).
 
-**What stays constant and what becomes per-relic.** `og:image`, `og:description`, `og:type`, and `og:site_name` carry constant values for every relic. `og:type` is `website`, `og:site_name` is `Relic`, and `og:description` is the constant copy: "An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it." `og:url` is `{serviceOrigin}/{id}` when the path segment is a valid relic id, or the service origin root otherwise. `og:image` is served from the constant path `{serviceOrigin}/assets/card.v1.png` (a 1200x630 PNG, with `og:image:type` of `image/png`, `og:image:width` of `1200`, `og:image:height` of `630`, and `og:image:alt` of "Relic's accession label with an empty field stack: a relic's record with nothing filled in."). The image is cached under `cache-control: public, max-age=31536000, immutable`, with `referrer-policy: no-referrer` and `x-content-type-options: nosniff`. Twitter Card metadata mirrors Open Graph: `twitter:card` is `summary_large_image`, with `twitter:title`, `twitter:description`, and `twitter:image` matching their Open Graph counterparts.
+**What stays constant and what becomes per-relic.**
+- **Per-relic tags:** `og:title`, `og:description`, `twitter:title`, `twitter:description`, and `og:url`. `og:url` is `{serviceOrigin}/{id}` when the path segment is a valid relic id, or the service origin root otherwise.
+- **Constant tags:** `og:image` (and its dimension and alt tags: `og:image:type` of `image/png`, `og:image:width` of `1200`, `og:image:height` of `630`, and `og:image:alt` of "Relic's accession label with an empty field stack: a relic's catalog number, an unrevealed key line, and a prompt to open with the full link."), `og:type` (`website`), `og:site_name` (`Relic`), and `twitter:card` (`summary_large_image`). `og:image` is served from the constant path `{serviceOrigin}/assets/card.v1.png` (a 1200x630 PNG).
 
-**`og:title` and document `<title>` carry a publisher-declared plaintext title.** When titled, `og:title` is that title string, and the document `<title>` is `{title} · Relic` (using a U+00B7 middle dot, never a dash). When untitled, the fallback title is `A relic` for `og:title` and `twitter:title`, and `Relic` for `<title>`. By default, the publishing client derives the title from the source filename via `normalizeTitle(filename)`. A publisher may also pass an explicit title override.
+**`og:description` and `twitter:description` reveal the coarse renderer class.** The description combines a phrase naming the kind of thing with a tail that differs by whether Relic renders it in the browser, split strictly by `isRenderable` from `@relic/format`:
 
-**The reasoning is kept honest.** The original ruling that metadata must be identical for every relic was based on the premise that any per-relic value would either be a fabrication or a leak. That objection was correct about a value the service invents, and it remains correct: the service cannot inspect ciphertext to invent a title. What changed is that the publisher declares this title in plaintext at publish time, authorized by the repo owner, and the trade is stated plainly: the title is stored on the server in the clear and served to anyone fetching `/{id}` without the decryption key. A publisher can decline the leak by publishing an untitled relic or clearing the title on republish.
+- Class phrase:
+  - `markdown`: `A Markdown document.`
+  - `code`: `A source code file.`
+  - `html`: `An HTML page.`
+  - `jsx`: `A JSX component.`
+  - `image`: `An image.`
+  - `media`: `An audio or video file.`
+  - `archive`: `An archive.`
+  - `binary`: `A binary file.`
+- Tail:
+  - Renderable tail (`markdown`, `code`, `html`, `jsx`, `image`): `It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.`
+  - Download-only tail (`media`, `archive`, `binary`): `It downloads to your device, and only someone holding the whole link, including the part after the #, can open it.`
 
-**Tombstones, expiry, read errors, and malformed identifiers.** A relic that is tombstoned, expired, unknown, or whose id is malformed never serves a stored title; it serves the constant fallback card with title `A relic` and `<title>Relic</title>`. A takedown removes the title alongside the rest of the relic record. A store read failure still serves the shell with the fallback card, never a 500. Titles are attacker-influenced display text: they are escaped with `escapeHtml` on every emission, including inside attribute values.
+The description tag value is the class phrase, one space, and the matching tail.
+
+**`og:title` and document `<title>` carry the title or a per-class fallback.** When titled, `og:title` and `twitter:title` are the publisher-declared plaintext title, and the document `<title>` is `{title} · Relic` (using a U+00B7 middle dot, never a dash). When untitled, the title falls back to a per-class label:
+- `markdown`: `A Markdown relic`
+- `code`: `A code relic`
+- `html`: `An HTML relic`
+- `jsx`: `A JSX relic`
+- `image`: `An image relic`
+- `media`: `A media relic`
+- `archive`: `An archive relic`
+- `binary`: `A binary relic`
+
+For an untitled relic, `<title>` is `{Class} relic · Relic` (for example, `A Markdown relic · Relic`), while `og:title` and `twitter:title` carry the per-class fallback string verbatim.
+
+**Declining a title does not hide the class.** The title is publisher-declared and declinable: a publisher can pass an empty title or clear it on republish. The class is derived from the bytes by the publishing client and is not declinable.
+
+**Tombstones, expiry, read errors, and malformed identifiers.** The class is gated on the exact same liveness check as the title. A relic that is tombstoned, expired, unknown, or whose id is malformed, or whose store read throws, serves neither the stored title nor the class metadata; it serves the constant fallback card:
+- `og:title` and `twitter:title`: `A relic`
+- Document `<title>`: `Relic`
+- `og:description` and `twitter:description`: `An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.`
+
+A takedown removes the title and stops serving the class alongside the rest of the relic record. A store read failure still serves the shell with the fallback card, never a 500. Titles are attacker-influenced display text: they are escaped with `escapeHtml` on every emission, including inside attribute values.
 
 **Serving that metadata must not mint**, or every unfurl burns a download cap and counts as an open.
 
