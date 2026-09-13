@@ -266,7 +266,7 @@ describe('the shell', () => {
     }
   });
 
-  test('a relic published with a title emits it in og:title, twitter:title, and <title>', async () => {
+  test('a relic published with a title emits it in og:title, twitter:title, and <title> while description carries the class', async () => {
     const { id } = await publish({ title: 'My Custom Document' });
     const response = await app.fetch(req(`/${id}`));
     const body = await response.text();
@@ -278,17 +278,61 @@ describe('the shell', () => {
       '<meta name="twitter:title" content="My Custom Document">'
     );
     expect(body).toContain('<title>My Custom Document · Relic</title>');
+    expect(body).toContain(
+      '<meta property="og:description" content="A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:description" content="A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
   });
 
-  test('a relic published without a title emits fallback A relic and bare Relic', async () => {
+  test('an untitled relic serves its per-class fallback title in og:title, twitter:title and <title>', async () => {
     const { id } = await publish();
     const response = await app.fetch(req(`/${id}`));
     const body = await response.text();
 
-    expect(body).toContain('<meta property="og:title" content="A relic">');
-    expect(body).toContain('<meta name="twitter:title" content="A relic">');
-    expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain(
+      '<meta property="og:title" content="A Markdown relic">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:title" content="A Markdown relic">'
+    );
+    expect(body).toContain('<title>A Markdown relic</title>');
     expect(body).not.toContain('· Relic');
+    expect(body).toContain(
+      '<meta property="og:description" content="A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+  });
+
+  test('a relic published as markdown serves the Markdown phrase and browser tail; one published as archive serves the archive phrase and download tail', async () => {
+    const { id: mdId } = await publish({ rendererClass: 'markdown' });
+    const mdResponse = await app.fetch(req(`/${mdId}`));
+    const mdBody = await mdResponse.text();
+
+    expect(mdBody).toContain(
+      '<meta property="og:description" content="A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+    expect(mdBody).toContain(
+      '<meta name="twitter:description" content="A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+
+    const { id: archiveId } = await publish({ rendererClass: 'archive' });
+    const archiveResponse = await app.fetch(req(`/${archiveId}`));
+    const archiveBody = await archiveResponse.text();
+
+    expect(archiveBody).toContain(
+      '<meta property="og:description" content="An archive. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it.">'
+    );
+    expect(archiveBody).toContain(
+      '<meta name="twitter:description" content="An archive. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it.">'
+    );
+    expect(archiveBody).toContain(
+      '<meta property="og:title" content="An archive relic">'
+    );
+    expect(archiveBody).toContain(
+      '<meta name="twitter:title" content="An archive relic">'
+    );
+    expect(archiveBody).toContain('<title>An archive relic</title>');
   });
 
   test('a title containing quotes and angle brackets cannot break out', async () => {
@@ -309,8 +353,11 @@ describe('the shell', () => {
     );
   });
 
-  test('a tombstoned relic serves the constant card and does not leak stored title', async () => {
-    const { id } = await publish({ title: 'Secret Tombstoned Title' });
+  test('a tombstoned relic serves the constant card and leaks neither title nor class', async () => {
+    const { id } = await publish({
+      title: 'Secret Tombstoned Title',
+      rendererClass: 'markdown',
+    });
     await app.store.putTombstone({
       id,
       publishIp: '198.51.100.10',
@@ -328,35 +375,76 @@ describe('the shell', () => {
     const body = await response.text();
 
     expect(body).not.toContain('Secret Tombstoned Title');
+    expect(body).not.toContain('Markdown');
     expect(body).toContain('<meta property="og:title" content="A relic">');
     expect(body).toContain('<meta name="twitter:title" content="A relic">');
     expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain(
+      '<meta property="og:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
   });
 
-  test('an expired relic serves the constant card and does not leak stored title', async () => {
-    const { id } = await publish({ title: 'Secret Expired Title', ttlDays: 1 });
+  test('an expired relic serves the constant card and leaks neither title nor class', async () => {
+    const { id } = await publish({
+      title: 'Secret Expired Title',
+      ttlDays: 1,
+      rendererClass: 'markdown',
+    });
     now += 2 * 86_400 * 1000;
 
     const response = await app.fetch(req(`/${id}`));
     const body = await response.text();
 
     expect(body).not.toContain('Secret Expired Title');
+    expect(body).not.toContain('Markdown');
     expect(body).toContain('<meta property="og:title" content="A relic">');
     expect(body).toContain('<meta name="twitter:title" content="A relic">');
     expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain(
+      '<meta property="og:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
   });
 
-  test('an unknown id serves the constant card and leaks nothing', async () => {
+  test('an unknown id serves the constant card and leaks neither title nor class', async () => {
     const unknownId = generateRelicId();
     const response = await app.fetch(req(`/${unknownId}`));
     const body = await response.text();
 
+    expect(body).not.toContain('Markdown');
     expect(body).toContain('<meta property="og:title" content="A relic">');
     expect(body).toContain('<meta name="twitter:title" content="A relic">');
     expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain(
+      '<meta property="og:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
     expect(body).toContain(`https://relic.example/${unknownId}`);
   });
 
+  test('a malformed id serves the unknown pair and leaks neither title nor class', async () => {
+    const malformedId = 'not-valid-base32-id!!';
+    const response = await app.fetch(req(`/${malformedId}`));
+    const body = await response.text();
+
+    expect(body).not.toContain('Markdown');
+    expect(body).toContain('<meta property="og:title" content="A relic">');
+    expect(body).toContain('<meta name="twitter:title" content="A relic">');
+    expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain(
+      '<meta property="og:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:description" content="An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.">'
+    );
+  });
   test('a reserved-word-shaped non-id serves the constant card with origin root and leaks nothing', async () => {
     await app.store.putRelic({
       id: 'not-a-valid-id',
@@ -386,6 +474,20 @@ describe('the shell', () => {
 
   test('serving /{id} for a titled relic still writes no mint log entry and leaves mintsUsed at 0', async () => {
     const { id } = await publish({ title: 'Uncounted Title' });
+    const before = await app.store.readMintLog();
+
+    const response = await app.fetch(req(`/${id}`));
+    expect(response.status).toBe(200);
+
+    expect(await app.store.readMintLog()).toHaveLength(before.length);
+    expect((await app.store.getRelic(id))?.mintsUsed).toBe(0);
+  });
+
+  test('serving /{id} for a classed relic still writes no mint log entry and leaves mintsUsed at 0', async () => {
+    const { id } = await publish({
+      rendererClass: 'archive',
+      title: 'Classed Relic',
+    });
     const before = await app.store.readMintLog();
 
     const response = await app.fetch(req(`/${id}`));

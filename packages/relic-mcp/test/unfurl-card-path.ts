@@ -26,6 +26,9 @@
  * 4. **The card image is really a 1200x630 PNG** served immutable and
  *    unzipped. Every major unfurler rejects or crops a wrong-sized image, and
  *    a placeholder of the wrong dimensions would otherwise ship green.
+ * 5. **The coarse renderer class reaches the card**, selecting a description
+ *    with a browser or download tail, and providing the class fallback title
+ *    when the publisher declines to declare one.
  *
  * It also asserts the rule the whole card rides on: none of these fetches
  * mints, so an unfurl never spends one of a relic's finite opens.
@@ -191,6 +194,19 @@ try {
   );
   console.log('CARD_TITLE og:title=quarterly-review.md title=… · Relic');
 
+  const expectedMarkdownDesc =
+    'A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.';
+  assert.ok(
+    body.includes(
+      `<meta property="og:description" content="${expectedMarkdownDesc}">`
+    ) &&
+      body.includes(
+        `<meta name="twitter:description" content="${expectedMarkdownDesc}">`
+      ),
+    'the served head does not carry the markdown class description'
+  );
+  console.log('CARD_DESCRIPTION class=markdown tail=browser');
+
   // --- The same publish, declining the title -----------------------------
   const declined = await publish(
     { path: source, title: '', force_new: true },
@@ -209,14 +225,71 @@ try {
     r.text()
   );
   assert.ok(
-    declinedBody.includes('<meta property="og:title" content="A relic">') &&
-      declinedBody.includes('<title>Relic</title>'),
-    'an untitled relic served something other than the constant card'
+    declinedBody.includes(
+      '<meta property="og:title" content="A Markdown relic">'
+    ) &&
+      declinedBody.includes(
+        '<meta name="twitter:title" content="A Markdown relic">'
+      ) &&
+      declinedBody.includes('<title>A Markdown relic</title>'),
+    'an untitled markdown relic served something other than the class fallback title'
+  );
+  assert.ok(
+    declinedBody.includes(
+      `<meta property="og:description" content="${expectedMarkdownDesc}">`
+    ) &&
+      declinedBody.includes(
+        `<meta name="twitter:description" content="${expectedMarkdownDesc}">`
+      ),
+    'the untitled markdown relic does not carry the markdown class description'
   );
   console.log(
-    `DECLINED relic_id=${declined.relic_id} row_title=absent card=constant`
+    `DECLINED relic_id=${declined.relic_id} row_title=absent card=A Markdown relic`
   );
 
+  // --- An archive relic identified by content sniffing -------------------
+  const archiveSource = join(scratch, 'payload.bin');
+  // Real gzip header bytes (0x1f, 0x8b) so the sniffer derives archive
+  // from content alone, despite the neutral filename.
+  await writeFile(
+    archiveSource,
+    new Uint8Array([
+      0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0x00,
+    ])
+  );
+  const archive = await publish(
+    { path: archiveSource, title: '', force_new: true },
+    deps
+  );
+  assert.equal(archive.title, null);
+
+  const archiveBody = await fetch(`${origin}/${archive.relic_id}`).then((r) =>
+    r.text()
+  );
+  const expectedArchiveDesc =
+    'An archive. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it.';
+  assert.ok(
+    archiveBody.includes(
+      `<meta property="og:description" content="${expectedArchiveDesc}">`
+    ) &&
+      archiveBody.includes(
+        `<meta name="twitter:description" content="${expectedArchiveDesc}">`
+      ),
+    'the archive relic does not carry the archive class download description'
+  );
+  assert.ok(
+    archiveBody.includes(
+      '<meta property="og:title" content="An archive relic">'
+    ) &&
+      archiveBody.includes(
+        '<meta name="twitter:title" content="An archive relic">'
+      ) &&
+      archiveBody.includes('<title>An archive relic</title>'),
+    'the untitled archive relic does not carry the archive fallback title'
+  );
+  console.log(
+    'ARCHIVE_CARD class=archive tail=download title=An archive relic'
+  );
   // --- The one raster on this origin -------------------------------------
   const card = await fetch(`${origin}/assets/card.v1.png`);
   assert.equal(card.status, 200);

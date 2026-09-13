@@ -25,6 +25,7 @@ import {
   type RendererClass,
 } from '@relic/format';
 import { type AssetSource, memoryAssets, REGISTER_SW_JS } from './assets.ts';
+import { cardCopy } from './card.ts';
 import { assertConfig, DEFAULT_CONFIG, type RelicConfig } from './config.ts';
 import { newOccurrenceId, ProblemError, problemResponse } from './problems.ts';
 import { RateLimiter } from './ratelimit.ts';
@@ -1681,13 +1682,8 @@ function relicExpiryIso(epochMillis: number | undefined): string | null {
   return epochMillis === undefined ? null : iso(epochMillis);
 }
 
-const CARD_DESCRIPTION =
-  'An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.';
-
 const CARD_IMAGE_ALT =
   "Relic's accession label with an empty field stack: a relic's record with nothing filled in.";
-
-const FALLBACK_TITLE = 'A relic';
 
 async function shell(
   config: RelicConfig,
@@ -1698,6 +1694,7 @@ async function shell(
   // A static shell. No mint happens here, which is what keeps non-executing
   // link fetchers off the open counter and the download cap.
   let storedTitle: string | undefined;
+  let storedRendererClass: RendererClass | undefined;
   let canonicalId: string | undefined;
 
   try {
@@ -1713,8 +1710,11 @@ async function shell(
         const row = await store.getRelic(canonicalId);
         if (row !== undefined) {
           const isExpired = row.expiresAt !== undefined && now >= row.expiresAt;
-          if (!isExpired && row.title !== undefined && row.title.length > 0) {
-            storedTitle = row.title;
+          if (!isExpired) {
+            storedRendererClass = row.rendererClass;
+            if (row.title !== undefined && row.title.length > 0) {
+              storedTitle = row.title;
+            }
           }
         }
       }
@@ -1722,6 +1722,7 @@ async function shell(
       // A store read failure must still serve the shell with the constant card,
       // never a 500.
       storedTitle = undefined;
+      storedRendererClass = undefined;
     }
   }
 
@@ -1731,16 +1732,21 @@ async function shell(
       ? `${serviceOrigin}/${canonicalId}`
       : `${serviceOrigin}/`;
   const ogImage = `${serviceOrigin}/assets/card.v1.png`;
-  const cardTitle = storedTitle ?? FALLBACK_TITLE;
+  const card = cardCopy(storedRendererClass);
+  const cardTitle = storedTitle ?? card.title;
   const documentTitle =
-    storedTitle !== undefined ? `${storedTitle} · Relic` : 'Relic';
+    storedTitle !== undefined
+      ? `${storedTitle} · Relic`
+      : storedRendererClass !== undefined
+        ? card.title
+        : 'Relic';
 
   const body = `<!doctype html>
 <meta charset="utf-8">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Relic">
 <meta property="og:title" content="${escapeHtml(cardTitle)}">
-<meta property="og:description" content="${escapeHtml(CARD_DESCRIPTION)}">
+<meta property="og:description" content="${escapeHtml(card.description)}">
 <meta property="og:url" content="${escapeHtml(ogUrl)}">
 <meta property="og:image" content="${escapeHtml(ogImage)}">
 <meta property="og:image:type" content="image/png">
@@ -1749,7 +1755,7 @@ async function shell(
 <meta property="og:image:alt" content="${escapeHtml(CARD_IMAGE_ALT)}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${escapeHtml(cardTitle)}">
-<meta name="twitter:description" content="${escapeHtml(CARD_DESCRIPTION)}">
+<meta name="twitter:description" content="${escapeHtml(card.description)}">
 <meta name="twitter:image" content="${escapeHtml(ogImage)}">
 <title>${escapeHtml(documentTitle)}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2104,7 +2110,9 @@ site data for this origin removes every remembered key.
 ## What we do know
 
 - **A coarse renderer class**, one of: markdown, code, html, jsx, image, media,
-  archive, binary. Nothing finer.
+  archive, binary. Nothing finer. It is now also on the relic's card, so the kind
+  of thing that was published is readable by anyone who fetches the link, not
+  only by the operator.
 - **The name of the tool that published it**, so we can tell whether Relic
   serves the contexts it was built for.
 - **Open activity, correlated with the publishing IP address.** Upload IP and
@@ -2135,8 +2143,14 @@ the URL, a crawler that ignores our robots file, and us. **If the name is the
 sensitive part, publish without a title.** The content is unaffected either
 way; it is encrypted before it leaves your machine.
 
+The card also names the kind of file, using the coarse renderer class above
+rather than anything finer. **Declining a title does not hide it.** The class is
+derived from the bytes rather than chosen, so anyone who fetches the link learns
+what kind of thing was published even when you publish without a title.
+
 A relic that is removed or has expired stops serving its title with the rest
 of it.
+
 ## The key enters your AI session transcript
 
 The publish tool returns the full URL including the fragment, because handing
