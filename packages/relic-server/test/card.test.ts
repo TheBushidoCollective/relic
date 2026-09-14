@@ -1,13 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { isRenderable, RENDERER_CLASSES } from '@relic/format';
+import { CLASS_BEHAVIOUR, RENDERER_CLASSES } from '@relic/format';
 import {
+  BEHAVIOUR_TAILS,
   CARD_DESCRIPTION,
   CLASS_PHRASES,
   CLASS_TITLES,
   cardCopy,
-  DOWNLOAD_TAIL,
   FALLBACK_TITLE,
-  RENDERABLE_TAIL,
 } from '../src/card.ts';
 
 describe('cardCopy', () => {
@@ -27,21 +26,31 @@ describe('cardCopy', () => {
       expect(phrase.length).toBeGreaterThan(0);
       expect(copy.description.startsWith(phrase)).toBe(true);
 
-      const expectedTail = isRenderable(cls) ? RENDERABLE_TAIL : DOWNLOAD_TAIL;
+      const expectedTail = BEHAVIOUR_TAILS[CLASS_BEHAVIOUR[cls]];
       expect(copy.description).toBe(`${phrase} ${expectedTail}`);
     });
   }
 
-  test('renderable classes get the browser tail and download-only classes get the download tail', () => {
+  test('each renderer class gets the tail matching its class behaviour and none of the other tails', () => {
     for (const cls of RENDERER_CLASSES) {
       const copy = cardCopy(cls);
-      if (isRenderable(cls)) {
-        expect(copy.description).toContain(RENDERABLE_TAIL);
-        expect(copy.description).not.toContain(DOWNLOAD_TAIL);
-      } else {
-        expect(copy.description).toContain(DOWNLOAD_TAIL);
-        expect(copy.description).not.toContain(RENDERABLE_TAIL);
+      const behaviour = CLASS_BEHAVIOUR[cls];
+      const expectedTail = BEHAVIOUR_TAILS[behaviour];
+
+      expect(copy.description).toContain(expectedTail);
+      for (const [otherBehaviour, otherTail] of Object.entries(
+        BEHAVIOUR_TAILS
+      )) {
+        if (otherBehaviour !== behaviour) {
+          expect(copy.description).not.toContain(otherTail);
+        }
       }
     }
+  });
+
+  test('media relic description plays in browser and does not download to device', () => {
+    const copy = cardCopy('media');
+    expect(copy.description).toContain('It plays in your browser');
+    expect(copy.description).not.toContain('downloads to your device');
   });
 });

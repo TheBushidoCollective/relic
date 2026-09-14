@@ -42,7 +42,17 @@ export const RENDERER_CLASSES: readonly RendererClass[] = [
   'binary',
 ];
 
-/** The side of the taxonomy the first release actually renders. */
+/**
+ * The side of the taxonomy the success metric counts as rendered.
+ *
+ * **This is telemetry vocabulary, not a description of the viewer.** The
+ * wedge it cuts is the metric's second clause, and `media` sits outside it
+ * even though the viewer gives a media relic a player. Reading it as "what
+ * happens when a recipient opens this" has already produced one wrong
+ * recipient-facing claim: the unfurl card told the reader of a video relic
+ * that it downloads to their device, because this predicate was the nearest
+ * thing to hand. Copy that describes the viewer reads `CLASS_BEHAVIOUR`.
+ */
 export const RENDERABLE_CLASSES: readonly RendererClass[] = [
   'markdown',
   'code',
@@ -50,6 +60,36 @@ export const RENDERABLE_CLASSES: readonly RendererClass[] = [
   'jsx',
   'image',
 ];
+
+/**
+ * What a recipient actually gets when they open a relic of each class.
+ *
+ * Three outcomes, because the viewer has three: content on the page, a
+ * player, or a file on the device. `html` and `jsx` render inside a frame
+ * with no network reach, which is still content on the page from where the
+ * reader sits, so the distinction this table draws is the one a recipient
+ * experiences rather than the one the renderer stack is built from.
+ *
+ * It lives here rather than in either end because two consumers must agree
+ * on it and neither owns it: the viewer routes content, and the server
+ * writes copy telling a recipient what the route will be. A viewer test
+ * asserts `routeForClass` agrees with this table for every class, so a
+ * route that moves fails a test instead of turning a card into a false
+ * statement. Nothing routes off this value; routing inputs come from inside
+ * the AEAD (`spec/format.md` 3.6).
+ */
+export type ClassBehaviour = 'renders' | 'plays' | 'downloads';
+
+export const CLASS_BEHAVIOUR: Record<RendererClass, ClassBehaviour> = {
+  markdown: 'renders',
+  code: 'renders',
+  html: 'renders',
+  jsx: 'renders',
+  image: 'renders',
+  media: 'plays',
+  archive: 'downloads',
+  binary: 'downloads',
+};
 
 export function isRendererClass(value: string): value is RendererClass {
   return (RENDERER_CLASSES as readonly string[]).includes(value);

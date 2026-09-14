@@ -267,13 +267,13 @@ The unfurl card introduced yesterday (PR #69) revealed a relic's title but said 
 
 **What stays constant and what becomes per-class.**
 - `og:image` remains the single constant raster at `/assets/card.v1.png` (with its constant dimension and alt tags). `og:type` (`website`), `og:site_name` (`Relic`), and `twitter:card` (`summary_large_image`) remain constant. The one-raster budget on the service origin and the immutable cache policy (`public, max-age=31536000, immutable`) stay intact.
-- `og:description` and `twitter:description` now reveal the coarse renderer class. The copy combines a phrase naming the kind of thing, one space, and a tail split strictly by `isRenderable` from `@relic/format`:
+- `og:description` and `twitter:description` now reveal the coarse renderer class. [Amended below: copy selects via `CLASS_BEHAVIOUR`, not `isRenderable`; media plays in browser.] The copy combines a phrase naming the kind of thing, one space, and a tail split by `CLASS_BEHAVIOUR` from `@relic/format`:
   - `markdown`: "A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
   - `code`: "A source code file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
   - `html`: "An HTML page. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
   - `jsx`: "A JSX component. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
   - `image`: "An image. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
-  - `media`: "An audio or video file. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it."
+  - `media`: "An audio or video file. It plays in your browser, and only someone holding the whole link, including the part after the #, can open it."
   - `archive`: "An archive. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it."
   - `binary`: "A binary file. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it."
 - `og:title`, `twitter:title`, and the viewer `<title>` use the publisher-declared plaintext title when present. When untitled, the fallback title is now per class:
@@ -296,3 +296,32 @@ The unfurl card introduced yesterday (PR #69) revealed a relic's title but said 
 - The container still does not carry the class. What actually protects routing is `routeFor`'s inputs in `packages/relic-viewer/src/viewer.ts` (`filename`, `declaredMimetype`, `content`), which derive strictly from the envelope header inside the AEAD plus magic-byte sniffing of the decrypted content, resolving disagreements to the least-privileged tier. The class is not a parameter of `routeFor`, so routing on it would require a signature change rather than a silent edit.
 - The absence of the class from the origin was a second, weaker belt, and this change spends it deliberately so recipients can see what kind of thing a link holds before opening it.
 - The replacement guard is a test on the built viewer bundles ensuring they never read the card metadata from the DOM. A tested boundary is weaker than an architectural impossibility, and the project documents that trade honestly.
+
+## 2026-09-13: Card copy correction: media plays in the browser, selected by CLASS_BEHAVIOUR
+
+The unfurl card shipped this morning (PR #70) selected its closing tail using `isRenderable` from `@relic/format`. Because `media` is outside `RENDERABLE_CLASSES`, the card for video and audio relics told recipients:
+
+> An audio or video file. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it.
+
+**The claim was false.** The viewer does not download media. `routeForClass` in `packages/relic-viewer/src/viewer.ts` routes `media` to the `media` route, and `renderMediaView` in `packages/relic-viewer/src/main.ts` mounts a real `<video controls playsinline>` or `<audio controls>` player on the page. The card gave recipients a false statement about what happens when opening the link.
+
+**The cause.** `RENDERABLE_CLASSES` is telemetry vocabulary for the operator success metric, not a description of viewer capabilities. Its test calls it the wedge boundary (the success metric's second clause), which counts only document, markup, code, and still-image opens against the file.kiwi comparison floor. It was reached for because it was the nearest existing predicate, conflating metric classification with user interface behavior.
+
+**The replacement behaviour table.** `@relic/format` now exports `ClassBehaviour` (`'renders' | 'plays' | 'downloads'`) and `CLASS_BEHAVIOUR: Record<RendererClass, ClassBehaviour>`, reflecting what the viewer actually delivers for each class:
+- `renders`: `markdown`, `code`, `html`, `jsx`, `image`
+- `plays`: `media`
+- `downloads`: `archive`, `binary`
+
+The unfurl card description now selects its tail using `CLASS_BEHAVIOUR`, producing three distinct tails:
+- `renders`: "It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+- `plays`: "It plays in your browser, and only someone holding the whole link, including the part after the #, can open it."
+- `downloads`: "It downloads to your device, and only someone holding the whole link, including the part after the #, can open it."
+
+A media relic's card now correctly reads: "An audio or video file. It plays in your browser, and only someone holding the whole link, including the part after the #, can open it."
+
+**The guard against recurrence.** `routeForClass` and `CLASS_BEHAVIOUR` must agree across all eight classes. A viewer test in `packages/relic-viewer/test/viewer.test.ts` asserts:
+- `downloads` if and only if the route is `download`
+- `plays` if and only if the route is `media`
+- `renders` if and only if the route is one of `markdown`, `code`, `image`, `sandboxed-html`, `sandboxed-jsx`
+
+The test is driven from `RENDERER_CLASSES`, ensuring that adding a ninth class to the taxonomy will fail the test immediately unless both viewer routing and card behavior explicitly account for it.

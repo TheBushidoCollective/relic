@@ -335,6 +335,30 @@ describe('the shell', () => {
     expect(archiveBody).toContain('<title>An archive relic</title>');
   });
 
+  test('a relic published as media serves the media phrase and played tail on og:description and twitter:description', async () => {
+    const { id } = await publish({ rendererClass: 'media' });
+    const response = await app.fetch(req(`/${id}`));
+    const body = await response.text();
+
+    const expectedDescription =
+      'An audio or video file. It plays in your browser, and only someone holding the whole link, including the part after the #, can open it.';
+
+    expect(body).toContain(
+      `<meta property="og:description" content="${expectedDescription}">`
+    );
+    expect(body).toContain(
+      `<meta name="twitter:description" content="${expectedDescription}">`
+    );
+    expect(body).not.toContain('downloads to your device');
+    expect(body).toContain(
+      '<meta property="og:title" content="A media relic">'
+    );
+    expect(body).toContain(
+      '<meta name="twitter:title" content="A media relic">'
+    );
+    expect(body).toContain('<title>A media relic</title>');
+  });
+
   test('a title containing quotes and angle brackets cannot break out', async () => {
     const hostileTitle = 'hello "evil" <script>alert(1)</script>';
     const { id } = await publish({ title: hostileTitle });
