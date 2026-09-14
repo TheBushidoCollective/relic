@@ -367,7 +367,7 @@ The card is a recipient-facing surface and its copy is this document's. It has o
 
 When titled, the card title is `{title}`. When untitled, the fallback title is `{Class} relic` (for example, `A Markdown relic` or `An archive relic`).
 
-The description pairs a class phrase with a tail split strictly by whether Relic renders it in the browser (`isRenderable` from `@relic/format`):
+The description pairs a class phrase with a tail selected by what the viewer actually does with the relic (`CLASS_BEHAVIOUR` from `@relic/format`), rather than by the success metric's wedge predicate (`isRenderable`). `isRenderable` excludes `media` because the telemetry counts only the document and code wedge, which previously led to the false recipient-facing claim that media relics download to the device. The viewer gives media relics an in-browser player, so the description splits on three recipient experiences: rendering on the page, playing in the browser, or downloading to the device.
 
 Renderable classes (`markdown`, `code`, `html`, `jsx`, `image`):
 
@@ -375,12 +375,16 @@ Renderable classes (`markdown`, `code`, `html`, `jsx`, `image`):
 > A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it.
 > (or "A source code file...", "An HTML page...", "A JSX component...", "An image..." followed by the renderable tail)
 
-Download-only classes (`media`, `archive`, `binary`):
+Playable class (`media`):
+
+> **{title or fallback title}**
+> An audio or video file. It plays in your browser, and only someone holding the whole link, including the part after the #, can open it.
+
+Download-only classes (`archive`, `binary`):
 
 > **{title or fallback title}**
 > An archive. It downloads to your device, and only someone holding the whole link, including the part after the #, can open it.
-> (or "An audio or video file...", "A binary file..." followed by the download-only tail)
-
+> (or "A binary file..." followed by the download-only tail)
 When untitled and the class is unknown, tombstoned, expired, or malformed, the card falls back to the constant unknown text:
 
 > **A relic**
