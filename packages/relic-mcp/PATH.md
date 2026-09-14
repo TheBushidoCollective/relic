@@ -93,7 +93,9 @@ range-fetches the head and metadata outside that range produces no card at
 all. It also asserts that the card reveals the relic's coarse renderer class
 across renderable and download-only types, catching description drift between
 browser and download tails and proving the class reaches the card even when
-the publisher declines a title. It then publishes the same file with an empty
+the publisher declines a title. It catches false download claims on audio and
+video relics by asserting that sniffed media relics carry the played tail and
+the media fallback title. It then publishes the same file with an empty
 title and proves the name reaches no field on the relic row, fetches the card
 image and reads 1200x630 out of its PNG header, and confirms neither shell
 fetch spent an open.
@@ -106,6 +108,7 @@ CARD_TITLE og:title=quarterly-review.md title=… · Relic
 CARD_DESCRIPTION class=markdown tail=browser
 DECLINED relic_id=<id> row_title=absent card=A Markdown relic
 ARCHIVE_CARD class=archive tail=download title=An archive relic
+MEDIA_CARD class=media tail=plays title=A media relic
 CARD_IMAGE bytes=<n> dimensions=1200x630 cache=immutable
 NO_MINT opens_spent=0 mint_log=0
 UNFURL_CARD_PATH_OK

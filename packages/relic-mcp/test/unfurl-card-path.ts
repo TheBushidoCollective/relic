@@ -290,6 +290,47 @@ try {
   console.log(
     'ARCHIVE_CARD class=archive tail=download title=An archive relic'
   );
+
+  // --- A media relic identified by content sniffing ----------------------
+  const mediaSource = join(scratch, 'recording.bin');
+  // Real MP4 container header: 'ftyp' at offset 4 so the sniffer derives
+  // media from content alone, despite the neutral filename.
+  await writeFile(
+    mediaSource,
+    new Uint8Array([
+      0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32,
+      0x00, 0x00, 0x00, 0x00,
+    ])
+  );
+  const media = await publish(
+    { path: mediaSource, title: '', force_new: true },
+    deps
+  );
+  assert.equal(media.title, null);
+
+  const mediaBody = await fetch(`${origin}/${media.relic_id}`).then((r) =>
+    r.text()
+  );
+  const expectedMediaDesc =
+    'An audio or video file. It plays in your browser, and only someone holding the whole link, including the part after the #, can open it.';
+  assert.ok(
+    mediaBody.includes(
+      `<meta property="og:description" content="${expectedMediaDesc}">`
+    ) &&
+      mediaBody.includes(
+        `<meta name="twitter:description" content="${expectedMediaDesc}">`
+      ),
+    'the media relic does not carry the media class playback description'
+  );
+  assert.ok(
+    mediaBody.includes('<meta property="og:title" content="A media relic">') &&
+      mediaBody.includes(
+        '<meta name="twitter:title" content="A media relic">'
+      ) &&
+      mediaBody.includes('<title>A media relic</title>'),
+    'the untitled media relic does not carry the media fallback title'
+  );
+  console.log('MEDIA_CARD class=media tail=plays title=A media relic');
   // --- The one raster on this origin -------------------------------------
   const card = await fetch(`${origin}/assets/card.v1.png`);
   assert.equal(card.status, 200);
