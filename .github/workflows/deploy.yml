@@ -185,8 +185,20 @@ jobs:
           # longer reachable from here, which is the point.
           SERVICE="${{ steps.urls.outputs.service }}"
 
+          # Every body is fetched to a file and then grepped, never piped into
+          # `grep -q`. Under `pipefail` that pipeline fails when the assertion
+          # SUCCEEDS: `grep -q` exits the moment it matches, curl loses the
+          # pipe and returns 23, and 23 becomes the pipeline's status. It is a
+          # race against response size, so it passed for months and then broke
+          # the first deploy where a page grew: `/policy` matched, curl was
+          # still writing, and the step failed with exit 23 on a service that
+          # was serving correctly. A gate that fails because the thing it
+          # checks is true is worse than no gate.
           echo "health"
-          curl -fsS --retry 10 --retry-all-errors --retry-delay 3 "$SERVICE/health" | tee /dev/stderr | grep -q '"ok"'
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 3 \
+            -o/tmp/health "$SERVICE/health"
+          cat /tmp/health
+          grep -q '"ok"' /tmp/health
 
           echo "the shell serves and does not leak a referrer"
           curl -fsS -D/tmp/h -o/dev/null "$SERVICE/aaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -198,14 +210,30 @@ jobs:
           done
 
           echo "the published disclosure is readable before anybody publishes"
-          curl -fsS "$SERVICE/policy" | grep -q 'Your browser never sends the'
+          curl -fsS -o/tmp/policy "$SERVICE/policy"
+          grep -q 'Your browser never sends the' /tmp/policy
 
           echo "the abuse intake answers, because it is a go/no-go obligation"
-          curl -fsS "$SERVICE/abuse" | grep -q '<form method="post"'
+          curl -fsS -o/tmp/abuse "$SERVICE/abuse"
+          grep -q '<form method="post"' /tmp/abuse
 
           echo "a never-issued id is a problem document, not a stack trace"
-          curl -sS -o/tmp/b -w '%{http_code}' "$SERVICE/api/relics/aaaaaaaaaaaaaaaaaaaaaaaaaa/mint" -X POST | grep -q 404
+          CODE=$(curl -sS -o/tmp/b -w '%{http_code}' \
+            "$SERVICE/api/relics/aaaaaaaaaaaaaaaaaaaaaaaaaa/mint" -X POST)
+          test "$CODE" = 404
           grep -q 'relic_not_found' /tmp/b
+
+          echo "the shell does not carry the pdf renderer"
+          # The lazy split is the reason a markdown reader does not download a
+          # 430 KB renderer, and it is a bundler choice rather than a
+          # guarantee, so it is checked against what is actually served rather
+          # than against what was built.
+          curl -fsS -o/tmp/shell "$SERVICE/assets/viewer.js"
+          test "$(wc -c < /tmp/shell)" -lt 460800
+          if grep -q 'GlobalWorkerOptions' /tmp/shell; then
+            echo "the pdf renderer is inlined in the app shell"
+            exit 1
+          fi
 
       # The two origins have to agree about each other or HTML never renders,
       # and neither side fails loudly on its own: the usercontent origin

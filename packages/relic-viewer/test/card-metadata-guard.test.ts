@@ -42,12 +42,21 @@ describe('card metadata isolation', () => {
     // of it. The nearest miss the tree already contains is `log:"code"` in
     // the extension map, which is exactly the shape that makes an unquoted
     // match worthless.
+    //
+    // The `meta[...]` selectors are scoped to the card's own properties for
+    // the same reason, found the same way. A bare `meta[property` matches
+    // Bun's chunk loader, which reads `meta[property=csp-nonce]` so it can
+    // inject a chunk under the page's CSP. That is the bundler behaving
+    // correctly, it appears only when code splitting is on, and whether it
+    // lands in the shell or a chunk is a bundler detail. Guarding against it
+    // told us nothing about whether the viewer reads a card, which is the one
+    // thing this test exists to establish.
     const forbidden: readonly (readonly [string, RegExp])[] = [
       ['og: property literal', /["']og:/],
       ['twitter: property literal', /["']twitter:/],
       ['card raster name', /card\.v1/],
-      ['meta-by-property selector', /meta\[property/],
-      ['meta-by-name selector', /meta\[name/],
+      ['meta selector for an og property', /meta\[property[^\]]*og:/],
+      ['meta selector for a twitter property', /meta\[name[^\]]*twitter:/],
     ];
 
     // Every emitted script, not a fixed list. Code splitting means the

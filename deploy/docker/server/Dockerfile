@@ -4,7 +4,14 @@
 # service origin and the usercontent origin; the deployment routes by Host and
 # each Cloud Run service gets its own registrable domain under *.run.app.
 
-FROM oven/bun:1-alpine AS build
+# Pinned to the same version as `mise.toml`, and it has to stay in step with
+# it. Bun is the bundler as well as the runtime, and on a floating `1` tag
+# this stage built the shipped artifact with a different bundler than the one
+# CI tested, which is the worst possible place for that difference to live.
+# It showed up as a production `viewer.js` that did not match the tested
+# `viewer.js`: the chunk loader's `meta[property=csp-nonce]` lookup was
+# present in the shipped bundle and absent in the tested one.
+FROM oven/bun:1.3.14-alpine AS build
 WORKDIR /src
 
 # Manifests first, so a source-only change does not reinstall dependencies.
@@ -19,7 +26,11 @@ COPY . .
 RUN bun run build
 
 # --- runtime ---------------------------------------------------------------
-FROM oven/bun:1-alpine AS runtime
+# Pinned for the same reason, one step weaker: this stage only runs the
+# server, so a floating tag risks a runtime behaviour change rather than a
+# different artifact. Both stages move together so the version a bug is
+# reproduced against is the version that produced it.
+FROM oven/bun:1.3.14-alpine AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production
