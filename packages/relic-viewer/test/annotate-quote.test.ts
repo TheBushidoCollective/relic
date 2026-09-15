@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { CommentAnchor } from '@relic/format';
 import type { AnchorSurface } from '../src/anchoring.ts';
 import {
+  captureSelectionQuote,
   quoteAdapter,
   takeHeadUtf8,
   takeTailUtf8,
@@ -72,6 +73,8 @@ class TestText extends TestNode {
 }
 
 class TestElement extends TestNode {
+  /** Real elements have it, and the content flow excludes anything carrying it. */
+  hidden = false;
   readonly nodeType = 1;
   readonly tagName: string;
   className = '';
@@ -246,11 +249,23 @@ function matchesSelector(elem: TestElement, selector: string): boolean {
       elem.tagName === 'MARK' && elem.classList.contains('relic-text-mark')
     );
   }
-  if (selector === '.comment-pins') {
-    return elem.classList.contains('comment-pins');
+  // The overlay and control classes the content flow excludes. Listed rather
+  // than reduced to a generic class check so an added selector has to be
+  // taught here too, instead of silently falling through to the tag branch.
+  for (const cls of [
+    'comment-pins',
+    'comment-region',
+    'mark-bubble',
+    'mark-hint',
+    'mark-quote-action',
+  ]) {
+    if (selector === `.${cls}`) return elem.classList.contains(cls);
   }
-  if (selector === '.mark-bubble') {
-    return elem.classList.contains('mark-bubble');
+  if (selector === 'pre.raw') {
+    return elem.tagName === 'PRE' && elem.classList.contains('raw');
+  }
+  if (selector === '[hidden]') {
+    return elem.hidden;
   }
   if (selector === 'script') {
     return elem.tagName === 'SCRIPT';
@@ -265,7 +280,10 @@ function matchesSelector(elem: TestElement, selector: string): boolean {
   }
   if (selector.startsWith('[')) {
     const match = /data-comment-id="([^"]+)"/.exec(selector);
-    return match ? elem.dataset.commentId === match[1] : true;
+    // No blanket true for an attribute this stub has not been taught. That
+    // made every element match `[hidden]`, which emptied the content flow and
+    // failed five tests for a reason that had nothing to do with the code.
+    return match !== null && elem.dataset.commentId === match[1];
   }
   return elem.tagName === selector.toUpperCase();
 }
@@ -502,30 +520,244 @@ describe('quote anchor adapter and context-aware resolver', () => {
     expect(p.textContent).toBe('the third paragraph of the document');
   });
 
-  test('never matches inside an existing mark painted by this page', () => {
+  /**
+   * Where a mark actually landed, as a character offset into the document's
+   * own text.
+   *
+   * Asserting the marked string is not enough when the document repeats it:
+   * every occurrence gives the same string, which is how the reported defect
+   * stayed invisible. The offset names which one.
+   */
+  function markOffset(root: TestElement, id: string): number | null {
+    let seen = 0;
+    let found: number | null = null;
+    const walk = (elem: TestElement, insideId: string | null): void => {
+      for (const child of elem.childNodes) {
+        if (child instanceof TestText) {
+          if (insideId === id && found === null) found = seen;
+          seen += child.data.length;
+        } else if (child instanceof TestElement) {
+          walk(child, child.dataset.commentId ?? insideId);
+        }
+      }
+    };
+    walk(root, root.dataset.commentId ?? null);
+    return found;
+  }
+
+  test('resolution does not depend on which comments are already painted', () => {
+    /**
+     * The reported defect, at the unit. A reader who had already commented,
+     * then selected text inside their own mark, got a comment anchored beside
+     * the earlier one: the text flow used to skip marked text, so the document
+     * a comment resolved against changed shape depending on what was painted.
+     *
+     * The guarantee is that it does not. The same anchor resolved against a
+     * clean document and against one already carrying a mark over those very
+     * words has to land at the same place, so the anchor here deliberately
+     * names the occurrence the earlier mark covers.
+     */
+    const build = (): { stage: TestElement; p: TestElement } => {
+      const stage = new TestElement('div');
+      const p = new TestElement('p');
+      p.textContent = 'the target text repeated here and target text here';
+      stage.appendChild(p);
+      return { stage, p };
+    };
+
+    const anchor = { exact: 'target text', prefix: 'the ' };
+
+    const clean = build();
+    expect(
+      wrapTextQuoteWithContext(
+        clean.stage as unknown as ParentNode,
+        anchor,
+        'the-mark'
+      )
+    ).toBe(true);
+    const cleanOffset = markOffset(clean.stage, 'the-mark');
+    expect(cleanOffset).toBe(4);
+
+    const painted = build();
+    expect(
+      wrapTextQuoteWithContext(
+        painted.stage as unknown as ParentNode,
+        { exact: 'the target text' },
+        'earlier-mark'
+      )
+    ).toBe(true);
+    expect(
+      wrapTextQuoteWithContext(
+        painted.stage as unknown as ParentNode,
+        anchor,
+        'the-mark'
+      )
+    ).toBe(true);
+
+    // The same place, not merely the same words. Under the old flow this was
+    // 34: the occurrence in the tail, because the one the reader meant was
+    // hidden inside the earlier mark.
+    expect(markOffset(painted.stage, 'the-mark')).toBe(cleanOffset);
+
+    unwrapTextQuotes(painted.stage as unknown as ParentNode);
+    expect(painted.p.textContent).toBe(
+      'the target text repeated here and target text here'
+    );
+  });
+
+  test('two comments on the same words both paint rather than one vanishing', () => {
+    /**
+     * Overlap used to be dropped, on a rule about nesting that repaint already
+     * handles by unwrapping first. A dropped mark tells a reader their comment
+     * points at something this page cannot show, with the text in front of
+     * them.
+     */
     const stage = new TestElement('div');
     const p = new TestElement('p');
     p.textContent = 'the target text repeated here and target text here';
     stage.appendChild(p);
 
-    // Paint first mark
-    const placed1 = wrapTextQuoteWithContext(
-      stage as unknown as ParentNode,
-      { exact: 'the target text' },
-      'first-mark'
-    );
-    expect(placed1).toBe(true);
+    expect(
+      wrapTextQuoteWithContext(
+        stage as unknown as ParentNode,
+        { exact: 'the target text' },
+        'first-mark'
+      )
+    ).toBe(true);
+    expect(
+      wrapTextQuoteWithContext(
+        stage as unknown as ParentNode,
+        { exact: 'target text', prefix: 'the ' },
+        'second-mark'
+      )
+    ).toBe(true);
 
-    // A second comment quoting a subset of the already-marked text
-    // should not nest inside the first mark.
-    const placed2 = wrapTextQuoteWithContext(
-      stage as unknown as ParentNode,
-      { exact: 'target text', prefix: 'the ' },
-      'second-mark'
+    expect(markOffset(stage, 'first-mark')).toBe(0);
+    expect(markOffset(stage, 'second-mark')).toBe(4);
+
+    unwrapTextQuotes(stage as unknown as ParentNode);
+    expect(stage.querySelectorAll('mark')).toHaveLength(0);
+    expect(p.textContent).toBe(
+      'the target text repeated here and target text here'
     );
-    expect(placed2).toBe(true);
-    const nested = stage.querySelectorAll('mark mark');
-    expect(nested).toHaveLength(0);
+  });
+
+  test('capture records the selection the reader made, inside an existing mark', () => {
+    /**
+     * The reported path. The reader had commented, so their words carried a
+     * mark; they highlighted new text inside it and commented again, and the
+     * second comment pointed where the first one did.
+     *
+     * Capture used to read a flow with marked text removed, so the container
+     * of this selection was not in it at all, and the context it wrote out
+     * described a different occurrence entirely. The context has to describe
+     * the occurrence the reader selected, so the anchor cannot be satisfied by
+     * the other one.
+     */
+    const stage = new TestElement('div');
+    const p = new TestElement('p');
+    p.textContent = 'the target text repeated here and target text here';
+    stage.appendChild(p);
+
+    // An earlier comment marks the opening phrase, exactly as the page would.
+    expect(
+      wrapTextQuoteWithContext(
+        stage as unknown as ParentNode,
+        { exact: 'the target text' },
+        'earlier-mark'
+      )
+    ).toBe(true);
+
+    // The reader selects "target text" inside that mark.
+    const marked = stage.querySelectorAll('mark.relic-text-mark')[0];
+    const inside = marked?.childNodes[0] as TestText;
+    expect(inside.data).toContain('target text');
+    const at = inside.data.indexOf('target text');
+
+    const anchor = captureSelectionQuote(
+      stage as unknown as HTMLElement,
+      {
+        startContainer: inside,
+        startOffset: at,
+        endContainer: inside,
+        endOffset: at + 'target text'.length,
+      } as unknown as Range,
+      { toString: () => 'target text' } as unknown as Selection
+    );
+
+    expect(anchor).not.toBeNull();
+    expect(anchor?.kind).toBe('quote');
+    const quote = anchor as Extract<CommentAnchor, { kind: 'quote' }>;
+    expect(quote.exact).toBe('target text');
+    // The words before it in the document, which is what distinguishes the
+    // occurrence the reader chose from the one further along.
+    expect(quote.prefix).toBe('the ');
+
+    // And the captured anchor resolves back to that same place on a clean
+    // page: capture and resolution reading one document is the whole point.
+    const fresh = new TestElement('div');
+    const freshP = new TestElement('p');
+    freshP.textContent = 'the target text repeated here and target text here';
+    fresh.appendChild(freshP);
+    expect(
+      wrapTextQuoteWithContext(
+        fresh as unknown as ParentNode,
+        quote,
+        'round-trip'
+      )
+    ).toBe(true);
+    expect(markOffset(fresh, 'round-trip')).toBe(4);
+  });
+
+  test('the hidden markdown source is not part of the document', () => {
+    /**
+     * The Markdown view keeps the source in a hidden `pre.raw` beside the
+     * rendered prose, for the source toggle. It used to be in the text flow,
+     * which put the whole document in there twice: every phrase got a second
+     * candidate, and a quote at the end of the prose took its trailing
+     * context from source the reader cannot see.
+     */
+    const stage = new TestElement('div');
+    const prose = new TestElement('article');
+    const para = new TestElement('p');
+    para.textContent = 'ends on the last words.';
+    prose.appendChild(para);
+    const raw = new TestElement('pre');
+    raw.classList.add('raw');
+    raw.hidden = true;
+    raw.textContent = '# Heading\n\nends on the last words.';
+    stage.appendChild(prose);
+    stage.appendChild(raw);
+
+    const at = para.textContent.indexOf('last words');
+    const text = para.childNodes[0] as TestText;
+    const anchor = captureSelectionQuote(
+      stage as unknown as HTMLElement,
+      {
+        startContainer: text,
+        startOffset: at,
+        endContainer: text,
+        endOffset: at + 'last words'.length,
+      } as unknown as Range,
+      { toString: () => 'last words' } as unknown as Selection
+    );
+
+    const quote = anchor as Extract<CommentAnchor, { kind: 'quote' }>;
+    expect(quote.exact).toBe('last words');
+    // What follows in the document, and nothing beyond its end.
+    expect(quote.suffix ?? '').toBe('.');
+
+    // And the mark lands in the prose the reader is looking at.
+    expect(
+      wrapTextQuoteWithContext(
+        stage as unknown as ParentNode,
+        quote,
+        'prose-mark'
+      )
+    ).toBe(true);
+    const marks = stage.querySelectorAll('mark[data-comment-id="prose-mark"]');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]?.closest('pre.raw')).toBeNull();
   });
 
   test('label wording matches the chip wording and abbreviates over 60 characters', () => {

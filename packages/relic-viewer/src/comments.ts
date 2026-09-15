@@ -714,46 +714,60 @@ export interface QuoteContext {
 }
 
 /**
- * Collects content text nodes from a root, skipping text inside existing marks
- * and non-content controls so marks never nest on repaint.
+ * Elements whose text is not the document's content.
+ *
+ * Overlays and controls this page added, script and style, and anything
+ * hidden. `pre.raw` is the Markdown source the view keeps beside the rendered
+ * prose for the source toggle: including it puts the whole document into the
+ * flow twice, which gives every phrase a second candidate and lets a mark
+ * resolve into an element the reader cannot see.
+ *
+ * `mark.relic-text-mark` is deliberately not here. See below.
+ */
+const NON_CONTENT =
+  '.comment-pins, .comment-region, .mark-bubble, .mark-hint,' +
+  ' .mark-quote-action, script, style, [hidden], pre.raw';
+
+/**
+ * The document's content text, in order, as the reader sees it.
+ *
+ * **A mark's text is content.** This used to skip text inside
+ * `mark.relic-text-mark`, so the flow changed shape depending on which
+ * comments happened to be painted, and capture and resolution read different
+ * documents: capture runs with marks on the page, resolution runs immediately
+ * after `unwrapTextQuotes` has removed them.
+ *
+ * That asymmetry is the defect this function exists to remove. A reader who
+ * had already commented, then selected text inside their own mark, produced a
+ * selection whose container was not in the flow at all; capture fell back to
+ * the first occurrence it could still see, which was in another paragraph,
+ * and the new comment anchored there. The chip named the right words and the
+ * mark landed beside the previous comment.
+ *
+ * Nesting was the reason for the old rule and it is handled where it belongs:
+ * `paintMarks` unwraps every mark before it paints, so resolution never sees
+ * one, and `wrapTextQuoteWithContext` skips a node already inside a mark so a
+ * provisional mark cannot nest inside a posted one painted in the same pass.
  */
 export function walkContentTextNodes(root: ParentNode): Text[] {
   const nodes: Text[] = [];
   if (
-    typeof document !== 'undefined' &&
-    typeof document.createTreeWalker === 'function'
+    typeof document === 'undefined' ||
+    typeof document.createTreeWalker !== 'function'
   ) {
-    const walker = document.createTreeWalker(
-      root as Node,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          const parent = (node as Text).parentElement;
-          if (
-            parent?.closest(
-              'mark.relic-text-mark, .comment-pins, .mark-bubble, script, style'
-            )
-          ) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        },
-      }
-    );
-    let curr = walker.nextNode();
-    while (curr !== null) {
-      const textNode = curr as Text;
-      const parent = textNode.parentElement;
-      if (
-        !parent?.closest(
-          'mark.relic-text-mark, .comment-pins, .mark-bubble, script, style'
-        )
-      ) {
-        nodes.push(textNode);
-      }
-      curr = walker.nextNode();
-    }
     return nodes;
+  }
+
+  const walker = document.createTreeWalker(root as Node, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      return (node as Text).parentElement?.closest(NON_CONTENT)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  for (let curr = walker.nextNode(); curr !== null; curr = walker.nextNode()) {
+    nodes.push(curr as Text);
   }
   return nodes;
 }
@@ -854,6 +868,15 @@ export function wrapTextQuoteWithContext(
     if (span.end <= matchStart || span.start >= matchEnd) {
       continue;
     }
+
+    // Overlap is painted, not skipped. Two readers commenting on the same
+    // words is an ordinary thing, and a comment whose mark was silently
+    // dropped reads to the reader as a comment pointing at nothing while the
+    // text sits in front of them.
+    //
+    // Repaint cannot accumulate nesting, because `paintMarks` unwraps every
+    // mark before it paints, so the only marks present during a pass are the
+    // ones this pass put there.
 
     const textNode = span.node;
     const localStart = Math.max(0, matchStart - span.start);
