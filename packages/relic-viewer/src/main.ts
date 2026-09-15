@@ -3012,12 +3012,58 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         }
       };
 
-      describeTools();
-      // Re-describe when the subtree changes, which is how a late artifact is
-      // noticed. Disconnected with the stage: an observer outliving the
-      // subtree it watches is a leak on every navigation.
+      /**
+       * Which artifacts are on the stage, as a comparable string.
+       *
+       * The row is rebuilt only when this changes, and that condition is not
+       * an optimisation. Arming appends a hint and a keyboard box into the
+       * stage, so an observer that reacted to any subtree mutation rebuilt
+       * the row in response to its own controls: the fresh toggle came back
+       * with `aria-pressed="false"`, `armed()` then read false, and every
+       * arrow key was dropped by the handler's own guard. Arming looked
+       * correct on screen, with the crosshair and the keyboard box both
+       * visible, and did nothing.
+       */
+      const artifacts = (): string =>
+        [
+          'iframe.usercontent-frame',
+          'img.relic-image',
+          'canvas.relic-page',
+          'video.relic-media',
+          'audio.relic-media',
+        ]
+          .filter((selector) => next.querySelector(selector) !== null)
+          .join(',');
+
+      // `attach` runs again on every repaint, and a repaint happens while a
+      // reader is aiming: the resize observer fires as the keyboard box is
+      // sized. Rebuilding the row then replaces the toggle that `arm` had
+      // just marked pressed, so `mode` ends up on an orphaned button and
+      // `armed()` reads false while the stage still shows the crosshair, the
+      // hint, and the keyboard box. Arming looked correct and every arrow key
+      // was dropped by the handler's own guard.
+      //
+      // So the row is rebuilt only when the artifacts it describes change.
+      // The signature is stored on the element rather than in a closure,
+      // because each `attach` call makes a fresh closure and a fresh closure
+      // remembers nothing.
+      const signature = artifacts();
+      if (next.dataset.markTools !== signature) {
+        next.dataset.markTools = signature;
+        describeTools();
+      }
+      // Watches for an artifact that mounts after the stage does, which for a
+      // pdf relic is the normal case rather than a race. Disconnected with
+      // the stage: an observer outliving the subtree it watches leaks on
+      // every navigation.
       if (typeof MutationObserver !== 'undefined') {
-        lateArtifact = new MutationObserver(describeTools);
+        lateArtifact?.disconnect();
+        lateArtifact = new MutationObserver(() => {
+          const now = artifacts();
+          if (next.dataset.markTools === now) return;
+          next.dataset.markTools = now;
+          describeTools();
+        });
         lateArtifact.observe(next, { childList: true, subtree: true });
       }
 
