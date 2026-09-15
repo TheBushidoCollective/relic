@@ -2548,6 +2548,15 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       dismiss();
       return;
     }
+    // Captured before the bubble is built, and the bubble is only offered if
+    // it succeeded. A button that anchors to a position the reader did not
+    // select is worse than no button: the chip names their words either way,
+    // so the only place the difference shows is the mark, after posting.
+    const target = captureSelectionQuote(surface, range, selection);
+    if (target === null) {
+      dismiss();
+      return;
+    }
 
     dismiss();
     const rect = range.getBoundingClientRect();
@@ -2565,12 +2574,8 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     offered.addEventListener('mousedown', (event) => {
       event.preventDefault();
     });
-    // The quote is captured here rather than re-read on click, so what gets
-    // anchored is what the bubble appeared for.
-    const target = captureSelectionQuote(surface, range, selection) ?? {
-      kind: 'quote',
-      exact: quote,
-    };
+    // Captured above rather than re-read on click, so what gets anchored is
+    // what the bubble appeared for.
     offered.addEventListener('click', () => {
       aim(target);
     });

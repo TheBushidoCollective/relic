@@ -147,26 +147,32 @@ export function captureSelectionQuote(
     spans.push({ node, start, end: fullText.length });
   }
 
-  let selStart = findNodeOffsetInFullText(
+  const selStart = findNodeOffsetInFullText(
     spans,
     range.startContainer,
     range.startOffset
   );
-  let selEnd = findNodeOffsetInFullText(
+  const selEnd = findNodeOffsetInFullText(
     spans,
     range.endContainer,
     range.endOffset
   );
 
-  // Fallback if containers were not found in text spans
+  // No fallback to "the first occurrence of these words". That is what
+  // produced the reported defect: with the flow missing the text inside an
+  // existing mark, a selection the reader had just made could not be located,
+  // and this quietly anchored the comment to the first occurrence it could
+  // see, in another paragraph, beside an earlier comment. The chip named the
+  // right words, so nothing looked wrong until the mark appeared somewhere
+  // else.
+  //
+  // The flow now includes marked text, so this is unreachable for an ordinary
+  // selection on the stage, which a test asserts. If it is ever reached again
+  // the honest answer is no anchor, because an anchor pointing somewhere the
+  // reader did not select is worse than none: they cannot see that it is
+  // wrong until after they have posted.
   if (selStart === undefined || selEnd === undefined || selStart >= selEnd) {
-    const idx = fullText.indexOf(exact);
-    if (idx !== -1) {
-      selStart = idx;
-      selEnd = idx + exact.length;
-    } else {
-      return { kind: 'quote', exact };
-    }
+    return null;
   }
 
   // Adjust for any leading whitespace trimmed from raw selection
