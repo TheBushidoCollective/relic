@@ -142,6 +142,13 @@ const SHARE_URL_DISCLOSURE =
   'opens the file for anyone who reads it, this transcript included.';
 
 /**
+ * Disclosure for the key phrase / mnemonic wherever it is returned.
+ * The phrase is the key in spoken word form.
+ */
+export const KEY_PHRASE_DISCLOSURE =
+  'The key phrase is the decryption key: it opens the relic for anyone who hears or reads it, this transcript included.';
+
+/**
  * The cost of asking the service, stated on the tools that spend it.
  *
  * A publisher who does not know a listing spends opens cannot choose not to,
@@ -262,8 +269,10 @@ export const TOOL_DEFINITION = {
       filename: { type: 'string' },
       title: { type: ['string', 'null'] },
       resolved_path: { type: 'string' },
-      report_url: { type: 'string' },
-      disclosure_url: { type: 'string' },
+      key_phrase: {
+        type: 'string',
+        description: `A 12-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
+      },
     },
     required: [
       'url',
@@ -276,6 +285,7 @@ export const TOOL_DEFINITION = {
       'resolved_path',
       'report_url',
       'disclosure_url',
+      'key_phrase',
     ],
     additionalProperties: false,
   },
@@ -341,8 +351,10 @@ export const REPUBLISH_TOOL_DEFINITION = {
       filename: { type: 'string' },
       title: { type: ['string', 'null'] },
       resolved_path: { type: 'string' },
-      report_url: { type: 'string' },
-      disclosure_url: { type: 'string' },
+      key_phrase: {
+        type: 'string',
+        description: `A 12-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
+      },
     },
     required: [
       'relic_id',
@@ -354,6 +366,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
       'resolved_path',
       'report_url',
       'disclosure_url',
+      'key_phrase',
     ],
     additionalProperties: false,
   },
@@ -657,8 +670,10 @@ export const SHOW_TOOL_DEFINITION = {
       expires_at: { type: ['string', 'null'] },
       expires_at_known: { type: 'boolean' },
       source: { type: ['string', 'null'] },
-      source_indexed: { type: 'boolean' },
-      share_url: { type: 'string' },
+      key_phrase: {
+        type: 'string',
+        description: `A 12-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
+      },
       status: { type: 'string' },
       status_basis: { type: 'string', enum: ['mint', 'record', 'local'] },
       status_detail: { type: 'string' },
@@ -702,6 +717,7 @@ export const SHOW_TOOL_DEFINITION = {
       'source',
       'source_indexed',
       'share_url',
+      'key_phrase',
       'status',
       'status_basis',
       'status_detail',
@@ -1321,8 +1337,9 @@ async function callTool(
               'Anyone with this link, ' +
               'including its fragment, can read the file. The key is in the ' +
               'fragment and it is now in this transcript. This machine can ' +
-              'republish it later; the link will not change.\n' +
-              // The publisher is the only party who can act on this, and the
+              'republish it later; the link will not change.\n\n' +
+              `Key phrase: ${result.key_phrase}\n` +
+              `${KEY_PHRASE_DISCLOSURE}\n` +
               // publish call is the only moment they are looking. The relic
               // page used to carry it to the recipient, who cannot do
               // anything about a font that will not load.
@@ -1595,8 +1612,10 @@ function listTranscript(result: ListResult): string {
  * an edit instead of a guess.
  */
 function showTranscript(result: ShowResult): string {
-  const lines = [relicLine(result)];
-
+  const lines = [
+    relicLine(result) +
+      `\n  key phrase: ${result.key_phrase}\n  ${KEY_PHRASE_DISCLOSURE}`,
+  ];
   if (result.versions !== null) {
     lines.push(
       result.versions === result.version
@@ -1712,6 +1731,8 @@ async function callRepublish(
               'The share URL is unchanged: everyone holding the existing ' +
               'link, including its fragment, now sees this content. There ' +
               'is no new link to hand out.\n\n' +
+              `Key phrase: ${result.key_phrase}\n` +
+              `${KEY_PHRASE_DISCLOSURE}\n\n` +
               `${
                 result.title !== null
                   ? `The title "${result.title}" is not encrypted: the service stores it and every link preview shows it. Pass an empty title to publish without one.`

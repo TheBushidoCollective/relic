@@ -803,6 +803,7 @@ describe('the MCP surface', () => {
     expect(Object.keys(result.structuredContent).sort()).toEqual([
       'disclosure_url',
       'filename',
+      'key_phrase',
       'relic_expires_at',
       'relic_id',
       'renderer_class',
@@ -931,6 +932,7 @@ describe('republish', () => {
     expect(Object.keys(result.structuredContent).sort()).toEqual([
       'disclosure_url',
       'filename',
+      'key_phrase',
       'relic_expires_at',
       'relic_id',
       'renderer_class',
