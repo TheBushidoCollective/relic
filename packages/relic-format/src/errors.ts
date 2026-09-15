@@ -134,3 +134,31 @@ export class CommentTooLargeError extends RelicFormatError {
     );
   }
 }
+
+/**
+ * A mnemonic phrase fails word count, contains an unknown word or prefix,
+ * has an invalid checksum, or decodes to an integer outside the 128-bit key range.
+ */
+export class InvalidMnemonicError extends RelicFormatError {
+  override readonly name = 'InvalidMnemonicError';
+  readonly wordCount?: number | undefined;
+
+  constructor(
+    readonly reason: 'count' | 'unknown_word' | 'range' | 'checksum',
+    readonly wordIndex?: number | undefined,
+    message?: string,
+    wordCount?: number | undefined
+  ) {
+    super(
+      message ??
+        (reason === 'count'
+          ? `mnemonic must contain exactly 12 words, got ${wordCount ?? wordIndex ?? 'unknown'}`
+          : reason === 'unknown_word'
+            ? `unknown mnemonic word at index ${wordIndex}`
+            : reason === 'checksum'
+              ? 'invalid mnemonic checksum'
+              : 'mnemonic value exceeds 128-bit key range')
+    );
+    this.wordCount = wordCount ?? (reason === 'count' ? wordIndex : undefined);
+  }
+}

@@ -32,6 +32,7 @@ import {
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
+import { localStorageKeyVault } from './vault.ts';
 
 // The adapter table is installed once, from the one module that knows the
 // complete built-in set. See `anchor-adapters.ts` for why registration is not
@@ -98,11 +99,17 @@ import {
   type TreeNode,
 } from './rendered-tree.ts';
 import {
+  buildCommentedDashboardRows,
+  buildLocalDashboardRows,
+  type DashboardRelicRow,
   type DeadView,
   formatBytes,
-  type KeyVault,
+  isKeyEntryRecoverable,
   load,
+  loadCommentedRelics,
   loadHistoricalVersion,
+  type MintResponse,
+  openRelicWithKey,
   type ReadyView,
   type ViewerDeps,
 } from './viewer.ts';
@@ -4112,7 +4119,13 @@ function renderReady(
   showCurrent();
 }
 
-function renderDead(dead: DeadView): void {
+export function renderDead(
+  dead: DeadView,
+  relicId?: string,
+  usercontentOrigin?: string,
+  deps?: ViewerDeps,
+  cachedCiphertext?: { bytes: Uint8Array; mint: MintResponse }
+): void {
   const bar = document.createElement('header');
   bar.className = 'bar';
   const mark = document.createElement('div');
@@ -4152,6 +4165,85 @@ function renderDead(dead: DeadView): void {
     card.appendChild(link);
   }
 
+  if (isKeyEntryRecoverable(dead.code) && relicId && deps) {
+    const keySection = document.createElement('div');
+    keySection.className = 'key-entry';
+
+    const prompt = document.createElement('p');
+    prompt.className = 'key-entry-prompt';
+    prompt.textContent =
+      'If you have the decryption key or recovery phrase for this relic, enter it below.';
+
+    const form = document.createElement('form');
+    form.className = 'key-entry-form';
+
+    const label = document.createElement('label');
+    label.className = 'key-entry-label';
+    label.htmlFor = 'relic-key-input';
+    label.textContent = 'Key, share link, or recovery phrase';
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'key-entry-row';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.id = 'relic-key-input';
+    input.name = 'key';
+    input.className = 'compose-input key-entry-input';
+    input.placeholder = 'Paste link, #r1..., or recovery words';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.required = true;
+
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.className = 'action primary key-entry-submit';
+    submit.textContent = 'Open relic';
+
+    inputRow.append(input, submit);
+
+    const feedback = document.createElement('div');
+    feedback.className = 'key-entry-feedback';
+    feedback.setAttribute('role', 'alert');
+
+    form.append(label, inputRow, feedback);
+
+    const cached = cachedCiphertext;
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const enteredValue = input.value;
+      if (enteredValue.trim().length === 0) return;
+
+      submit.disabled = true;
+      feedback.replaceChildren();
+
+      void openRelicWithKey(relicId, enteredValue, deps, cached).then(
+        (result) => {
+          submit.disabled = false;
+          if (result.kind === 'ready') {
+            renderReady(result.view, relicId, usercontentOrigin ?? '', deps);
+            return;
+          }
+          if (result.kind === 'invalid') {
+            feedback.textContent = result.message;
+          } else if (result.kind === 'wrong_key') {
+            feedback.textContent = result.message;
+          } else if (result.kind === 'dead') {
+            feedback.textContent = result.dead.detail;
+          }
+        },
+        () => {
+          submit.disabled = false;
+          feedback.textContent = 'Decryption could not be completed.';
+        }
+      );
+    });
+
+    keySection.append(prompt, form);
+    card.appendChild(keySection);
+  }
+
   const code = document.createElement('div');
   code.className = 'accession';
   code.textContent = dead.code;
@@ -4161,119 +4253,360 @@ function renderDead(dead: DeadView): void {
   document.body.appendChild(main);
 }
 
-const VAULT_PREFIX = 'relic:key:';
+/** A small cover for a dashboard row, built only from local/plain metadata. */
+function dashboardThumbnail(row: DashboardRelicRow): HTMLElement {
+  const thumb = document.createElement('span');
+  thumb.className = `relic-thumbnail relic-thumbnail-${row.previewKind}`;
+  thumb.setAttribute('role', 'img');
+  thumb.setAttribute('aria-label', `${row.previewLabel} relic`);
 
-/**
- * Keys remembered in this browser's storage for the service origin.
- *
- * Storage can be absent or refuse to write: private browsing, a quota, an
- * embedded webview, or a user who has blocked site data. None of that should
- * cost somebody the relic they are currently looking at, so every operation
- * degrades to doing nothing. The worst case is the behaviour that existed
- * before this: a reload asks for the original link.
- *
- * Entries carry their relic's expiry and are swept on every read, so storage
- * does not accumulate keys to relics that stopped existing days ago.
- */
-export function localStorageKeyVault(
-  storage: Storage | undefined = globalThis.localStorage,
-  now: () => number = Date.now
-): KeyVault {
-  const read = (): Storage | undefined => {
-    try {
-      // Touching localStorage throws outright in some embedded contexts,
-      // rather than being absent, so the guard has to be a try and not a null
-      // check.
-      return storage ?? undefined;
-    } catch {
-      return undefined;
-    }
-  };
+  const rule = document.createElement('span');
+  rule.className = 'relic-thumbnail-rule';
+  rule.setAttribute('aria-hidden', 'true');
 
-  const sweep = (store: Storage): void => {
-    const stale: string[] = [];
-    for (let i = 0; i < store.length; i++) {
-      const name = store.key(i);
-      if (name === null || !name.startsWith(VAULT_PREFIX)) continue;
-      try {
-        const entry = JSON.parse(store.getItem(name) ?? '') as {
-          expiresAt?: number | null;
-        };
-        // null is how a never-expires entry is persisted; JSON has no
-        // Infinity. Any other non-number is corruption, and swept.
-        if (
-          (entry.expiresAt !== null && typeof entry.expiresAt !== 'number') ||
-          (typeof entry.expiresAt === 'number' && entry.expiresAt <= now())
-        ) {
-          stale.push(name);
-        }
-      } catch {
-        // Unreadable entry. Not ours to interpret, and not worth keeping.
-        stale.push(name);
-      }
-    }
-    for (const name of stale) store.removeItem(name);
-  };
+  const label = document.createElement('span');
+  label.className = 'relic-thumbnail-label';
+  label.textContent = row.previewLabel;
 
-  return {
-    remember(relicId, fragment, expiresAt) {
-      const store = read();
-      if (store === undefined) return;
-      // NaN stays refused: an unparsable date is corruption, not forever.
-      // Infinity passes, because a relic with no lifetime is worth keeping
-      // the key for until it is deleted.
-      if (Number.isNaN(expiresAt) || expiresAt <= now()) return;
-      try {
-        store.setItem(
-          `${VAULT_PREFIX}${relicId}`,
-          JSON.stringify({
-            fragment,
-            expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
-          })
-        );
-      } catch {
-        // Quota, or storage disabled mid-session. A remembered key is a
-        // convenience; failing to store one is not worth an error page.
-      }
-    },
-
-    recall(relicId) {
-      const store = read();
-      if (store === undefined) return undefined;
-      try {
-        sweep(store);
-        const raw = store.getItem(`${VAULT_PREFIX}${relicId}`);
-        if (raw === null) return undefined;
-        const entry = JSON.parse(raw) as {
-          fragment?: unknown;
-          expiresAt?: unknown;
-        };
-        if (typeof entry.fragment !== 'string') return undefined;
-        if (typeof entry.expiresAt === 'number' && entry.expiresAt <= now()) {
-          return undefined;
-        }
-        // null means never expires. Anything else that is not a number is
-        // corruption, and recalls nothing.
-        if (entry.expiresAt !== null && typeof entry.expiresAt !== 'number') {
-          return undefined;
-        }
-        return entry.fragment;
-      } catch {
-        return undefined;
-      }
-    },
-
-    forget(relicId) {
-      const store = read();
-      if (store === undefined) return;
-      try {
-        store.removeItem(`${VAULT_PREFIX}${relicId}`);
-      } catch {
-        // Nothing to do, and nothing worth telling the reader about.
-      }
-    },
-  };
+  thumb.append(rule, label);
+  return thumb;
 }
+
+export async function renderDashboard(deps: ViewerDeps): Promise<void> {
+  const bar = document.createElement('header');
+  bar.className = 'bar';
+  const mark = document.createElement('div');
+  mark.className = 'mark';
+  mark.textContent = WORDMARK;
+  bar.appendChild(mark);
+
+  const title = document.createElement('div');
+  title.className = 'accession';
+  title.textContent = 'Dashboard';
+  bar.appendChild(title);
+
+  document.body.replaceChildren(bar);
+
+  const main = document.createElement('main');
+  main.className = 'stage stage-dashboard';
+
+  const container = document.createElement('div');
+  container.className = 'dashboard-container';
+
+  const h1 = document.createElement('h1');
+  h1.className = 'dashboard-title';
+  h1.textContent = 'Relic Dashboard';
+  container.appendChild(h1);
+
+  // Section 1: Relics this browser can open
+  const localSection = document.createElement('section');
+  localSection.className = 'dashboard-section local-relics-section';
+
+  const localHeading = document.createElement('h2');
+  localHeading.className = 'dashboard-section-title';
+  localHeading.textContent = 'Relics this browser can open';
+
+  const localNote = document.createElement('p');
+  localNote.className = 'dashboard-section-note';
+  localNote.textContent =
+    'These keys are saved in this browser. You can open these relics without signing in.';
+
+  localSection.append(localHeading, localNote);
+
+  const localListContainer = document.createElement('div');
+  localListContainer.className = 'local-relics-list-container';
+
+  const paintLocalList = (): void => {
+    localListContainer.replaceChildren();
+    const rows = buildLocalDashboardRows(deps.keyVault);
+    if (rows.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'relic-list-empty';
+      empty.textContent = 'No relics currently saved in this browser.';
+      localListContainer.appendChild(empty);
+      return;
+    }
+
+    const ul = document.createElement('ul');
+    ul.className = 'dashboard-relic-list';
+
+    for (const row of rows) {
+      const li = document.createElement('li');
+      li.className = 'dashboard-relic-item';
+
+      const info = document.createElement('div');
+      info.className = 'dashboard-relic-info';
+
+      const link = document.createElement('a');
+      link.className = 'relic-link';
+      link.href = `/${encodeURIComponent(row.relicId)}#${row.fragment ?? ''}`;
+      link.textContent = row.title;
+      info.appendChild(link);
+
+      const actions = document.createElement('div');
+      actions.className = 'dashboard-relic-actions';
+
+      const forgetBtn = document.createElement('button');
+      forgetBtn.type = 'button';
+      forgetBtn.className = 'action action-forget';
+      forgetBtn.textContent = 'Forget';
+      forgetBtn.addEventListener('click', () => {
+        deps.keyVault.forget(row.relicId);
+        paintLocalList();
+      });
+      actions.appendChild(forgetBtn);
+
+      li.append(dashboardThumbnail(row), info, actions);
+      ul.appendChild(li);
+    }
+    localListContainer.appendChild(ul);
+  };
+
+  paintLocalList();
+  localSection.appendChild(localListContainer);
+
+  // Vault export & import tools
+  const vaultTools = document.createElement('div');
+  vaultTools.className = 'vault-tools';
+
+  const toolsTitle = document.createElement('h3');
+  toolsTitle.className = 'vault-tools-title';
+  toolsTitle.textContent = 'Key backup and transfer';
+
+  const toolsNote = document.createElement('p');
+  toolsNote.className = 'vault-tools-note';
+  toolsNote.textContent =
+    'Exporting creates a backup file containing the decryption keys for every relic listed above. Anyone holding this backup can open your relics. Keep it safe and treat it as a credential.';
+
+  const toolsRow = document.createElement('div');
+  toolsRow.className = 'vault-tools-actions';
+
+  const exportBtn = document.createElement('button');
+  exportBtn.type = 'button';
+  exportBtn.className = 'action vault-export-btn';
+  exportBtn.textContent = 'Export keys';
+  exportBtn.addEventListener('click', () => {
+    const data = deps.keyVault.exportEntries
+      ? deps.keyVault.exportEntries()
+      : JSON.stringify({ version: 1, entries: [] });
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'relic-keys-backup.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('Key backup exported. Treat this file as a credential.');
+  });
+
+  const importToggleBtn = document.createElement('button');
+  importToggleBtn.type = 'button';
+  importToggleBtn.className = 'action vault-import-toggle-btn';
+  importToggleBtn.textContent = 'Import keys';
+
+  const importPanel = document.createElement('div');
+  importPanel.className = 'vault-import-panel';
+  importPanel.hidden = true;
+
+  const importLabel = document.createElement('label');
+  importLabel.className = 'compose-field';
+  importLabel.textContent = 'Key backup JSON:';
+
+  const importInput = document.createElement('textarea');
+  importInput.className = 'compose-textarea vault-import-input';
+  importInput.placeholder = 'Paste exported JSON here...';
+  importInput.rows = 4;
+
+  const importSubmitBtn = document.createElement('button');
+  importSubmitBtn.type = 'button';
+  importSubmitBtn.className = 'action primary vault-import-submit-btn';
+  importSubmitBtn.textContent = 'Apply import';
+
+  const importFeedback = document.createElement('div');
+  importFeedback.className = 'vault-import-feedback';
+
+  importToggleBtn.addEventListener('click', () => {
+    importPanel.hidden = !importPanel.hidden;
+  });
+
+  importSubmitBtn.addEventListener('click', () => {
+    const raw = importInput.value.trim();
+    if (raw.length === 0) return;
+    const result = deps.keyVault.importEntries
+      ? deps.keyVault.importEntries(raw)
+      : { added: 0, skipped: 0 };
+    importInput.value = '';
+    importPanel.hidden = true;
+    paintLocalList();
+    toast(`Imported ${result.added} keys (${result.skipped} skipped).`);
+  });
+
+  importPanel.append(importLabel, importInput, importSubmitBtn, importFeedback);
+  toolsRow.append(exportBtn, importToggleBtn);
+  vaultTools.append(toolsTitle, toolsNote, toolsRow, importPanel);
+  localSection.appendChild(vaultTools);
+
+  container.appendChild(localSection);
+
+  // Section 2: Relics you have commented on / Auth section
+  const session = await readSession(deps);
+
+  if (session.kind === 'verified') {
+    const commentedSection = document.createElement('section');
+    commentedSection.className = 'dashboard-section commented-relics-section';
+
+    const commentedHeading = document.createElement('h2');
+    commentedHeading.className = 'dashboard-section-title';
+    commentedHeading.textContent = 'Relics you have commented on';
+
+    const sessionInfo = document.createElement('p');
+    sessionInfo.className = 'dashboard-session-info';
+    sessionInfo.textContent = `Signed in as ${session.email}.`;
+
+    commentedSection.append(commentedHeading, sessionInfo);
+
+    const commentedList = document.createElement('div');
+    commentedList.className = 'commented-relics-list-container';
+    commentedList.textContent = 'Loading commented relics...';
+    commentedSection.appendChild(commentedList);
+
+    container.appendChild(commentedSection);
+
+    void loadCommentedRelics(deps).then((commented) => {
+      commentedList.replaceChildren();
+      if (commented === null || commented.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'relic-list-empty';
+        empty.textContent =
+          commented === null
+            ? 'Could not load commented relics.'
+            : 'You have not commented on any relics yet.';
+        commentedList.appendChild(empty);
+        return;
+      }
+
+      const rows = buildCommentedDashboardRows(commented, deps.keyVault);
+      const ul = document.createElement('ul');
+      ul.className = 'dashboard-relic-list';
+
+      for (const row of rows) {
+        const li = document.createElement('li');
+        li.className = `dashboard-relic-item ${row.hasKey ? 'relic-openable' : 'relic-unopenable'}`;
+
+        const info = document.createElement('div');
+        info.className = 'dashboard-relic-info';
+
+        if (row.hasKey && row.fragment) {
+          const link = document.createElement('a');
+          link.className = 'relic-link';
+          link.href = `/${encodeURIComponent(row.relicId)}#${row.fragment}`;
+          link.textContent = row.title;
+          info.appendChild(link);
+        } else {
+          const titleSpan = document.createElement('span');
+          titleSpan.className = 'relic-title-unopenable';
+          titleSpan.textContent = row.title;
+
+          const unopenableNote = document.createElement('p');
+          unopenableNote.className = 'relic-unopenable-note';
+          unopenableNote.textContent =
+            'This browser does not hold the key for this relic. The original link is the only way in.';
+
+          info.append(titleSpan, unopenableNote);
+        }
+
+        li.append(dashboardThumbnail(row), info);
+        ul.appendChild(li);
+      }
+      commentedList.appendChild(ul);
+    });
+  } else {
+    // Signed-out state: show local section plus magic-link sign-in affordance
+    const authSection = document.createElement('section');
+    authSection.className = 'dashboard-section dashboard-auth-section';
+
+    const authHeading = document.createElement('h2');
+    authHeading.className = 'dashboard-section-title';
+    authHeading.textContent = 'Relics you have commented on';
+
+    const authPrompt = document.createElement('p');
+    authPrompt.className = 'dashboard-section-note';
+    authPrompt.textContent =
+      'Sign in with your email address to view relics you have commented on.';
+
+    const form = document.createElement('form');
+    form.className = 'compose compose-identity-dashboard';
+
+    const emailInput = document.createElement('input');
+    emailInput.type = 'email';
+    emailInput.required = true;
+    emailInput.autocomplete = 'email';
+    emailInput.className = 'compose-input';
+    emailInput.placeholder = 'you@example.com';
+
+    const label = document.createElement('label');
+    label.className = 'compose-field';
+    label.textContent = 'Email address:';
+    label.appendChild(emailInput);
+
+    const fine = document.createElement('p');
+    fine.className = 'compose-fine';
+    fine.textContent = DELIVERY_DISCLOSURE;
+
+    const sendBtn = document.createElement('button');
+    sendBtn.type = 'submit';
+    sendBtn.className = 'action primary';
+    sendBtn.textContent = 'Send me a link';
+
+    const outcome = document.createElement('div');
+    outcome.className = 'dashboard-auth-outcome';
+
+    form.append(label, fine, sendBtn, outcome);
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const address = emailInput.value.trim();
+      if (address.length === 0) return;
+
+      sendBtn.disabled = true;
+      outcome.textContent = 'Sending...';
+
+      void (async () => {
+        try {
+          const res = await deps.fetch(
+            `${deps.serviceOrigin}/api/auth/request`,
+            {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ email: address, return_to: '/dashboard' }),
+            }
+          );
+          sendBtn.disabled = false;
+          if (res.status === 202) {
+            outcome.textContent =
+              `If ${plainLabel(address)} can receive mail, a link is on its way. ` +
+              'Following it verifies the address and brings you back to this dashboard.';
+          } else {
+            outcome.textContent = 'Request refused. Please try again.';
+          }
+        } catch {
+          sendBtn.disabled = false;
+          outcome.textContent = 'Network error. Please try again.';
+        }
+      })();
+    });
+
+    authSection.append(authHeading, authPrompt, form);
+    container.appendChild(authSection);
+  }
+
+  main.appendChild(container);
+  document.body.appendChild(main);
+}
+
+export { localStorageKeyVault };
 
 export function makeBrowserDeps(): ViewerDeps {
   return {
@@ -4282,9 +4615,6 @@ export function makeBrowserDeps(): ViewerDeps {
     keyVault: localStorageKeyVault(),
     takeFragment: () => window.location.hash,
     stripFragment: () => {
-      // Replace the current entry with the fragment removed. The URL that
-      // carried it already existed, so this shrinks the window rather than
-      // closing it.
       window.history.replaceState(
         null,
         '',
@@ -4295,18 +4625,36 @@ export function makeBrowserDeps(): ViewerDeps {
   };
 }
 
-async function main(): Promise<void> {
-  const root = document.getElementById('relic-root');
+export async function boot(
+  root: HTMLElement | null = typeof document !== 'undefined'
+    ? document.getElementById('relic-root')
+    : null,
+  deps: ViewerDeps = makeBrowserDeps()
+): Promise<void> {
+  const viewMarker = root?.dataset['view'];
   const relicId = root?.dataset['relicId'] ?? '';
   const usercontentOrigin = root?.dataset['usercontentOrigin'] ?? '';
-  const deps = makeBrowserDeps();
+
+  if (viewMarker === 'dashboard') {
+    await renderDashboard(deps);
+    return;
+  }
+
   const state = await load(relicId, deps);
 
-  if (state.kind === 'ready')
+  if (state.kind === 'ready') {
     renderReady(state.view, relicId, usercontentOrigin, deps);
-  else if (state.kind === 'dead') renderDead(state.dead);
+  } else if (state.kind === 'dead') {
+    renderDead(
+      state.dead,
+      relicId,
+      usercontentOrigin,
+      deps,
+      state.cachedCiphertext
+    );
+  }
 }
 
 if (typeof document !== 'undefined') {
-  void main();
+  void boot();
 }

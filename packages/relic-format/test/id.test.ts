@@ -110,6 +110,7 @@ describe('the three validation checks', () => {
     expect(table).toContain('p011cy');
     expect(table).toContain('ap1');
     expect(table).toContain('hea1th');
+    expect(table).toContain('dashb0ard');
   });
 });
 

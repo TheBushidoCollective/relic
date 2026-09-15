@@ -136,6 +136,12 @@ export interface CommentRow {
   readonly ciphertext: string;
 }
 
+/** Summary of an author's engagement with a relic. */
+export interface CommentedRelic {
+  readonly relicId: string;
+  readonly lastCommentAt: number;
+}
+
 /**
  * A verified email session, minted by following a magic link.
  *
@@ -242,6 +248,11 @@ export interface RelicStore {
    * the thing it comments on is a retention defect, not a leftover.
    */
   deleteCommentsForRelic(relicId: string): Promise<number>;
+  /**
+   * Relics an author has commented on, ordered by most recent engagement first.
+   * Scoped strictly to the author address.
+   */
+  listCommentedRelics(author: string): Promise<readonly CommentedRelic[]>;
 
   putAuthLink(row: AuthLinkRow): Promise<void>;
   /** Single use: reading it consumes it, whether or not it had expired. */
@@ -418,6 +429,32 @@ export class MemoryStore implements RelicStore {
     const removed = this.comments.get(relicId)?.length ?? 0;
     this.comments.delete(relicId);
     return removed;
+  }
+
+  async listCommentedRelics(
+    author: string
+  ): Promise<readonly CommentedRelic[]> {
+    const results: CommentedRelic[] = [];
+    for (const [relicId, thread] of this.comments) {
+      let lastCommentAt: number | undefined;
+      for (const comment of thread) {
+        if (comment.author === author) {
+          if (
+            lastCommentAt === undefined ||
+            comment.createdAt > lastCommentAt
+          ) {
+            lastCommentAt = comment.createdAt;
+          }
+        }
+      }
+      if (lastCommentAt !== undefined) {
+        results.push({ relicId, lastCommentAt });
+      }
+    }
+    return results.sort(
+      (a, b) =>
+        b.lastCommentAt - a.lastCommentAt || (a.relicId < b.relicId ? -1 : 1)
+    );
   }
 
   async putAuthLink(row: AuthLinkRow): Promise<void> {

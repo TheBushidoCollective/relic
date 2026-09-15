@@ -181,6 +181,10 @@ body {
   left: 50%;
   z-index: 6;
   margin: 0;
+  /* With `left` set and no `right`, a shrink-to-fit box is capped at half the
+     container, so a sentence that fits on one line wrapped anyway. */
+  width: max-content;
+  max-width: calc(100% - 1.4rem);
   padding: 0.35rem 0.7rem;
   background: var(--patina);
   color: #fff;
@@ -2318,10 +2322,17 @@ canvas.relic-page {
   border-style: dashed;
 }
 
+/* Anchored to the bottom of the media stage, so `top` from `.mark-hint` has to
+   be released. Carrying both classes with both edges set stretched the tooltip
+   from the top of the stage to just above its base: a one-line sentence became
+   a white panel covering the video it was describing. */
 .mark-time-hint {
   position: absolute;
+  top: auto;
   bottom: 1rem;
   left: 50%;
+  width: max-content;
+  max-width: calc(100% - 2rem);
   transform: translateX(-50%);
   background: var(--surface);
   border: 1px solid var(--rule);
@@ -2333,4 +2344,268 @@ canvas.relic-page {
   pointer-events: none;
   z-index: 10;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+/* ---------- Key entry on dead cards ---------- */
+
+.key-entry {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+}
+
+.key-entry-prompt {
+  margin: 0 0 0.75rem;
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+}
+
+.key-entry-label {
+  display: block;
+  font-family: var(--sans);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: 0.35rem;
+}
+
+.key-entry-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.key-entry-input {
+  flex: 1 1 auto;
+}
+
+.key-entry-submit {
+  flex-shrink: 0;
+}
+
+.key-entry-feedback {
+  margin-top: 0.5rem;
+  font-size: 0.86rem;
+  color: var(--oxide);
+  min-height: 1.2rem;
+}
+
+/* ---------- Dashboard ---------- */
+
+.stage-dashboard {
+  display: flex;
+  justify-content: center;
+  padding: 2.5rem 1.5rem 4rem;
+  width: 100%;
+  overflow-y: auto;
+}
+
+.dashboard-container {
+  max-width: 44rem;
+  width: 100%;
+}
+
+.dashboard-title {
+  font-family: var(--sans);
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0 0 1.5rem;
+  color: var(--ink);
+}
+
+.dashboard-section {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--patina);
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.dashboard-section-title {
+  font-family: var(--sans);
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+  color: var(--ink);
+}
+
+.dashboard-section-note {
+  margin: 0 0 1.25rem;
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+}
+
+.dashboard-session-info {
+  margin: 0 0 1.25rem;
+  font-size: 0.86rem;
+  color: var(--patina);
+  font-weight: 500;
+}
+
+.dashboard-relic-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.dashboard-relic-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--rule);
+  gap: 1rem;
+}
+
+.dashboard-relic-item:last-child {
+  border-bottom: none;
+}
+
+/* A thumbnail here is an accession cover, not cached relic content. It uses
+   metadata this browser or the server already holds, so painting the dashboard
+   never spends an open and never creates a second plaintext copy of the file. */
+.relic-thumbnail {
+  --thumb-tone: var(--ink-soft);
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  flex: 0 0 4.75rem;
+  width: 4.75rem;
+  height: 3.35rem;
+  padding: 0.42rem;
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  border-top: 4px solid var(--thumb-tone);
+  background:
+    linear-gradient(
+      90deg,
+      transparent 0 18%,
+      color-mix(in srgb, var(--thumb-tone) 12%, transparent) 18% 19%,
+      transparent 19% 100%
+    ),
+    var(--ground);
+  color: var(--ink);
+}
+
+.relic-thumbnail-rule {
+  align-self: center;
+  height: 1.05rem;
+  border-block: 1px solid color-mix(in srgb, var(--thumb-tone) 46%, transparent);
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0 0.22rem,
+    color-mix(in srgb, var(--thumb-tone) 24%, transparent) 0.22rem 0.28rem
+  );
+}
+
+.relic-thumbnail-label {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relic-thumbnail-code,
+.relic-thumbnail-component {
+  --thumb-tone: var(--oxide);
+}
+
+.relic-thumbnail-image,
+.relic-thumbnail-media {
+  --thumb-tone: var(--patina);
+}
+
+.relic-thumbnail-pdf,
+.relic-thumbnail-archive {
+  --thumb-tone: var(--patina-ink);
+}
+
+.dashboard-relic-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.relic-link {
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.relic-link:hover {
+  color: var(--patina);
+  text-decoration: underline;
+}
+
+.relic-title-unopenable {
+  font-weight: 500;
+  color: var(--ink-soft);
+  word-break: break-word;
+}
+
+.relic-unopenable-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+.relic-list-empty {
+  margin: 0.75rem 0;
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+.vault-tools {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+}
+
+.vault-tools-title {
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+  color: var(--ink);
+}
+
+.vault-tools-note {
+  margin: 0 0 0.85rem;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+.vault-tools-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.vault-import-panel {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: var(--ground);
+  border: 1px solid var(--rule);
+}
+
+.vault-import-input {
+  width: 100%;
+  margin-top: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+
+.dashboard-auth-section {
+  border-top-color: var(--rule-strong);
+}
+
+.dashboard-auth-outcome {
+  margin-top: 0.75rem;
+  font-size: 0.86rem;
+  color: var(--ink-soft);
 }

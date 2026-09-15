@@ -49,6 +49,31 @@ describe('the app shell', () => {
     expect(shell.length).toBeLessThan(SHELL_CEILING_BYTES);
   });
 
+  test('does not carry the mnemonic wordlist', async () => {
+    const shell = await Bun.file(`${pkgDir}dist/viewer.js`).text();
+
+    // The mnemonic wordlist must be split out and loaded dynamically on demand,
+    // never bundled into the eager viewer.js shell.
+    const wordlistMarkers = ['WORDLIST_SIZE', 'aardvark', 'abacus'];
+    const inlined = wordlistMarkers.filter((marker) => shell.includes(marker));
+    expect(inlined).toEqual([]);
+
+    // The mnemonic module must be emitted in a chunk rather than missing entirely.
+    const chunks = [...new Bun.Glob('chunk-*.js').scanSync(`${pkgDir}dist`)];
+    let carriesMnemonic = false;
+    for (const chunk of chunks) {
+      const content = await Bun.file(`${pkgDir}dist/${chunk}`).text();
+      if (
+        content.includes('WORDLIST_SIZE') ||
+        content.includes('isMnemonicLike') ||
+        content.includes('mnemonicToKey')
+      ) {
+        carriesMnemonic = true;
+      }
+    }
+    expect(carriesMnemonic).toBe(true);
+  });
+
   test('the renderer is emitted as its own chunk', async () => {
     // The other half of the same property. An empty `dist` with no chunk at
     // all would satisfy the shell assertions above while shipping a viewer

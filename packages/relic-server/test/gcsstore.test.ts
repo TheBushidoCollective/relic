@@ -528,4 +528,75 @@ describe('gcsStore', () => {
     );
     expect(await store.getSession('the-secret')).toBeUndefined();
   });
+
+  test('listCommentedRelics returns relics an author commented on, ordered by most recent engagement first', async () => {
+    const store = storeOn(fakeGcs());
+    await store.putComment({
+      id: 'c1',
+      relicId: 'relic1',
+      author: 'reader@example.com',
+      createdAt: 1000,
+      ciphertext: 'YWJjZA',
+    });
+    await store.putComment({
+      id: 'c2',
+      relicId: 'relic2',
+      author: 'reader@example.com',
+      createdAt: 2000,
+      ciphertext: 'YWJjZA',
+    });
+    await store.putComment({
+      id: 'c3',
+      relicId: 'relic1',
+      author: 'reader@example.com',
+      createdAt: 3000,
+      ciphertext: 'YWJjZA',
+    });
+    // Second author comments on relic 3
+    await store.putComment({
+      id: 'c4',
+      relicId: 'relic3',
+      author: 'other@example.com',
+      createdAt: 4000,
+      ciphertext: 'YWJjZA',
+    });
+
+    const readerRelics = await store.listCommentedRelics('reader@example.com');
+    expect(readerRelics).toEqual([
+      { relicId: 'relic1', lastCommentAt: 3000 },
+      { relicId: 'relic2', lastCommentAt: 2000 },
+    ]);
+
+    const otherRelics = await store.listCommentedRelics('other@example.com');
+    expect(otherRelics).toEqual([{ relicId: 'relic3', lastCommentAt: 4000 }]);
+  });
+
+  test('a failed index write in gcsStore does not lose the comment', async () => {
+    const gcs = fakeGcs();
+    const originalFetch = gcs.fetch;
+    gcs.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const name = url.searchParams.get('name') ?? '';
+      if (
+        url.pathname.startsWith('/upload/') &&
+        name.includes('author_relic')
+      ) {
+        return new Response('index write error', { status: 500 });
+      }
+      return originalFetch(input, init);
+    }) as typeof globalThis.fetch;
+    const store = storeOn(gcs);
+
+    await store.putComment({
+      id: 'c1',
+      relicId: 'relic1',
+      author: 'reader@example.com',
+      createdAt: 1000,
+      ciphertext: 'YWJjZA',
+    });
+
+    const comments = await store.listComments('relic1');
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.id).toBe('c1');
+  });
 });
