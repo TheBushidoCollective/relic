@@ -3,12 +3,19 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  COMMENT_NONCE_BYTES,
   decodeKey,
   decryptComment,
   deriveCommentKey,
   encryptComment,
   generateKey,
 } from '@relic/format';
+import {
+  boxPosition,
+  describeAnchor,
+  formatTimecode,
+  parseTimecode,
+} from '../src/comments.ts';
 import { nodeFiles } from '../src/files.ts';
 import { type PublishDeps, publish } from '../src/publish.ts';
 import {
@@ -140,6 +147,22 @@ async function storedKey(relicId: string): Promise<string> {
   return entry.key;
 }
 
+/** Seal arbitrary JSON under a comment key to simulate a newer writer. */
+async function sealRawComment(key: CryptoKey, json: string): Promise<string> {
+  const nonce = crypto.getRandomValues(new Uint8Array(COMMENT_NONCE_BYTES));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce.slice().buffer as ArrayBuffer },
+      key,
+      new TextEncoder().encode(json).slice().buffer as ArrayBuffer
+    )
+  );
+  const framed = new Uint8Array(nonce.length + sealed.length);
+  framed.set(nonce, 0);
+  framed.set(sealed, nonce.length);
+  return Buffer.from(framed).toString('base64url');
+}
+
 describe('writing a comment as the publisher', () => {
   test('sends ciphertext plus the stored token, never the body', async () => {
     const relicId = await publishFixture();
@@ -218,6 +241,167 @@ describe('writing a comment as the publisher', () => {
     expect(structured['code']).toBe('comment_rate_limited');
     expect(structured['retry_after_seconds']).toBe(30);
     expect(JSON.stringify(result['content'])).toMatch(/retry_after_seconds/);
+  });
+
+  test('refuses an over-cap quote with a readable message', async () => {
+    const relicId = await publishFixture();
+    const result = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Feedback on text.',
+      anchor: { kind: 'quote', exact: 'x'.repeat(513) },
+    });
+
+    expect(result['isError']).toBe(true);
+    const structured = result['structuredContent'] as Record<string, unknown>;
+    expect(structured['code']).toBe('local_comment_anchor_quote_too_long');
+    expect(structured['quote_bytes']).toBe(513);
+    expect(structured['limit_bytes']).toBe(512);
+    expect(JSON.stringify(result['content'])).toContain(
+      'the exact quote is 513 bytes of UTF-8 and the limit is 512'
+    );
+    expect(posted).toHaveLength(0);
+  });
+
+  test('refuses over-cap context on a quote anchor', async () => {
+    const relicId = await publishFixture();
+    const result = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Feedback on text.',
+      anchor: {
+        kind: 'quote',
+        exact: 'short phrase',
+        prefix: 'p'.repeat(129),
+      },
+    });
+
+    expect(result['isError']).toBe(true);
+    const structured = result['structuredContent'] as Record<string, unknown>;
+    expect(structured['code']).toBe('local_comment_anchor_context_too_long');
+    expect(structured['context_bytes']).toBe(129);
+    expect(posted).toHaveLength(0);
+  });
+
+  test('refuses an out-of-range time with a readable message', async () => {
+    const relicId = await publishFixture();
+    const tooHigh = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Scene transition comment.',
+      anchor: { kind: 'time', t: 90000 },
+    });
+
+    expect(tooHigh['isError']).toBe(true);
+    const structured = tooHigh['structuredContent'] as Record<string, unknown>;
+    expect(structured['code']).toBe('local_comment_anchor_time_out_of_range');
+    expect(structured['time_seconds']).toBe(90000);
+    expect(structured['max_seconds']).toBe(86400);
+    expect(JSON.stringify(tooHigh['content'])).toContain(
+      'must be between 0 and 86400 seconds'
+    );
+
+    const negative = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Negative offset.',
+      anchor: { kind: 'time', t: -5 },
+    });
+    expect(negative['isError']).toBe(true);
+    expect(
+      (negative['structuredContent'] as Record<string, unknown>)['code']
+    ).toBe('local_comment_anchor_time_out_of_range');
+
+    const invalid = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Malformed timecode.',
+      anchor: { kind: 'time', t: '1:99' },
+    });
+    expect(invalid['isError']).toBe(true);
+    expect(
+      (invalid['structuredContent'] as Record<string, unknown>)['code']
+    ).toBe('local_comment_anchor_time_invalid');
+    expect(posted).toHaveLength(0);
+  });
+
+  test('refuses an inverted time span where end is before start', async () => {
+    const relicId = await publishFixture();
+    const result = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Inverted span.',
+      anchor: { kind: 'time', t: 60, t_end: 45 },
+    });
+
+    expect(result['isError']).toBe(true);
+    const structured = result['structuredContent'] as Record<string, unknown>;
+    expect(structured['code']).toBe('local_comment_anchor_time_span_invalid');
+    expect(structured['t']).toBe(60);
+    expect(structured['t_end']).toBe(45);
+    expect(JSON.stringify(result['content'])).toContain(
+      'must be strictly after the start time'
+    );
+    expect(posted).toHaveLength(0);
+  });
+
+  test('refuses an out-of-range page number', async () => {
+    const relicId = await publishFixture();
+    const zero = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Zero page.',
+      anchor: { kind: 'page', page: 0 },
+    });
+    expect(zero['isError']).toBe(true);
+    expect((zero['structuredContent'] as Record<string, unknown>)['code']).toBe(
+      'local_comment_anchor_page_out_of_range'
+    );
+
+    const tooHigh = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Page past limit.',
+      anchor: { kind: 'page', page: 10001 },
+    });
+    expect(tooHigh['isError']).toBe(true);
+    expect(
+      (tooHigh['structuredContent'] as Record<string, unknown>)['code']
+    ).toBe('local_comment_anchor_page_out_of_range');
+  });
+
+  test('refuses an invalid or zero-area rectangle', async () => {
+    const relicId = await publishFixture();
+    const zeroArea = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Zero area box.',
+      anchor: {
+        kind: 'region',
+        rect: { x: 0.1, y: 0.1, w: 0, h: 0.2 },
+      },
+    });
+    expect(zeroArea['isError']).toBe(true);
+    expect(
+      (zeroArea['structuredContent'] as Record<string, unknown>)['code']
+    ).toBe('local_comment_anchor_rect_zero_area');
+
+    const overhang = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Overhanging box.',
+      anchor: {
+        kind: 'region',
+        rect: { x: 0.8, y: 0.8, w: 0.5, h: 0.5 },
+      },
+    });
+    expect(overhang['isError']).toBe(true);
+    expect(
+      (overhang['structuredContent'] as Record<string, unknown>)['code']
+    ).toBe('local_comment_anchor_rect_overhang');
+  });
+
+  test('refuses unsupported anchor kind on write', async () => {
+    const relicId = await publishFixture();
+    const result = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Attempt to write unsupported.',
+      anchor: { kind: 'unsupported', declared: 'future:3d' },
+    });
+    expect(result['isError']).toBe(true);
+    expect(
+      (result['structuredContent'] as Record<string, unknown>)['code']
+    ).toBe('local_comment_anchor_unsupported');
   });
 });
 
@@ -400,6 +584,189 @@ describe('reading comments back', () => {
       (result['structuredContent'] as Record<string, unknown>)['code']
     ).toBe('app_response_unusable');
   });
+
+  test('renders descriptions with the exact facts an agent needs for every anchor kind', async () => {
+    const relicId = await publishFixture();
+    const commentKey = await deriveCommentKey(
+      decodeKey(await storedKey(relicId))
+    );
+
+    stored.push({
+      comment_id: 'c1',
+      author: 'alice@example.com',
+      created_at: '2026-08-20T00:00:00Z',
+      ciphertext: await encryptComment(commentKey, {
+        body: 'Consider clarifying this phrase.',
+        display_name: 'Alice',
+        anchor: {
+          kind: 'quote',
+          exact: 'the kestrel audits the lighthouse',
+          prefix: 'as evening fell, ',
+          suffix: ' with quiet precision',
+        },
+      }),
+    });
+
+    stored.push({
+      comment_id: 'c2',
+      author: 'bob@example.com',
+      created_at: '2026-08-20T01:00:00Z',
+      ciphertext: await encryptComment(commentKey, {
+        body: 'Check the artifact contrast here.',
+        display_name: 'Bob',
+        anchor: {
+          kind: 'region',
+          rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+        },
+      }),
+    });
+
+    stored.push({
+      comment_id: 'c3',
+      author: 'carol@example.com',
+      created_at: '2026-08-20T02:00:00Z',
+      ciphertext: await encryptComment(commentKey, {
+        body: 'Audio clip distortion.',
+        display_name: 'Carol',
+        anchor: {
+          kind: 'time',
+          t: 83,
+          t_end: 105,
+          rect: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 },
+        },
+      }),
+    });
+
+    stored.push({
+      comment_id: 'c4',
+      author: 'dave@example.com',
+      created_at: '2026-08-20T03:00:00Z',
+      ciphertext: await encryptComment(commentKey, {
+        body: 'Typo on this page.',
+        display_name: 'Dave',
+        anchor: {
+          kind: 'page',
+          page: 5,
+          exact: 'the final appendix figure',
+        },
+      }),
+    });
+
+    stored.push({
+      comment_id: 'c5',
+      author: 'eve@example.com',
+      created_at: '2026-08-20T04:00:00Z',
+      ciphertext: await encryptComment(commentKey, {
+        body: 'Overall impression is strong.',
+        display_name: 'Eve',
+        anchor: null,
+      }),
+    });
+
+    const result = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relicId,
+    });
+    expect(result['isError']).toBe(false);
+
+    const structured = result['structuredContent'] as Record<string, unknown>;
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+    expect(comments).toHaveLength(5);
+
+    expect(comments[0]?.['anchor']).toEqual({
+      kind: 'quote',
+      exact: 'the kestrel audits the lighthouse',
+      prefix: 'as evening fell, ',
+      suffix: ' with quiet precision',
+    });
+
+    expect(comments[1]?.['anchor']).toEqual({
+      kind: 'region',
+      rect: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+    });
+
+    expect(comments[2]?.['anchor']).toEqual({
+      kind: 'time',
+      t: 83,
+      t_end: 105,
+      rect: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 },
+    });
+
+    expect(comments[3]?.['anchor']).toEqual({
+      kind: 'page',
+      page: 5,
+      exact: 'the final appendix figure',
+    });
+
+    expect(comments[4]?.['anchor']).toBeNull();
+
+    const text = JSON.stringify(result['content']);
+
+    expect(text).toContain('on \\"the kestrel audits the lighthouse\\"');
+    expect(text).toContain(
+      'context: \\"as evening fell, \\" before, \\" with quiet precision\\" after'
+    );
+    expect(text).toContain(
+      'in region (upper left, 10% across, 10% down, 20% wide by 20% high)'
+    );
+    expect(text).toContain(
+      'at 1:23 to 1:45 in region (centre, 40% across, 40% down, 20% wide by 20% high)'
+    );
+    expect(text).toContain('on page 5 at \\"the final appendix figure\\"');
+    expect(text).toContain('about the whole relic');
+  });
+
+  test('reports comments with unsupported anchors as readable with body intact', async () => {
+    const relicId = await publishFixture();
+    const commentKey = await deriveCommentKey(
+      decodeKey(await storedKey(relicId))
+    );
+
+    // Simulates an anchor from a newer format version written by another client
+    const ciphertext = await sealRawComment(
+      commentKey,
+      JSON.stringify({
+        body: 'Notes attached to a 3D bounding mesh.',
+        display_name: 'Future Client',
+        anchor: {
+          kind: 'model3d:mesh',
+          mesh_id: 'xyz-123',
+        },
+      })
+    );
+
+    stored.push({
+      comment_id: 'c-future',
+      author: 'future@example.com',
+      created_at: '2026-08-20T05:00:00Z',
+      ciphertext,
+    });
+
+    const result = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relicId,
+    });
+    expect(result['isError']).toBe(false);
+
+    const structured = result['structuredContent'] as Record<string, unknown>;
+    expect(structured['unreadable_count']).toBe(0);
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+    expect(comments).toHaveLength(1);
+
+    const comment = comments[0];
+    expect(comment?.['readable']).toBe(true);
+    expect(comment?.['unreadable_reason']).toBeNull();
+    expect(comment?.['body']).toBe('Notes attached to a 3D bounding mesh.');
+    expect(comment?.['anchor']).toEqual({
+      kind: 'unsupported',
+      declared: 'model3d:mesh',
+    });
+
+    const text = JSON.stringify(result['content']);
+    expect(text).toContain(
+      'carrying a mark this client does not understand (declared kind \\"model3d:mesh\\")'
+    );
+    expect(text).toContain('Notes attached to a 3D bounding mesh.');
+    expect(text).not.toContain('[unreadable:');
+  });
 });
 
 describe('the machine boundary', () => {
@@ -473,6 +840,223 @@ describe('what an agent is told before it calls anything', () => {
     expect(INSTRUCTIONS).toMatch(/relic_read_comments/);
     expect(INSTRUCTIONS).toMatch(/relic_comment/);
     expect(INSTRUCTIONS).toMatch(/Seven things/);
+  });
+});
+
+describe('anchor round-trip through write and read tools', () => {
+  test('writes each anchor kind and reads it back naming the same place', async () => {
+    const relicId = await publishFixture();
+
+    // 1. Text anchor
+    const textRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on text.',
+      anchor: { kind: 'text', quote: 'original passage' },
+    });
+    expect(textRes['isError']).toBe(false);
+
+    // 2. Quote anchor with disambiguating context
+    const quoteRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on quote.',
+      anchor: {
+        kind: 'quote',
+        exact: 'target run',
+        prefix: 'intro ',
+        suffix: ' outro',
+      },
+    });
+    expect(quoteRes['isError']).toBe(false);
+
+    // 3. Pin anchor
+    const pinRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on pin.',
+      anchor: { kind: 'pin', x: 0.3, y: 0.7 },
+    });
+    expect(pinRes['isError']).toBe(false);
+
+    // 4. Region anchor
+    const regionRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on region.',
+      anchor: {
+        kind: 'region',
+        rect: { x: 0.05, y: 0.05, w: 0.25, h: 0.25 },
+      },
+    });
+    expect(regionRes['isError']).toBe(false);
+
+    // 5. Time anchor with timecode string that must round-trip to the same offset
+    const timeRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on timecode.',
+      anchor: {
+        kind: 'time',
+        t: '1:23',
+        t_end: '1:45',
+      },
+    });
+    expect(timeRes['isError']).toBe(false);
+
+    // 6. Time anchor with seconds number and box
+    const timeBoxRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on media box.',
+      anchor: {
+        kind: 'time',
+        t: 3723,
+        rect: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 },
+      },
+    });
+    expect(timeBoxRes['isError']).toBe(false);
+
+    // 7. Page anchor with exact quote
+    const pageQuoteRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on page quote.',
+      anchor: {
+        kind: 'page',
+        page: 4,
+        exact: 'table caption',
+      },
+    });
+    expect(pageQuoteRes['isError']).toBe(false);
+
+    // 8. Page anchor with rect
+    const pageBoxRes = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Comment on page box.',
+      anchor: {
+        kind: 'page',
+        page: 9,
+        rect: { x: 0.1, y: 0.7, w: 0.3, h: 0.2 },
+      },
+    });
+    expect(pageBoxRes['isError']).toBe(false);
+
+    // Read all comments back through relic_read_comments
+    const readResult = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relicId,
+    });
+    expect(readResult['isError']).toBe(false);
+
+    const structured = readResult['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    expect(structured['count']).toBe(8);
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+
+    expect(comments[0]?.['anchor']).toEqual({
+      kind: 'text',
+      quote: 'original passage',
+    });
+    expect(comments[1]?.['anchor']).toEqual({
+      kind: 'quote',
+      exact: 'target run',
+      prefix: 'intro ',
+      suffix: ' outro',
+    });
+    expect(comments[2]?.['anchor']).toEqual({ kind: 'pin', x: 0.3, y: 0.7 });
+    expect(comments[3]?.['anchor']).toEqual({
+      kind: 'region',
+      rect: { x: 0.05, y: 0.05, w: 0.25, h: 0.25 },
+    });
+    expect(comments[4]?.['anchor']).toEqual({
+      kind: 'time',
+      t: 83,
+      t_end: 105,
+    });
+    expect(comments[5]?.['anchor']).toEqual({
+      kind: 'time',
+      t: 3723,
+      rect: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 },
+    });
+    expect(comments[6]?.['anchor']).toEqual({
+      kind: 'page',
+      page: 4,
+      exact: 'table caption',
+    });
+    expect(comments[7]?.['anchor']).toEqual({
+      kind: 'page',
+      page: 9,
+      rect: { x: 0.1, y: 0.7, w: 0.3, h: 0.2 },
+    });
+
+    const text = JSON.stringify(readResult['content']);
+    expect(text).toContain('on \\"original passage\\"');
+    expect(text).toContain(
+      'on \\"target run\\" (context: \\"intro \\" before, \\" outro\\" after)'
+    );
+    expect(text).toContain('at 30% across, 70% down (stage-relative point)');
+    expect(text).toContain(
+      'in region (upper left, 5% across, 5% down, 25% wide by 25% high)'
+    );
+    expect(text).toContain('at 1:23 to 1:45');
+    expect(text).toContain(
+      'at 1:02:03 in region (centre, 40% across, 40% down, 20% wide by 20% high)'
+    );
+    expect(text).toContain('on page 4 at \\"table caption\\"');
+    expect(text).toContain(
+      'on page 9 in region (lower left, 10% across, 70% down, 30% wide by 20% high)'
+    );
+  });
+});
+
+describe('timecode parsing and formatting helpers', () => {
+  test('formats and parses timecodes symmetrically', () => {
+    expect(formatTimecode(0)).toBe('0:00');
+    expect(formatTimecode(83)).toBe('1:23');
+    expect(formatTimecode(105)).toBe('1:45');
+    expect(formatTimecode(3723)).toBe('1:02:03');
+
+    expect(parseTimecode('1:23', 'test')).toBe(83);
+    expect(parseTimecode('01:23', 'test')).toBe(83);
+    expect(parseTimecode('1:02:03', 'test')).toBe(3723);
+    expect(parseTimecode(83, 'test')).toBe(83);
+    expect(parseTimecode(0, 'test')).toBe(0);
+  });
+
+  test('computes plain-language box positions', () => {
+    expect(boxPosition({ x: 0.1, y: 0.1, w: 0.2, h: 0.2 })).toBe('upper left');
+    expect(boxPosition({ x: 0.4, y: 0.1, w: 0.2, h: 0.2 })).toBe(
+      'upper centre'
+    );
+    expect(boxPosition({ x: 0.7, y: 0.1, w: 0.2, h: 0.2 })).toBe('upper right');
+    expect(boxPosition({ x: 0.1, y: 0.4, w: 0.2, h: 0.2 })).toBe('middle left');
+    expect(boxPosition({ x: 0.4, y: 0.4, w: 0.2, h: 0.2 })).toBe('centre');
+    expect(boxPosition({ x: 0.7, y: 0.4, w: 0.2, h: 0.2 })).toBe(
+      'middle right'
+    );
+    expect(boxPosition({ x: 0.1, y: 0.7, w: 0.2, h: 0.2 })).toBe('lower left');
+    expect(boxPosition({ x: 0.4, y: 0.7, w: 0.2, h: 0.2 })).toBe(
+      'lower centre'
+    );
+    expect(boxPosition({ x: 0.7, y: 0.7, w: 0.2, h: 0.2 })).toBe('lower right');
+    expect(boxPosition({ x: 0.05, y: 0.05, w: 0.9, h: 0.9 })).toBe('centre');
+  });
+
+  test('describes anchors in words an agent can act on', () => {
+    expect(describeAnchor(null)).toBe('about the whole relic');
+    expect(describeAnchor({ kind: 'text', quote: 'sample quote' })).toBe(
+      'on "sample quote"'
+    );
+    expect(
+      describeAnchor({
+        kind: 'quote',
+        exact: 'sample exact',
+        prefix: 'pre ',
+      })
+    ).toBe('on "sample exact" (context: "pre " before)');
+    expect(
+      describeAnchor({
+        kind: 'unsupported',
+        declared: 'custom:mark',
+      })
+    ).toBe(
+      'carrying a mark this client does not understand (declared kind "custom:mark")'
+    );
   });
 });
 
