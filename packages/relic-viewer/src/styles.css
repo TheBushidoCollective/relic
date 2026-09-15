@@ -1980,3 +1980,60 @@ body {
     }
   }
 }
+
+/* ---------- comment region mark ---------- */
+
+/* The region mark outline uses a dual-stroke technique to guarantee high
+   contrast against arbitrary imagery. A 2px solid patina border is paired
+   with an outer dark shadow and an inner light shadow. On pure white photos,
+   the dark outer shadow and patina border provide crisp contrast. On pure
+   black photos, the bright inner shadow and patina border provide crisp
+   contrast. On any background luminance, at least one boundary edge remains
+   visible. */
+.comment-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--patina);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.9);
+  background: color-mix(in srgb, var(--patina) 14%, transparent);
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.comment-region:hover,
+.comment-region.is-active {
+  background: color-mix(in srgb, var(--patina) 28%, transparent);
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
+.comment-region.is-pending,
+.comment-region.is-drawing {
+  border-style: dashed;
+  pointer-events: none;
+  cursor: default;
+}
+
+.comment-region-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.25rem;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: var(--patina);
+  color: #fff;
+  font-family: var(--sans);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85), 0 2px 4px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  user-select: none;
+}

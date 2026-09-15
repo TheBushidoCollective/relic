@@ -1,6 +1,6 @@
+import type { CommentAnchor } from '@relic/format';
 import type { AnchorAdapter, AnchorSurface } from './anchoring.ts';
 import { boxFromUnit } from './anchoring.ts';
-import type { CommentAnchor } from '@relic/format';
 
 /**
  * Checks whether an element is an image element.
@@ -16,12 +16,11 @@ export function isImageElement(element: unknown): element is HTMLImageElement {
   ) {
     return true;
   }
-  return (
-    typeof element === 'object' &&
-    element !== null &&
-    'tagName' in element &&
-    (element as { tagName: string }).tagName.toUpperCase() === 'IMG'
-  );
+  if (element && typeof element === 'object' && 'tagName' in element) {
+    const tag = element.tagName;
+    return typeof tag === 'string' && tag.toUpperCase() === 'IMG';
+  }
+  return false;
 }
 
 /**
