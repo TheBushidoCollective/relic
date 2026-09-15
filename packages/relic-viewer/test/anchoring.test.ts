@@ -12,6 +12,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
   type AnchorSurface,
   adapterFor,
+  anchorKindIsKnown,
+  anchorLabel,
   boxFromUnit,
   contentOffset,
   rectFromCorners,
@@ -56,6 +58,26 @@ function surface(
       getBoundingClientRect: () => box(content),
     } as unknown as HTMLElement,
   };
+}
+
+/**
+ * A surface whose content element reports a tag name.
+ *
+ * Enough for a `supports` predicate, which is the only thing the registry
+ * asks of the content element.
+ */
+function surfaceWithTag(tagName: string): AnchorSurface {
+  const box = {
+    getBoundingClientRect: () => new DOMRect(0, 0, 100, 100),
+    scrollLeft: 0,
+    scrollTop: 0,
+    tagName,
+  };
+  // A hand-built stand-in for an element, which is the one case an unchecked
+  // cast is for: the compiler cannot be shown a real one here and the
+  // registry only ever reads these three members.
+  const asElement = box as unknown as HTMLElement;
+  return { host: asElement, content: asElement };
 }
 
 describe('the content box', () => {
@@ -178,19 +200,28 @@ describe('a drag', () => {
 describe('the adapter registry', () => {
   afterEach(() => resetAnchorAdapters());
 
-  const stub = (kind: string) => ({
+  const anywhere = surface(
+    { left: 0, top: 0, width: 100, height: 100 },
+    { left: 0, top: 0, width: 100, height: 100 }
+  );
+
+  const stub = (
+    kind: string,
+    supports: (s: AnchorSurface) => boolean = () => true,
+    name = kind
+  ) => ({
     kind,
-    label: () => `on a ${kind}`,
+    label: () => `on a ${name}`,
     paint: () => true,
-    supports: () => true,
+    supports,
   });
 
   test('finds an adapter by the anchor it is handed', () => {
     registerAnchorAdapter(stub('region') as never);
-    const found = adapterFor({
-      kind: 'region',
-      rect: { x: 0, y: 0, w: 1, h: 1 },
-    });
+    const found = adapterFor(
+      { kind: 'region', rect: { x: 0, y: 0, w: 1, h: 1 } },
+      anywhere
+    );
     expect(found?.kind).toBe('region');
   });
 
@@ -198,17 +229,71 @@ describe('the adapter registry', () => {
     // The forward-tolerance case reaching the page: the comment is shown and
     // the mark is reported as unplaceable.
     expect(
-      adapterFor({ kind: 'unsupported', declared: 'cell' })
+      adapterFor({ kind: 'unsupported', declared: 'cell' }, anywhere)
     ).toBeUndefined();
   });
 
-  test('registering one kind twice is refused', () => {
-    // Two adapters for one kind is a merge that went wrong, and letting the
-    // second win makes marks depend on module load order.
-    registerAnchorAdapter(stub('time') as never);
-    expect(() => registerAnchorAdapter(stub('time') as never)).toThrow(
-      /already registered/
+  test('two adapters can serve one kind, and the surface decides which', () => {
+    // The case this registry exists for. A quote inside a cross-origin frame
+    // and a quote in this page's own DOM are the same anchor placed by
+    // completely different means, and neither module should contain the
+    // other's mechanism.
+    //
+    // Discriminated on `tagName`, which is what a real adapter's `supports`
+    // reads, rather than on a marker invented for the test.
+    const framed = surfaceWithTag('IFRAME');
+    const inPage = surfaceWithTag('DIV');
+
+    registerAnchorAdapter(
+      stub('quote', (s) => s.content.tagName === 'IFRAME', 'frame') as never
     );
+    registerAnchorAdapter(
+      stub('quote', (s) => s.content.tagName !== 'IFRAME', 'dom') as never
+    );
+
+    const anchor = { kind: 'quote' as const, exact: 'x' };
+    expect(adapterFor(anchor, framed)?.label(anchor as never)).toBe(
+      'on a frame'
+    );
+    expect(adapterFor(anchor, inPage)?.label(anchor as never)).toBe('on a dom');
+  });
+
+  test('a kind whose adapters all decline this surface is absent', () => {
+    // Distinct from having no adapter, and the reader is told the same thing
+    // either way: the mark is real and it cannot be placed here.
+    registerAnchorAdapter(stub('time', () => false) as never);
+    expect(adapterFor({ kind: 'time', t: 12 }, anywhere)).toBeUndefined();
+    // But the kind is still claimed, which is a different question.
+    expect(anchorKindIsKnown({ kind: 'time', t: 12 })).toBe(true);
+    expect(anchorKindIsKnown({ kind: 'page', page: 2 })).toBe(false);
+  });
+
+  test('registration order is the tie-break, so it is stable', () => {
+    registerAnchorAdapter(stub('region', () => true, 'first') as never);
+    registerAnchorAdapter(stub('region', () => true, 'second') as never);
+    const anchor = {
+      kind: 'region' as const,
+      rect: { x: 0, y: 0, w: 1, h: 1 },
+    };
+    expect(adapterFor(anchor, anywhere)?.label(anchor as never)).toBe(
+      'on a first'
+    );
+  });
+
+  test('registering the same adapter object twice is refused', () => {
+    // Two adapters for one kind is expected. The same one arriving twice is a
+    // module evaluated twice, which paints every mark twice.
+    const once = stub('time') as never;
+    registerAnchorAdapter(once);
+    expect(() => registerAnchorAdapter(once)).toThrow(/already registered/);
+  });
+
+  test('the chip asks the kind, not the surface', () => {
+    // A quote is a quote wherever it is placed, so the label does not need a
+    // surface and must not change depending on one.
+    registerAnchorAdapter(stub('page') as never);
+    expect(anchorLabel({ kind: 'page', page: 3 })).toBe('on a page');
+    expect(anchorLabel({ kind: 'time', t: 1 })).toBeUndefined();
   });
 
   test('reports its kinds in a stable order', () => {

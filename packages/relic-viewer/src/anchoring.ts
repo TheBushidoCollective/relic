@@ -209,29 +209,88 @@ export interface AnchorAdapter<K extends CommentAnchor['kind']> {
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous registry; see above
 export type SomeAnchorAdapter = AnchorAdapter<any>;
 
-const adapters = new Map<string, SomeAnchorAdapter>();
+const adapters = new Map<string, SomeAnchorAdapter[]>();
 
 /**
- * Register one kind's adapter.
+ * Register an adapter.
  *
- * Re-registering the same kind is refused rather than allowed to win,
- * because two adapters for one kind is a merge that went wrong and the
- * symptom of letting it through is marks that paint differently depending on
- * module load order.
+ * **A kind may have more than one adapter, and that is the normal case rather
+ * than a collision.** The same anchor means the same thing on two different
+ * surfaces that have nothing in common mechanically: a quote is a run of text
+ * in this document's own DOM, and a quote is also a run of text inside a
+ * cross-origin frame this page cannot read into and has to ask over
+ * `postMessage`. A box is a box on an image, and a box is also a box on a
+ * page of a rendered document.
+ *
+ * Keying only on the kind would force those to be one adapter branching
+ * internally on what it found, which puts the frame transport inside the
+ * text module and the pdf renderer inside the image module. Registering both
+ * and letting `supports` decide keeps each one owning its own surface.
+ *
+ * Registration order is the tie-break and it is stable: first registered,
+ * first asked. An adapter must therefore answer `supports` honestly about
+ * the surface rather than returning true as a default, because a greedy
+ * adapter silently takes marks away from the one that could actually place
+ * them.
  */
 export function registerAnchorAdapter(adapter: SomeAnchorAdapter): void {
-  if (adapters.has(adapter.kind)) {
+  const existing = adapters.get(adapter.kind);
+  if (existing === undefined) {
+    adapters.set(adapter.kind, [adapter]);
+    return;
+  }
+  if (existing.includes(adapter)) {
     throw new Error(
-      `anchor adapter for "${adapter.kind}" is already registered`
+      `this anchor adapter for "${adapter.kind}" is already registered`
     );
   }
-  adapters.set(adapter.kind, adapter);
+  existing.push(adapter);
 }
 
+/**
+ * The adapter that can place this anchor on this surface.
+ *
+ * `undefined` is a real answer with two causes the caller treats alike: no
+ * adapter for the kind at all, which is a comment from a newer writer, and
+ * adapters that exist but none of which supports what is currently rendered,
+ * which is a mark on content this relic no longer shows.
+ */
 export function adapterFor(
-  anchor: CommentAnchor
+  anchor: CommentAnchor,
+  surface: AnchorSurface
 ): SomeAnchorAdapter | undefined {
-  return adapters.get(anchor.kind);
+  for (const adapter of adapters.get(anchor.kind) ?? []) {
+    if (adapter.supports(surface)) return adapter;
+  }
+  return undefined;
+}
+
+/**
+ * Whether any adapter claims this kind at all, regardless of surface.
+ *
+ * Separate from `adapterFor` because the two answer different questions and
+ * the reader is told different things: a kind nothing claims came from a
+ * newer writer, and a kind that is claimed but unsupported here is a mark on
+ * something not currently on screen.
+ */
+export function anchorKindIsKnown(anchor: CommentAnchor): boolean {
+  return (adapters.get(anchor.kind)?.length ?? 0) > 0;
+}
+
+/**
+ * What the composer's chip says, without needing a surface.
+ *
+ * The chip describes the anchor, and an anchor means the same thing wherever
+ * it is placed: a quote is a quote whether the text is in this document or
+ * inside a frame, and page four is page four. So the first registered
+ * adapter for the kind answers, and two adapters for one kind are expected to
+ * agree here even though they place marks by completely different means.
+ *
+ * `undefined` only when nothing claims the kind, which is the newer-writer
+ * case the caller has its own wording for.
+ */
+export function anchorLabel(anchor: CommentAnchor): string | undefined {
+  return adapters.get(anchor.kind)?.[0]?.label(anchor);
 }
 
 /** Every registered kind, for the controls to offer and for tests to assert. */

@@ -22,6 +22,7 @@ import {
 import {
   type AnchorSurface,
   adapterFor,
+  anchorLabel,
   MARK_UNPLACEABLE_NOTE,
   UNSUPPORTED_ANCHOR_LABEL,
 } from './anchoring.ts';
@@ -2048,8 +2049,8 @@ export function paintPendingMark(
   // than a preview that differs from the result.
   const surface = anchorSurfaceFor(host);
   if (surface === undefined) return;
-  const adapter = adapterFor(anchor);
-  if (adapter === undefined || !adapter.supports(surface)) return;
+  const adapter = adapterFor(anchor, surface);
+  if (adapter === undefined) return;
   adapter.paint(surface, pins, anchor, PENDING_MARK_ID);
   for (const painted of pins.querySelectorAll(
     `[data-comment-id="${PENDING_MARK_ID}"]`
@@ -2094,9 +2095,7 @@ export function markTargetLabel(anchor: CommentAnchor | null): string {
   if (anchor === null) return 'Commenting on the whole document';
   if (anchor.kind === 'pin') return 'Commenting on a point';
   if (anchor.kind === 'text') return quotedTargetLabel(anchor.quote);
-  const adapter = adapterFor(anchor);
-  if (adapter === undefined) return UNSUPPORTED_ANCHOR_LABEL;
-  return adapter.label(anchor);
+  return anchorLabel(anchor) ?? UNSUPPORTED_ANCHOR_LABEL;
 }
 
 /**
@@ -2610,11 +2609,10 @@ export function buildThread(
       // as unplaceable rather than dropping either.
       const surface = anchorSurfaceFor(host);
       const adapter =
-        surface === undefined ? undefined : adapterFor(entry.anchor);
+        surface === undefined ? undefined : adapterFor(entry.anchor, surface);
       const placed =
         adapter !== undefined &&
         surface !== undefined &&
-        adapter.supports(surface) &&
         adapter.paint(surface, pins, entry.anchor, entry.id);
       if (!placed) unplaceable.add(entry.id);
     }
