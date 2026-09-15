@@ -21,9 +21,11 @@
 
 import type { RendererClass } from '@relic/format';
 
+import { sha256Hex } from './gcs.ts';
 import type {
   AbuseReport,
   AuthLinkRow,
+  CommentedRelic,
   CommentRow,
   DedupEntry,
   MintLogEntry,
@@ -339,6 +341,22 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
     // make one of them lose their words rather than merely retry.
     async putComment(row: CommentRow): Promise<void> {
       await put(key('comment', row.relicId, `${row.id}.json`), row);
+
+      // Maintain a per-author index so listing an author's commented relics
+      // does not require an unbounded bucket scan. A failed index write must
+      // not lose the comment, which has already landed above.
+      try {
+        const authorKey = await sha256Hex(row.author);
+        const indexName = key('author_relic', authorKey, `${row.relicId}.json`);
+        const existing = await get<CommentedRelic>(indexName);
+        const lastCommentAt =
+          existing !== undefined
+            ? Math.max(existing.value.lastCommentAt, row.createdAt)
+            : row.createdAt;
+        await put(indexName, { relicId: row.relicId, lastCommentAt });
+      } catch (error) {
+        console.error('Failed to update author relic index in GCS', error);
+      }
     },
 
     async getComment(
@@ -370,6 +388,19 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         await remove(key('comment', relicId, `${row.id}.json`));
       }
       return rows.length;
+    },
+
+    async listCommentedRelics(
+      author: string
+    ): Promise<readonly CommentedRelic[]> {
+      const authorKey = await sha256Hex(author);
+      const entries = await list<CommentedRelic>(
+        `${prefix}/author_relic/${authorKey}/`
+      );
+      return [...entries].sort(
+        (a, b) =>
+          b.lastCommentAt - a.lastCommentAt || (a.relicId < b.relicId ? -1 : 1)
+      );
     },
 
     // A link and a session are both keyed by the hash of the secret, never
