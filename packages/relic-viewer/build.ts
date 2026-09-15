@@ -13,6 +13,12 @@ import { copyFile, mkdir, readdir } from 'node:fs/promises';
 const out = new URL('./dist/', import.meta.url).pathname;
 await mkdir(out, { recursive: true });
 
+// Two builds, because exactly one entrypoint wants code splitting and the
+// other two must not have it. `main.ts` dynamically imports the PDF renderer,
+// and splitting is what keeps that 429 KB out of the app shell. `sandbox.ts`
+// is inlined into an HTML document served from the opaque usercontent origin,
+// so a chunk import in it would be a request that document cannot make;
+// `sw.ts` is a service worker, which cannot import a sibling chunk either.
 const built = await Bun.build({
   entrypoints: ['./src/main.ts'],
   outdir: out,
@@ -21,6 +27,10 @@ const built = await Bun.build({
   minify: true,
   splitting: true,
   naming: '[name].js',
+  // React picks its development or production build by reading
+  // `process.env.NODE_ENV`; with no define the bundler keeps the development
+  // branch, which roughly doubles the sandbox page the build then inlines.
+  // Nothing in this repo branches on NODE_ENV itself.
   define: { 'process.env.NODE_ENV': '"production"' },
 });
 
