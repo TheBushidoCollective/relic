@@ -43,6 +43,7 @@ import {
   type RendererClass,
   relicUrl,
 } from '@relic/format';
+import { keyToMnemonic } from '@relic/format/mnemonic';
 import {
   loadCachedMetadata,
   type RecoveredMetadata,
@@ -175,6 +176,7 @@ export interface ShowResult extends RelicRow {
     readonly name: 'relic_republish';
     readonly arguments: { readonly relic_id: string; readonly path: string };
   } | null;
+  readonly key_phrase: string;
 }
 
 /**
@@ -410,6 +412,7 @@ export async function showRelic(
     source: state.source?.description ?? null,
     source_indexed: record?.source_indexed ?? false,
     share_url: shareUrl,
+    key_phrase: keyToMnemonic(decodeKey(state.key)).join(' '),
     republish_call:
       state.source === undefined
         ? null

@@ -18,6 +18,7 @@ import {
   normalizeTitle,
   type RendererClass,
 } from '@relic/format';
+import { keyToMnemonic } from '@relic/format/mnemonic';
 import {
   guessMimetype,
   type PublishDeps,
@@ -72,6 +73,7 @@ export interface RepublishResult {
   readonly resolved_path: string;
   readonly report_url: string;
   readonly disclosure_url: string;
+  readonly key_phrase: string;
   /**
    * Deliberately no `url` member. The share URL is unchanged by a new
    * version, and reprinting it would reprint the key for no new benefit;
@@ -200,5 +202,6 @@ export async function republish(
     resolved_path: source.resolvedPath,
     report_url: String(grant['report_url']),
     disclosure_url: String(grant['disclosure_url']),
+    key_phrase: keyToMnemonic(decodeKey(state.key)).join(' '),
   };
 }

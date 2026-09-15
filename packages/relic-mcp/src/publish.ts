@@ -22,6 +22,7 @@ import {
   type RendererClass,
   relicUrl,
 } from '@relic/format';
+import { keyToMnemonic } from '@relic/format/mnemonic';
 import {
   loadPublishedSource,
   resolveSourceIdentity,
@@ -163,6 +164,7 @@ export interface PublishResult {
   readonly resolved_path: string;
   readonly report_url: string;
   readonly disclosure_url: string;
+  readonly key_phrase: string;
 }
 
 export interface PublishDeps {
@@ -441,6 +443,7 @@ export async function publish(
       resolved_path: source.resolvedPath,
       report_url: String(grant['report_url']),
       disclosure_url: String(grant['disclosure_url']),
+      key_phrase: keyToMnemonic(key).join(' '),
     };
   }
 
