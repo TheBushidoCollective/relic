@@ -1703,6 +1703,38 @@ export function renderSingleVersion(
   return wrap;
 }
 
+/**
+ * How a historical version that loaded is presented.
+ *
+ * One function rather than a branch inside the panel's loader, and the reason
+ * is that the branch was untestable where it sat. The decision lived at a
+ * call site inside an async closure in a module-local function, so nothing
+ * could reach it: replacing the render with a bare notice, which is exactly
+ * the defect being fixed, left every test passing. A guarantee no test can
+ * reach is a guarantee that regresses silently, and this one already had.
+ *
+ * Side by side when the two versions can be diffed, the version on its own
+ * when they cannot. Never neither.
+ */
+export function renderLoadedVersion(
+  current: ReadyView,
+  historical: ReadyView,
+  selectedVersion: number,
+  usercontentOrigin: string
+): HTMLElement {
+  const mode = diffModeForRoutes(current.route, historical.route);
+  if (mode === undefined) {
+    return renderSingleVersion(
+      historical,
+      usercontentOrigin,
+      uncomparableReason(current, historical, selectedVersion)
+    );
+  }
+  if (mode === 'image') return renderImageComparison(current, historical);
+  if (mode === 'code') return renderCodeComparison(current, historical);
+  return renderRenderedComparison(current, historical, mode, usercontentOrigin);
+}
+
 function renderComparison(
   current: ReadyView,
   relicId: string,
@@ -1743,42 +1775,14 @@ function renderComparison(
       return;
     }
 
-    const historicalView = historical.view;
-    const mode = diffModeForRoutes(current.route, historicalView.route);
-    if (mode === undefined) {
-      // Two versions that cannot be diffed are still two versions. This used
-      // to stop at the notice, so a reader who asked for version 2 was told
-      // why they could not have a side-by-side and shown nothing at all,
-      // including nothing of version 2. The version they asked for is the
-      // thing they came for; the comparison was the bonus.
-      scaffold.result.replaceChildren(
-        renderSingleVersion(
-          historicalView,
-          usercontentOrigin,
-          uncomparableReason(current, historicalView, selectedVersion)
-        )
-      );
-      return;
-    }
-
-    if (mode === 'image') {
-      scaffold.result.replaceChildren(
-        renderImageComparison(current, historicalView)
-      );
-    } else if (mode === 'code') {
-      scaffold.result.replaceChildren(
-        renderCodeComparison(current, historicalView)
-      );
-    } else {
-      scaffold.result.replaceChildren(
-        renderRenderedComparison(
-          current,
-          historicalView,
-          mode,
-          usercontentOrigin
-        )
-      );
-    }
+    scaffold.result.replaceChildren(
+      renderLoadedVersion(
+        current,
+        historical.view,
+        selectedVersion,
+        usercontentOrigin
+      )
+    );
   };
 
   const show = (selectedVersion: number): void => {

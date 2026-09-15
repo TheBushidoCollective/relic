@@ -170,10 +170,16 @@ describe('loading a historical version', () => {
     // large to open are different limits, and only the second may stop a
     // version being opened.
     //
-    // Asserted by where it gets to rather than by decrypting 16 MiB: the
+    // Asserted by where it gets to rather than by decrypting 32 MiB: the
     // fetch is issued, and the refusal that comes back is about the bytes
     // not matching their declared length, which is a leg past the gate that
     // used to stop it.
+    //
+    // Twice the ceiling, not a kilobyte over it. `plaintextSizeUpperBound`
+    // subtracts the envelope's own overhead, so a value just past the limit
+    // resolves to an upper bound just under it and the assertion cannot tell
+    // the old gate from the new one. Found by mutating the gate back and
+    // watching this test stay green.
     const current = currentCode();
     const requests: string[] = [];
     const fetch = (async (input) => {
@@ -183,7 +189,7 @@ describe('loading a historical version', () => {
         return Response.json(
           mint(
             'https://storage.example/v2',
-            MAX_DIFF_BYTES + 1024,
+            MAX_DIFF_BYTES * 2,
             2,
             current.currentVersion
           )

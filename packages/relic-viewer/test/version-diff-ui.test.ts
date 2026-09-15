@@ -4,6 +4,7 @@ import {
   buildBar,
   buildCurrentStage,
   renderCodeComparison,
+  renderLoadedVersion,
   renderRenderedComparison,
 } from '../src/main.ts';
 import type { ReadyView } from '../src/viewer.ts';
@@ -293,6 +294,69 @@ describe('version comparison affordance', () => {
         element.className.split(' ').includes('doc-html')
       )
     ).toBe(true);
+  });
+
+  /**
+   * The reported defect, asserted where it actually happened.
+   *
+   * The three tests above prove the reader can reach an earlier version. This
+   * one proves that what they get back contains the version, which is the
+   * sentence in the report: "viewing earlier versions that cannot be compared
+   * should still show that version of the content."
+   */
+  test('an uncomparable version is rendered, not replaced by the reason', () => {
+    // Prose against a picture: both open, neither can be shown beside the
+    // other. This is the pair that used to produce a page with a sentence on
+    // it and nothing else.
+    const current = view('image', 3, new TextEncoder().encode('PNG'));
+    const historical = view(
+      'markdown',
+      2,
+      new TextEncoder().encode('# Notes\n')
+    );
+
+    const result = renderLoadedVersion(
+      current,
+      historical,
+      2,
+      'https://relik-usercontent.example'
+    ) as unknown as ElementStub;
+
+    // The reason is present, because a reader is owed an explanation.
+    expect(textOf(result)).toContain('display differently');
+    // And the version is rendered, which is the part that was missing. The
+    // markdown renderer escapes and then assigns markup, so the content
+    // arrives as `innerHTML` on `.prose` rather than as a text node; the
+    // stub does not parse it, so it is read where it is actually written.
+    const prose = withClass(result, 'prose');
+    expect(prose).toHaveLength(1);
+    expect(prose[0]?.innerHTML).toContain('Notes');
+    // Routed through the real stage builder, not a second simpler path.
+    expect(
+      descendants(result).some((element) => element.className === 'doc')
+    ).toBe(true);
+    expect(withClass(result, 'diff-single')).toHaveLength(1);
+  });
+
+  test('a comparable pair is still compared rather than shown alone', () => {
+    // The other half. A fix that rendered the single version unconditionally
+    // would satisfy the test above and throw away the comparison.
+    const current = view('code', 3, new TextEncoder().encode('b\n'));
+    const historical = view('code', 2, new TextEncoder().encode('a\n'));
+
+    const result = renderLoadedVersion(
+      current,
+      historical,
+      2,
+      'https://relik-usercontent.example'
+    ) as unknown as ElementStub;
+
+    expect(textOf(result)).not.toContain('display differently');
+    expect(
+      descendants(result).some((element) =>
+        element.className.split(' ').includes('diff-single')
+      )
+    ).toBe(false);
   });
 
   test('the rendered comparison renders both versions and shows neither as source', () => {
