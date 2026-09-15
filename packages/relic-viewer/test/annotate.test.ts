@@ -5,7 +5,6 @@ import {
   buildStageWrap,
   buildThread,
   MARK_PIN_HINT,
-  MARK_SANDBOX_NOTE,
   markTargetLabel,
   PENDING_MARK_ID,
 } from '../src/main.ts';
@@ -920,25 +919,43 @@ describe('a relic that renders in a sandboxed frame', () => {
     content: new TextEncoder().encode('<p>hello</p>'),
   };
 
-  test('offers no controls it cannot honour', async () => {
-    // The frame is a different origin with `allow-same-origin` withheld, so
-    // this page cannot read a selection inside it and a click inside it never
-    // arrives out here. A tool that looked armed and then did nothing would
-    // be worse than saying so.
+  test('offers controls it can honour on a framed stage', async () => {
+    // The frame is a different origin with allow-same-origin withheld. Text selection
+    // on the parent window over the frame cannot read into the frame, so no parent
+    // mark-bubble appears. But pointing mode is wired across postMessage, so the
+    // mark-mode toggle is offered and can be armed.
     const mounted = await mount(framed);
     expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
-    expect(withClass(mounted.thread, 'mark-mode')).toHaveLength(0);
+    expect(withClass(mounted.thread, 'mark-mode')).toHaveLength(1);
+
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    expect(only(mounted.thread, 'mark-mode').getAttribute('aria-pressed')).toBe(
+      'true'
+    );
+    expect(mounted.stage.classes()).toContain('is-pinning');
+    expect(textOf(mounted.stage)).toContain(MARK_PIN_HINT);
   });
 
-  test('says why, and claims only the selection', async () => {
+  test('accepts framed selection and region messages as comment targets', async () => {
     const mounted = await mount(framed);
-    expect(textOf(mounted.thread)).toContain(MARK_SANDBOX_NOTE);
-    // A pin is painted by this page into its own overlay, so the note must
-    // not tell the reader that marking is impossible here.
-    expect(MARK_SANDBOX_NOTE).toContain('cannot be selected');
-    expect(MARK_SANDBOX_NOTE).not.toContain('whole relic');
-  });
+    expect(mounted.chip()).toContain('Commenting on the whole document');
 
+    // Selection inside the frame forwards to parent
+    mounted.stage.dispatch('relic:frame-selection', {
+      detail: { type: 'relic:frame-selection', exact: 'framed text' },
+    });
+    expect(mounted.chip()).toContain('Commenting on "framed text"');
+
+    // Arming and dragging a region inside the frame forwards to parent
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.stage.dispatch('relic:frame-region', {
+      detail: {
+        type: 'relic:frame-region',
+        rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 },
+      },
+    });
+    expect(mounted.chip()).toContain('Commenting on a region');
+  });
   test('still announces what a comment would be about', async () => {
     const mounted = await mount(framed);
     expect(mounted.chip()).toContain('Commenting on the whole document');
