@@ -10,6 +10,7 @@ import {
   type KeyVault,
   load,
   loadHistoricalVersion,
+  MAX_RENDER_BYTES,
   type MintResponse,
   type ViewerDeps,
 } from '../src/viewer.ts';
@@ -148,8 +149,9 @@ describe('loading a historical version', () => {
     });
   });
 
-  test('refuses a historical payload over the ceiling before fetching it', async () => {
-    const current = {
+  /** A `code` current version, three revisions deep. */
+  function currentCode() {
+    return {
       filename: 'notes.txt',
       declaredMimetype: 'text/plain',
       content: new TextEncoder().encode('current\n'),
@@ -159,13 +161,69 @@ describe('loading a historical version', () => {
       version: 3,
       currentVersion: 3,
     };
+  }
+
+  test('a version past the comparison limit is still fetched, because it can be read alone', async () => {
+    // The behaviour this replaces refused at the size gate and never issued
+    // the download, so a reader asking for version 2 of a large relic was
+    // shown nothing of version 2. Being too large to diff and being too
+    // large to open are different limits, and only the second may stop a
+    // version being opened.
+    //
+    // Asserted by where it gets to rather than by decrypting 32 MiB: the
+    // fetch is issued, and the refusal that comes back is about the bytes
+    // not matching their declared length, which is a leg past the gate that
+    // used to stop it.
+    //
+    // Twice the ceiling, not a kilobyte over it. `plaintextSizeUpperBound`
+    // subtracts the envelope's own overhead, so a value just past the limit
+    // resolves to an upper bound just under it and the assertion cannot tell
+    // the old gate from the new one. Found by mutating the gate back and
+    // watching this test stay green.
+    const current = currentCode();
+    const requests: string[] = [];
+    const fetch = (async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith('/mint')) {
+        return Response.json(
+          mint(
+            'https://storage.example/v2',
+            MAX_DIFF_BYTES * 2,
+            2,
+            current.currentVersion
+          )
+        );
+      }
+      return new Response(new Uint8Array(8) as unknown as BodyInit);
+    }) as typeof globalThis.fetch;
+
+    const result = await loadHistoricalVersion(
+      generateRelicId(),
+      2,
+      current,
+      deps('', fetch)
+    );
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toBe('https://storage.example/v2');
+    expect(result.kind).toBe('unavailable');
+    if (result.kind !== 'unavailable') return;
+    expect(result.code).toBe('version_truncated');
+  });
+
+  test('a version past what the viewer will allocate is refused before fetching', async () => {
+    // The limit that does still stop a version being opened, and it is the
+    // same one `load` applies to the current version rather than a second
+    // number invented for history.
+    const current = currentCode();
     const requests: string[] = [];
     const fetch = (async (input) => {
       requests.push(String(input));
       return Response.json(
         mint(
           'https://storage.example/v2',
-          MAX_DIFF_BYTES * 2,
+          MAX_RENDER_BYTES * 2,
           2,
           current.currentVersion
         )
@@ -181,8 +239,8 @@ describe('loading a historical version', () => {
 
     expect(result.kind).toBe('unavailable');
     if (result.kind !== 'unavailable') return;
-    expect(result.code).toBe('comparison_too_large');
-    expect(result.detail).toContain('16 MiB');
+    expect(result.code).toBe('version_too_large');
+    // Refused on the declared length, so the bytes are never downloaded.
     expect(requests).toHaveLength(1);
     expect(current.route).toBe('code');
     expect(new TextDecoder().decode(current.content)).toBe('current\n');

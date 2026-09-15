@@ -81,8 +81,10 @@ import {
   comparisonAvailability,
   createImageDiff,
   createTextDiff,
+  diffModeForRoute,
   diffModeForRoutes,
   type TextDiffPart,
+  versionHistoryAvailability,
   versionHistoryCopy,
 } from './diff.ts';
 import { diffTrees, type RenderedChange, type TreeDiff } from './domdiff.ts';
@@ -548,10 +550,18 @@ export function buildBar(
     actions.appendChild(comments);
   }
 
-  const availability = comparisonAvailability(view);
-  if (availability.kind === 'available' && options.onCompare !== undefined) {
-    const label =
-      options.comparisonOpen === true ? 'View current' : 'Compare versions';
+  // Gated on there being history, not on the history being comparable. Those
+  // were the same condition, which is why a download-only or oversize relic
+  // offered no way into its own earlier versions while a notice on the page
+  // said earlier versions existed.
+  const history = versionHistoryAvailability(view);
+  const canCompare = comparisonAvailability(view).kind === 'available';
+  if (history.kind === 'available' && options.onCompare !== undefined) {
+    // The label says what the control does on this relic. "Compare versions"
+    // on something that cannot be compared is the kind of promise that reads
+    // to a reader as their own failure when it does not happen.
+    const closed = canCompare ? 'Compare versions' : 'Earlier versions';
+    const label = options.comparisonOpen === true ? 'View current' : closed;
     const compare = button(label, ICONS.compare, options.onCompare);
     compare.setAttribute(
       'aria-pressed',
@@ -560,7 +570,9 @@ export function buildBar(
     compare.title =
       options.comparisonOpen === true
         ? `Return to version ${view.currentVersion}`
-        : `Compare version ${view.currentVersion} with its history`;
+        : canCompare
+          ? `Compare version ${view.currentVersion} with its history`
+          : `Open an earlier version of this relic`;
     actions.appendChild(compare);
   }
 
@@ -1631,6 +1643,98 @@ function buildComparisonScaffold(): ComparisonScaffold {
   return { main, result, headline, historyNote };
 }
 
+/**
+ * Why these two versions cannot be shown side by side, in a reader's terms.
+ *
+ * One sentence per cause, and each names the version it is about. "Relik
+ * cannot compare them" alone leaves a reader guessing whether they did
+ * something wrong, whether the relic is broken, and whether the version they
+ * asked for arrived.
+ */
+export function uncomparableReason(
+  current: ReadyView,
+  historical: ReadyView,
+  selectedVersion: number
+): string {
+  if (diffModeForRoute(historical.route) === undefined) {
+    return (
+      `Version ${selectedVersion} is download-only, so it cannot be shown ` +
+      `beside version ${current.version}. It is open here on its own.`
+    );
+  }
+  if (diffModeForRoute(current.route) === undefined) {
+    return (
+      `Version ${current.version} is download-only, so it cannot be shown ` +
+      `beside version ${selectedVersion}. Version ${selectedVersion} is ` +
+      'open here on its own.'
+    );
+  }
+  return (
+    `Version ${selectedVersion} and version ${current.version} display ` +
+    `differently, so they cannot be shown side by side. Version ` +
+    `${selectedVersion} is open here on its own.`
+  );
+}
+
+/**
+ * One version, rendered on its own, with a note saying why it is alone.
+ *
+ * Reuses `buildCurrentStage`, which already renders any `ReadyView` through
+ * the same routing the current version gets. That matters more than saving
+ * code: a historical version shown through a second, simpler path would
+ * sanitize differently from the current one, and the sandbox boundary is not
+ * somewhere to keep two implementations.
+ */
+export function renderSingleVersion(
+  view: ReadyView,
+  usercontentOrigin: string,
+  reason: string
+): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'diff-single';
+  wrap.appendChild(notice(reason));
+
+  const label = document.createElement('p');
+  label.className = 'diff-single-label';
+  label.textContent = `Version ${view.version}: ${view.filename}`;
+  wrap.appendChild(label);
+
+  wrap.appendChild(buildCurrentStage(view, usercontentOrigin));
+  return wrap;
+}
+
+/**
+ * How a historical version that loaded is presented.
+ *
+ * One function rather than a branch inside the panel's loader, and the reason
+ * is that the branch was untestable where it sat. The decision lived at a
+ * call site inside an async closure in a module-local function, so nothing
+ * could reach it: replacing the render with a bare notice, which is exactly
+ * the defect being fixed, left every test passing. A guarantee no test can
+ * reach is a guarantee that regresses silently, and this one already had.
+ *
+ * Side by side when the two versions can be diffed, the version on its own
+ * when they cannot. Never neither.
+ */
+export function renderLoadedVersion(
+  current: ReadyView,
+  historical: ReadyView,
+  selectedVersion: number,
+  usercontentOrigin: string
+): HTMLElement {
+  const mode = diffModeForRoutes(current.route, historical.route);
+  if (mode === undefined) {
+    return renderSingleVersion(
+      historical,
+      usercontentOrigin,
+      uncomparableReason(current, historical, selectedVersion)
+    );
+  }
+  if (mode === 'image') return renderImageComparison(current, historical);
+  if (mode === 'code') return renderCodeComparison(current, historical);
+  return renderRenderedComparison(current, historical, mode, usercontentOrigin);
+}
+
 function renderComparison(
   current: ReadyView,
   relicId: string,
@@ -1651,7 +1755,7 @@ function renderComparison(
     const loading = document.createElement('p');
     loading.className = 'diff-loading';
     loading.setAttribute('role', 'status');
-    loading.textContent = `Loading version ${selectedVersion} for comparison.`;
+    loading.textContent = `Loading version ${selectedVersion}.`;
     scaffold.result.replaceChildren(loading);
 
     const historical = await loadHistoricalVersion(
@@ -1664,40 +1768,32 @@ function renderComparison(
     scaffold.result.setAttribute('aria-busy', 'false');
 
     if (historical.kind === 'unavailable') {
+      // The only case that genuinely has nothing to show: the bytes could not
+      // be fetched, opened, or decrypted. Every other refusal now falls
+      // through to rendering the version on its own.
       scaffold.result.replaceChildren(notice(historical.detail));
       return;
     }
 
-    const historicalView = historical.view;
-    const mode = diffModeForRoutes(current.route, historicalView.route);
-    if (mode === undefined) {
-      scaffold.result.replaceChildren(
-        notice(
-          `Version ${selectedVersion} and version ${current.version} use ` +
-            'different display modes, so Relik cannot compare them here.'
-        )
-      );
-      return;
-    }
+    // The heading was written before the fetch, when nothing knew whether a
+    // comparison was possible. Now it does, so it is corrected rather than
+    // left claiming to compare above a page showing one version.
+    const comparable =
+      diffModeForRoutes(current.route, historical.view.route) !== undefined;
+    scaffold.headline.textContent = versionHistoryCopy(
+      current.version,
+      selectedVersion,
+      comparable
+    ).headline;
 
-    if (mode === 'image') {
-      scaffold.result.replaceChildren(
-        renderImageComparison(current, historicalView)
-      );
-    } else if (mode === 'code') {
-      scaffold.result.replaceChildren(
-        renderCodeComparison(current, historicalView)
-      );
-    } else {
-      scaffold.result.replaceChildren(
-        renderRenderedComparison(
-          current,
-          historicalView,
-          mode,
-          usercontentOrigin
-        )
-      );
-    }
+    scaffold.result.replaceChildren(
+      renderLoadedVersion(
+        current,
+        historical.view,
+        selectedVersion,
+        usercontentOrigin
+      )
+    );
   };
 
   const show = (selectedVersion: number): void => {

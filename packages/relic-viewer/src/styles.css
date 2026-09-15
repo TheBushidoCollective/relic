@@ -1342,6 +1342,41 @@ canvas.relic-page {
   font-size: 0.82rem;
 }
 
+/* ---------- one version, shown on its own ---------- */
+
+/* The reason, the label, and the version all sit in one column so the page
+   reads top to bottom. Without this the label sat at the far left of a
+   full-bleed shell while the notice and the rendered version were centred
+   by their own rules, which looked like three unrelated fragments rather
+   than one version with an explanation above it. */
+.diff-single {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+.diff-single > .notice {
+  margin: 0;
+}
+
+.diff-single-label {
+  margin: 0;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+/* The stage builder centres its own children against the reading column, so
+   the wrapper hands it the full width it expects rather than nesting a
+   second narrower one inside this one. */
+.diff-single > .doc,
+.diff-single > .stage {
+  margin: 0;
+  max-width: none;
+}
+
 .diff-view {
   min-width: 0;
 }

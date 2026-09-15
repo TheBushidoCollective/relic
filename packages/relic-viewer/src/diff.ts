@@ -89,12 +89,24 @@ export interface VersionHistoryCopy {
   readonly detail: string;
 }
 
+/**
+ * The panel's heading and standing note.
+ *
+ * `comparable` decides the verb, and it has to: the heading is written before
+ * the version is fetched, so it used to say "Comparing version 1 with version
+ * 2" above a page that then explained no comparison was possible and showed
+ * version 1 alone. The detail line is true either way, because retained
+ * history is retained history whether or not it can be diffed.
+ */
 export function versionHistoryCopy(
   currentVersion: number,
-  historicalVersion: number
+  historicalVersion: number,
+  comparable = true
 ): VersionHistoryCopy {
   return {
-    headline: `Comparing version ${historicalVersion} with version ${currentVersion}`,
+    headline: comparable
+      ? `Comparing version ${historicalVersion} with version ${currentVersion}`
+      : `Version ${historicalVersion} of ${currentVersion}`,
     detail:
       `Version ${currentVersion} is current. Version ${historicalVersion} is ` +
       'retained history and may contain content removed from the current artifact.',
@@ -272,6 +284,36 @@ export function diffModeForRoutes(
     : undefined;
 }
 
+/**
+ * Whether this relic has earlier versions a reader can open.
+ *
+ * Deliberately separate from `comparisonAvailability`, and the separation is
+ * the fix rather than a tidy-up. The two were one predicate, so a relic whose
+ * versions could not be diffed reported no history at all: the control was
+ * never offered and the reader was told earlier versions exist in the same
+ * breath as being given no way to look at them.
+ *
+ * Having history is a property of the relic. Being able to show two versions
+ * side by side is a property of what they contain and how big they are. A
+ * download-only relic has real earlier versions that can be opened and saved;
+ * an oversize one has earlier versions that may be small enough to render.
+ */
+export function versionHistoryAvailability(
+  view: ReadyView
+): { readonly kind: 'none' } | { readonly kind: 'available' } {
+  return Number.isInteger(view.currentVersion) && view.currentVersion > 1
+    ? { kind: 'available' }
+    : { kind: 'none' };
+}
+
+/**
+ * Whether two versions of this relic can be shown side by side.
+ *
+ * Answers only that. A caller that wants to know whether earlier versions
+ * can be reached at all asks `versionHistoryAvailability`, and the copy here
+ * assumes the caller will still offer them: it says comparison is
+ * unavailable, never that the versions are.
+ */
 export function comparisonAvailability(
   view: ReadyView
 ): ComparisonAvailability {
@@ -285,8 +327,8 @@ export function comparisonAvailability(
       kind: 'unavailable',
       code: 'comparison_not_renderable',
       detail:
-        'Earlier versions exist, but this file is download-only. Relik cannot ' +
-        'compare media, archives, or binary files in the browser.',
+        'This file is download-only, so Relik cannot show two versions side ' +
+        'by side in the browser. Each version can still be opened on its own.',
     };
   }
 
@@ -296,8 +338,9 @@ export function comparisonAvailability(
       kind: 'unavailable',
       code: 'comparison_too_large',
       detail:
-        `Earlier versions exist, but this version is larger than the ${ceiling.label} ` +
-        'comparison limit. The current version is still open normally.',
+        `This version is larger than the ${ceiling.label} comparison limit, ` +
+        'so Relik cannot show it beside another. Earlier versions can still ' +
+        'be opened on their own.',
     };
   }
 

@@ -29,7 +29,6 @@ import {
   UnknownVersionError,
   VersionMismatchError,
 } from '@relic/format';
-import { diffCeilingFor, diffModeForRoute } from './diff.ts';
 import { isComponentSource } from './jsx.ts';
 
 /** Refuse before allocating anything this large. */
@@ -405,36 +404,28 @@ export async function loadHistoricalVersion(
   ) {
     return {
       kind: 'unavailable',
-      code: 'comparison_version_invalid',
+      code: 'version_invalid',
       detail:
-        `Version ${requestedVersion} is not available for comparison. Choose ` +
-        `a version from 1 through ${current.currentVersion - 1}.`,
+        `Version ${requestedVersion} does not exist. Choose a version from 1 ` +
+        `through ${current.currentVersion - 1}.`,
     };
   }
 
-  const mode = diffModeForRoute(current.route);
-  if (mode === undefined) {
-    return {
-      kind: 'unavailable',
-      code: 'comparison_not_renderable',
-      detail:
-        'Earlier versions exist, but this file is download-only. Relik cannot ' +
-        'compare media, archives, or binary files in the browser.',
-    };
-  }
-
-  // The ceiling is per mode, because a rendered comparison holds two live DOM
-  // trees the line comparison never allocates.
-  const ceiling = diffCeilingFor(mode);
-  if (current.content.length > ceiling.bytes) {
-    return {
-      kind: 'unavailable',
-      code: 'comparison_too_large',
-      detail:
-        `Version ${current.version} is larger than the ${ceiling.label} ` +
-        'comparison limit. It remains open normally.',
-    };
-  }
+  // Nothing about comparison is decided here, and that is the point of this
+  // function's shape.
+  //
+  // It used to refuse outright when the *current* version was download-only
+  // or over the comparison ceiling, which meant a reader could not reach an
+  // earlier version at all on those relics. The two facts are unrelated: an
+  // earlier version's bytes are fetchable and openable whatever the current
+  // version happens to be, and whether the two can be shown side by side is
+  // a question for whoever renders them. Answering it here turned "we cannot
+  // diff these" into "you cannot see this", which is a different and much
+  // worse sentence.
+  //
+  // The ceiling that does apply is the one `load` applies to any version,
+  // because it bounds what this page will allocate rather than what it will
+  // diff.
 
   let key: Uint8Array;
   let formatVersion: number;
@@ -445,7 +436,7 @@ export async function loadHistoricalVersion(
   } catch {
     return {
       kind: 'unavailable',
-      code: 'comparison_key_unavailable',
+      code: 'version_key_unavailable',
       detail:
         'The in-memory key is no longer available for this comparison. Reopen ' +
         'the original link.',
@@ -470,7 +461,7 @@ export async function loadHistoricalVersion(
   ) {
     return {
       kind: 'unavailable',
-      code: 'comparison_version_mismatch',
+      code: 'version_mismatch',
       detail:
         'The service signed a different version than the viewer requested. ' +
         `Version ${current.version} remains open.`,
@@ -478,14 +469,14 @@ export async function loadHistoricalVersion(
   }
 
   const upperBound = plaintextSizeUpperBound(mintResponse.object_length);
-  if (upperBound > ceiling.bytes) {
+  if (upperBound > MAX_RENDER_BYTES) {
     return {
       kind: 'unavailable',
-      code: 'comparison_too_large',
+      code: 'version_too_large',
       detail:
-        `Version ${requestedVersion} can hold up to ${formatBytes(upperBound)}, ` +
-        `past the ${ceiling.label} comparison limit. Version ` +
-        `${current.version} remains open.`,
+        `Version ${requestedVersion} holds up to ${formatBytes(upperBound)}, ` +
+        `past what this viewer will open. Version ${current.version} ` +
+        'remains open.',
     };
   }
 
@@ -493,7 +484,7 @@ export async function loadHistoricalVersion(
   if (!fetched.ok) {
     return {
       kind: 'unavailable',
-      code: 'comparison_fetch_failed',
+      code: 'version_fetch_failed',
       detail:
         `Version ${requestedVersion} could not be downloaded. Version ` +
         `${current.version} remains open.`,
@@ -504,7 +495,7 @@ export async function loadHistoricalVersion(
   if (bytes.length !== mintResponse.object_length) {
     return {
       kind: 'unavailable',
-      code: 'comparison_truncated',
+      code: 'version_truncated',
       detail:
         `Version ${requestedVersion} did not finish downloading. Version ` +
         `${current.version} remains open.`,
@@ -517,20 +508,20 @@ export async function loadHistoricalVersion(
     if (entry === undefined) {
       return {
         kind: 'unavailable',
-        code: 'comparison_empty',
+        code: 'version_empty',
         detail:
-          `Version ${requestedVersion} has no content to compare. Version ` +
+          `Version ${requestedVersion} has no content. Version ` +
           `${current.version} remains open.`,
       };
     }
 
-    if (opened.content.length > ceiling.bytes) {
+    if (opened.content.length > MAX_RENDER_BYTES) {
       return {
         kind: 'unavailable',
-        code: 'comparison_too_large',
+        code: 'version_too_large',
         detail:
-          `Version ${requestedVersion} is larger than the ${ceiling.label} ` +
-          `comparison limit. Version ${current.version} remains open.`,
+          `Version ${requestedVersion} is larger than this viewer will open. ` +
+          `Version ${current.version} remains open.`,
       };
     }
 
@@ -551,7 +542,7 @@ export async function loadHistoricalVersion(
   } catch {
     return {
       kind: 'unavailable',
-      code: 'comparison_decrypt_failed',
+      code: 'version_decrypt_failed',
       detail:
         `Version ${requestedVersion} could not be decrypted. Version ` +
         `${current.version} remains open.`,

@@ -4,6 +4,7 @@ import {
   buildBar,
   buildCurrentStage,
   renderCodeComparison,
+  renderLoadedVersion,
   renderRenderedComparison,
 } from '../src/main.ts';
 import type { ReadyView } from '../src/viewer.ts';
@@ -223,7 +224,17 @@ describe('version comparison affordance', () => {
     expect(textOf(bar)).toContain('Version 2 of 5');
   });
 
-  test('download-only history states why it cannot compare and keeps the download view', () => {
+  /**
+   * These three assert the same guarantee on the three relics that cannot be
+   * compared, and they used to assert only half of it.
+   *
+   * Checking that the bar does not say "Compare versions" was true and
+   * insufficient: it passes just as well when the bar offers no way into the
+   * history at all, which is what it did, and which is the defect. So each
+   * one now also asserts the control is there under a label that describes
+   * what it actually does.
+   */
+  test('download-only history is reachable, and says why it cannot compare', () => {
     const current = view('download', 3);
     const bar = buildBar(current, 'aaaaaaaaaaaaaaaaaaaaaaaaaa', {
       onCompare: () => {},
@@ -234,6 +245,7 @@ describe('version comparison affordance', () => {
     ) as unknown as ElementStub;
 
     expect(textOf(bar)).not.toContain('Compare versions');
+    expect(textOf(bar)).toContain('Earlier versions');
     expect(textOf(stage)).toContain('download-only');
     expect(
       descendants(stage).some(
@@ -242,7 +254,7 @@ describe('version comparison affordance', () => {
     ).toBe(true);
   });
 
-  test('oversized code history states the ceiling and keeps rendering current', () => {
+  test('oversized code history is reachable, and states the ceiling', () => {
     const current = view('code', 3, new Uint8Array(MAX_DIFF_BYTES + 1));
     const bar = buildBar(current, 'aaaaaaaaaaaaaaaaaaaaaaaaaa', {
       onCompare: () => {},
@@ -253,13 +265,14 @@ describe('version comparison affordance', () => {
     ) as unknown as ElementStub;
 
     expect(textOf(bar)).not.toContain('Compare versions');
+    expect(textOf(bar)).toContain('Earlier versions');
     expect(textOf(stage)).toContain('16 MiB');
     expect(
       descendants(stage).some((element) => element.className === 'code')
     ).toBe(true);
   });
 
-  test('oversized rendered history states the same ceiling and still renders current', () => {
+  test('oversized rendered history is reachable, and states the same ceiling', () => {
     const current = view(
       'sandboxed-html',
       3,
@@ -274,12 +287,76 @@ describe('version comparison affordance', () => {
     ) as unknown as ElementStub;
 
     expect(textOf(bar)).not.toContain('Compare versions');
+    expect(textOf(bar)).toContain('Earlier versions');
     expect(textOf(stage)).toContain('16 MiB');
     expect(
       descendants(stage).some((element) =>
         element.className.split(' ').includes('doc-html')
       )
     ).toBe(true);
+  });
+
+  /**
+   * The reported defect, asserted where it actually happened.
+   *
+   * The three tests above prove the reader can reach an earlier version. This
+   * one proves that what they get back contains the version, which is the
+   * sentence in the report: "viewing earlier versions that cannot be compared
+   * should still show that version of the content."
+   */
+  test('an uncomparable version is rendered, not replaced by the reason', () => {
+    // Prose against a picture: both open, neither can be shown beside the
+    // other. This is the pair that used to produce a page with a sentence on
+    // it and nothing else.
+    const current = view('image', 3, new TextEncoder().encode('PNG'));
+    const historical = view(
+      'markdown',
+      2,
+      new TextEncoder().encode('# Notes\n')
+    );
+
+    const result = renderLoadedVersion(
+      current,
+      historical,
+      2,
+      'https://relik-usercontent.example'
+    ) as unknown as ElementStub;
+
+    // The reason is present, because a reader is owed an explanation.
+    expect(textOf(result)).toContain('display differently');
+    // And the version is rendered, which is the part that was missing. The
+    // markdown renderer escapes and then assigns markup, so the content
+    // arrives as `innerHTML` on `.prose` rather than as a text node; the
+    // stub does not parse it, so it is read where it is actually written.
+    const prose = withClass(result, 'prose');
+    expect(prose).toHaveLength(1);
+    expect(prose[0]?.innerHTML).toContain('Notes');
+    // Routed through the real stage builder, not a second simpler path.
+    expect(
+      descendants(result).some((element) => element.className === 'doc')
+    ).toBe(true);
+    expect(withClass(result, 'diff-single')).toHaveLength(1);
+  });
+
+  test('a comparable pair is still compared rather than shown alone', () => {
+    // The other half. A fix that rendered the single version unconditionally
+    // would satisfy the test above and throw away the comparison.
+    const current = view('code', 3, new TextEncoder().encode('b\n'));
+    const historical = view('code', 2, new TextEncoder().encode('a\n'));
+
+    const result = renderLoadedVersion(
+      current,
+      historical,
+      2,
+      'https://relik-usercontent.example'
+    ) as unknown as ElementStub;
+
+    expect(textOf(result)).not.toContain('display differently');
+    expect(
+      descendants(result).some((element) =>
+        element.className.split(' ').includes('diff-single')
+      )
+    ).toBe(false);
   });
 
   test('the rendered comparison renders both versions and shows neither as source', () => {
