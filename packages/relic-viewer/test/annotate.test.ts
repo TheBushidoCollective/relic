@@ -25,7 +25,7 @@ const STUB_LAID_OUT_HEIGHT = 28;
  * sequence of events leaves behind, which is exactly where the reported bug
  * lived: a selection nobody could see had already chosen it.
  */
-class Node {
+export class Node {
   readonly tagName: string;
   className = '';
   textContent = '';
@@ -143,9 +143,10 @@ class Node {
   }
 
   querySelectorAll(selector: string): Node[] {
+    const parts = selector.split(',').map((part) => part.trim());
     return descendants(this)
       .slice(1)
-      .filter((candidate) => matches(candidate, selector));
+      .filter((candidate) => parts.some((part) => matches(candidate, part)));
   }
 
   querySelector(selector: string): Node | null {
@@ -170,6 +171,12 @@ class Node {
     const held = this.listeners.get(type) ?? [];
     held.push(handler);
     this.listeners.set(type, held);
+  }
+
+  removeEventListener(type: string, handler: (event: unknown) => void): void {
+    const held = this.listeners.get(type) ?? [];
+    const at = held.indexOf(handler);
+    if (at >= 0) held.splice(at, 1);
   }
 
   /**
@@ -228,20 +235,20 @@ function descendants(node: Node): Node[] {
   return [node, ...node.children.flatMap(descendants)];
 }
 
-function withClass(node: Node, name: string): Node[] {
+export function withClass(node: Node, name: string): Node[] {
   return descendants(node).filter((candidate) =>
     candidate.classes().includes(name)
   );
 }
 
 /** Asserts the control exists exactly once before the test acts on it. */
-function only(node: Node, name: string): Node {
+export function only(node: Node, name: string): Node {
   const found = withClass(node, name);
   expect(found).toHaveLength(1);
   return found[0] as Node;
 }
 
-function textOf(node: Node): string {
+export function textOf(node: Node): string {
   return [node.textContent, ...node.children.map(textOf)].join(' ').trim();
 }
 
@@ -258,9 +265,9 @@ interface Scripted {
 }
 
 let scripted: Scripted;
-let documentNode: Node;
+export let documentNode: Node;
 
-function installDom(): void {
+export function installDom(): void {
   documentNode = new Node('#document');
   scripted = {
     collapsed: true,
@@ -334,8 +341,7 @@ function installDom(): void {
   };
 }
 
-function clearDom(): void {
-  delete (globalThis as { document?: unknown }).document;
+export function clearDom(): void {
   delete (globalThis as { window?: unknown }).window;
   delete (globalThis as { Element?: unknown }).Element;
   delete (globalThis as { HTMLElement?: unknown }).HTMLElement;
@@ -372,7 +378,7 @@ function view(overrides: Partial<ReadyView> = {}): ReadyView {
 }
 
 /** A mounted relic, with the handles a test needs to act on it. */
-interface Mounted {
+export interface Mounted {
   readonly thread: Node;
   readonly stage: Node;
   /** A rendered element inside the stage, to select in or click on. */
@@ -403,8 +409,7 @@ interface Seed {
   readonly body: string;
   readonly anchor: CommentAnchor;
 }
-
-async function mount(
+export async function mount(
   overrides: Partial<ReadyView> = {},
   reader: 'verified' | 'anonymous' = 'verified',
   seeds: readonly Seed[] = []
@@ -529,7 +534,7 @@ async function mount(
 }
 
 /** Puts a live, settled selection over the rendered content. */
-function select(mounted: Mounted, text: string): void {
+export function select(mounted: Mounted, text: string): void {
   scripted.collapsed = false;
   scripted.ranges = 1;
   scripted.text = text;

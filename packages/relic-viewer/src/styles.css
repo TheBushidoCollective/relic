@@ -1742,6 +1742,51 @@ canvas.relic-page {
   outline-offset: 2px;
 }
 
+/* Discoverability hint in thread tools, announcing how to aim on this artifact. */
+.thread-hint {
+  font-family: var(--sans);
+  font-size: 0.76rem;
+  color: var(--ink-secondary, #666);
+  font-style: italic;
+  line-height: 1.4;
+}
+
+/* Keyboard and click action in tools row when text is selected in the document. */
+.mark-quote-action {
+  padding: 0.35rem 0.7rem;
+  color: var(--patina-ink);
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--patina-wash, rgba(46, 125, 107, 0.1));
+  border: 1px solid var(--patina);
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.mark-quote-action:hover {
+  background: var(--patina);
+  color: #fff;
+}
+
+.mark-quote-action:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
+/* Keyboard-aimed region box on images with clear focus indication. */
+.comment-region.is-keyboard {
+  outline: 2px dashed var(--patina);
+  background: rgba(46, 125, 107, 0.15);
+}
+
+.stage-wrap.is-pinning:focus-visible,
+.stage-wrap.is-pinning img.relic-image:focus-visible,
+.stage-wrap.is-pinning .doc:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
 /*
  * Below this width, side by side is twenty characters of relic beside twenty
  * characters of conversation, which is neither reading nor commenting. The
