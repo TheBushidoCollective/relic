@@ -181,7 +181,8 @@ describe('media playback support', () => {
     expect(video).toBeDefined();
     if (!video) return;
 
-    expect(video.className).toBe('media-player media-video');
+    expect(video.className).toContain('media-player media-video');
+    expect(video.className).toContain('relic-media');
     expect(video.controls).toBe(true);
     expect(video.hasAttribute('controls')).toBe(true);
     expect(video.hasAttribute('playsinline')).toBe(true);
@@ -223,7 +224,8 @@ describe('media playback support', () => {
     expect(audio).toBeDefined();
     if (!audio) return;
 
-    expect(audio.className).toBe('media-player media-audio');
+    expect(audio.className).toContain('media-player media-audio');
+    expect(audio.className).toContain('relic-media');
     expect(audio.controls).toBe(true);
     expect(audio.hasAttribute('controls')).toBe(true);
     expect(audio.getAttribute('preload')).toBe('metadata');
