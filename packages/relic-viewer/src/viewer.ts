@@ -17,6 +17,8 @@
 import {
   DecryptFailedError,
   deriveRendererClass,
+  encodeFragment,
+  FORMAT_VERSION,
   KeyIdPresentError,
   leastPrivileged,
   MalformedFragmentError,
@@ -30,6 +32,8 @@ import {
   VersionMismatchError,
 } from '@relic/format';
 import { isComponentSource } from './jsx.ts';
+import type { VaultEntry } from './vault.ts';
+export type { VaultEntry };
 
 /** Refuse before allocating anything this large. */
 export const MAX_RENDER_BYTES = 100 * 1024 * 1024;
@@ -37,7 +41,11 @@ export const MAX_RENDER_BYTES = 100 * 1024 * 1024;
 export type ViewerState =
   | { kind: 'loading' }
   | { kind: 'ready'; view: ReadyView }
-  | { kind: 'dead'; dead: DeadView };
+  | {
+      kind: 'dead';
+      dead: DeadView;
+      cachedCiphertext?: { bytes: Uint8Array; mint: MintResponse };
+    };
 
 export interface ReadyView {
   readonly filename: string;
@@ -115,12 +123,23 @@ export interface KeyVault {
   /**
    * Remember a key against a relic, until the relic expires.
    *
-   * `Number.POSITIVE_INFINITY` means the relic has no lifetime, so the key is
+   * Number.POSITIVE_INFINITY means the relic has no lifetime, so the key is
    * kept until the relic is deleted; the forget-on-dead path evicts it then.
    */
-  remember(relicId: string, fragment: string, expiresAt: number): void;
+  remember(
+    relicId: string,
+    fragment: string,
+    expiresAt: number,
+    meta?: { readonly title?: string | undefined }
+  ): void;
   recall(relicId: string): string | undefined;
   forget(relicId: string): void;
+  list?(): readonly VaultEntry[];
+  exportEntries?(): string;
+  importEntries?(json: string): {
+    readonly added: number;
+    readonly skipped: number;
+  };
 }
 
 export interface ViewerDeps {
@@ -340,14 +359,20 @@ export async function load(
       // Deliberately does not say "wrong key". A wrong key, a truncated
       // transfer, and a tampered header produce the identical symptom, and
       // claiming one of them would be a guess presented as a diagnosis.
-      return dead(
-        'This relic could not be opened',
-        'The file did not decrypt. That can mean the link was altered or ' +
-          'shortened, or that the stored file was changed. There is no way ' +
-          'to tell which from here.',
-        'reopen-original-link',
-        'decrypt_failed'
-      );
+      if (fromVault) deps.keyVault.forget(relicId);
+      return {
+        kind: 'dead',
+        dead: {
+          headline: 'This relic could not be opened',
+          detail:
+            'The file did not decrypt. That can mean the link was altered or ' +
+            'shortened, or that the stored file was changed. There is no way ' +
+            'to tell which from here.',
+          action: 'reopen-original-link',
+          code: 'decrypt_failed',
+        },
+        cachedCiphertext: { bytes, mint: mintResponse },
+      };
     }
     return dead(
       'This relic could not be read',
@@ -787,4 +812,352 @@ export function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+export function isKeyEntryRecoverable(code: string): boolean {
+  return (
+    code === 'fragment_missing' ||
+    code === 'fragment_malformed' ||
+    code === 'decrypt_failed'
+  );
+}
+
+export interface ResolvedKey {
+  readonly key: Uint8Array;
+  readonly version: number;
+  readonly fragment: string;
+}
+
+export type KeyResolutionResult =
+  | { readonly kind: 'key'; readonly resolved: ResolvedKey }
+  | { readonly kind: 'invalid'; readonly message: string };
+
+/**
+ * Resolves user-entered text into a relic key and fragment.
+ * Accepts a bare fragment (#r1... or r1...), a full share URL,
+ * or a spoken mnemonic phrase. Dynamically imports the mnemonic
+ * module to keep the wordlist out of the eager shell bundle.
+ */
+export async function resolveEnteredKey(
+  input: string
+): Promise<KeyResolutionResult> {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) {
+    return { kind: 'invalid', message: 'That is not a key.' };
+  }
+
+  let fragmentCandidate: string | undefined;
+  if (trimmed.startsWith('r1')) {
+    fragmentCandidate = trimmed;
+  } else if (trimmed.startsWith('#r1')) {
+    fragmentCandidate = trimmed.slice(1);
+  } else if (trimmed.includes('#r1')) {
+    fragmentCandidate = trimmed.slice(trimmed.indexOf('#r1') + 1);
+  }
+
+  if (fragmentCandidate !== undefined) {
+    try {
+      const parsed = parseFragment(fragmentCandidate);
+      return {
+        kind: 'key',
+        resolved: {
+          key: parsed.key,
+          version: parsed.version,
+          fragment: fragmentCandidate,
+        },
+      };
+    } catch {
+      return { kind: 'invalid', message: 'That is not a key.' };
+    }
+  }
+
+  // Dynamic import of mnemonic module so the wordlist stays out of the eager bundle.
+  const { isMnemonicLike, mnemonicToKey } = await import(
+    '@relic/format/mnemonic'
+  );
+
+  const mnemonicCandidate = trimmed.startsWith('#')
+    ? trimmed.slice(1).trim()
+    : trimmed;
+
+  if (isMnemonicLike(mnemonicCandidate)) {
+    try {
+      const key = mnemonicToKey(mnemonicCandidate);
+      return {
+        kind: 'key',
+        resolved: {
+          key,
+          version: FORMAT_VERSION,
+          fragment: encodeFragment(key),
+        },
+      };
+    } catch {
+      return { kind: 'invalid', message: 'That is not a key.' };
+    }
+  }
+
+  return { kind: 'invalid', message: 'That is not a key.' };
+}
+
+export type KeyEntryAttemptResult =
+  | { readonly kind: 'ready'; readonly view: ReadyView }
+  | { readonly kind: 'invalid'; readonly message: string }
+  | { readonly kind: 'wrong_key'; readonly message: string }
+  | { readonly kind: 'dead'; readonly dead: DeadView };
+
+/**
+ * Attempts to open a relic using manually entered key material.
+ * Performs decryption locally: the key material is never sent in any network request.
+ */
+export async function openRelicWithKey(
+  relicId: string,
+  input: string,
+  deps: ViewerDeps,
+  cachedCiphertext?: { bytes: Uint8Array; mint: MintResponse }
+): Promise<KeyEntryAttemptResult> {
+  const resolution = await resolveEnteredKey(input);
+  if (resolution.kind === 'invalid') {
+    return { kind: 'invalid', message: resolution.message };
+  }
+
+  const { key, version, fragment } = resolution.resolved;
+
+  let bytes: Uint8Array;
+  let mintResponse: MintResponse;
+
+  if (cachedCiphertext !== undefined) {
+    bytes = cachedCiphertext.bytes;
+    mintResponse = cachedCiphertext.mint;
+  } else {
+    const minted = await mint(relicId, deps);
+    if ('dead' in minted) {
+      return { kind: 'dead', dead: minted.dead };
+    }
+    mintResponse = minted.mint;
+
+    const upperBound = plaintextSizeUpperBound(mintResponse.object_length);
+    if (upperBound > MAX_RENDER_BYTES) {
+      return {
+        kind: 'dead',
+        dead: {
+          headline: 'This relic is too large to open here',
+          detail:
+            `It holds up to ${formatBytes(upperBound)}, past what this viewer will ` +
+            'load into a browser tab.',
+          action: 'none',
+          code: 'too_large',
+        },
+      };
+    }
+
+    const fetched = await deps.fetch(mintResponse.url);
+    if (!fetched.ok) {
+      return {
+        kind: 'dead',
+        dead: {
+          headline: 'This relic is no longer available',
+          detail: 'It was removed after this page started loading.',
+          action: 'report',
+          code: 'removed_after_mint',
+        },
+      };
+    }
+
+    bytes = new Uint8Array(await fetched.arrayBuffer());
+    if (bytes.length !== mintResponse.object_length) {
+      return {
+        kind: 'dead',
+        dead: {
+          headline: 'The download was cut short',
+          detail:
+            'The transfer did not complete. This is a network problem, not a ' +
+            'problem with the link.',
+          action: 'retry',
+          code: 'truncated_transfer',
+        },
+      };
+    }
+  }
+
+  try {
+    const opened = await openRelic(bytes, key, version);
+    const entry = opened.envelope.entries[0];
+    if (entry === undefined) {
+      return {
+        kind: 'dead',
+        dead: {
+          headline: 'This relic is empty',
+          detail: 'Its envelope declares no content.',
+          action: 'none',
+          code: 'empty_envelope',
+        },
+      };
+    }
+
+    const route = routeFor(entry.filename, entry.mimetype, opened.content);
+    const shareUrl = shareUrlFor(deps.locationHref, fragment);
+
+    const expiresAt =
+      mintResponse.relic_expires_at === null
+        ? Number.POSITIVE_INFINITY
+        : Date.parse(mintResponse.relic_expires_at);
+
+    deps.keyVault.remember(relicId, fragment, expiresAt, {
+      title: entry.filename,
+    });
+
+    return {
+      kind: 'ready',
+      view: {
+        filename: entry.filename,
+        declaredMimetype: entry.mimetype,
+        content: opened.content,
+        route: route.route,
+        downgradeNotice: route.notice,
+        shareUrl,
+        version: mintResponse.version,
+        currentVersion: mintResponse.current_version,
+      },
+    };
+  } catch (error) {
+    if (error instanceof DecryptFailedError) {
+      return {
+        kind: 'wrong_key',
+        message: 'That key does not open this relic.',
+      };
+    }
+    if (error instanceof KeyIdPresentError) {
+      return {
+        kind: 'dead',
+        dead: {
+          headline: 'This relic is malformed',
+          detail: 'It sets a header field this format forbids.',
+          action: 'none',
+          code: 'keyid_present',
+        },
+      };
+    }
+    if (error instanceof VersionMismatchError) {
+      return {
+        kind: 'dead',
+        dead: {
+          headline: 'This relic does not match its link',
+          detail:
+            'The format version inside the file disagrees with the one in the ' +
+            'link. The link may have been altered.',
+          action: 'none',
+          code: 'version_mismatch',
+        },
+      };
+    }
+    return {
+      kind: 'dead',
+      dead: {
+        headline: 'This relic could not be read',
+        detail: 'Its contents are not in a shape this viewer understands.',
+        action: 'none',
+        code: 'malformed_container',
+      },
+    };
+  }
+}
+
+export interface CommentedRelic {
+  readonly relic_id: string;
+  readonly title: string;
+  readonly renderer_class: string;
+  readonly version: number;
+  readonly published_at: string;
+  readonly expires_at: string | null;
+  readonly last_comment_at: string;
+}
+
+export interface DashboardRelicRow {
+  readonly relicId: string;
+  readonly title: string;
+  readonly hasKey: boolean;
+  readonly fragment?: string | undefined;
+}
+
+export function buildLocalDashboardRows(
+  vault: KeyVault
+): readonly DashboardRelicRow[] {
+  const list = vault.list ? vault.list() : [];
+  return list.map((entry: VaultEntry) => ({
+    relicId: entry.relicId,
+    title: entry.title && entry.title.length > 0 ? entry.title : entry.relicId,
+    hasKey: true,
+    fragment: entry.fragment,
+  }));
+}
+
+export function buildCommentedDashboardRows(
+  commented: readonly CommentedRelic[],
+  vault: KeyVault
+): readonly DashboardRelicRow[] {
+  return commented.map((item) => {
+    const fragment = vault.recall(item.relic_id);
+    return {
+      relicId: item.relic_id,
+      title: item.title && item.title.length > 0 ? item.title : item.relic_id,
+      hasKey: fragment !== undefined,
+      fragment,
+    };
+  });
+}
+
+export async function loadCommentedRelics(
+  deps: ViewerDeps
+): Promise<readonly CommentedRelic[] | null> {
+  try {
+    const response = await deps.fetch(`${deps.serviceOrigin}/api/auth/relics`, {
+      method: 'GET',
+    });
+    if (!response.ok) return null;
+    const body: unknown = await response.json();
+    if (typeof body !== 'object' || body === null || !('relics' in body)) {
+      return null;
+    }
+    const rawRelics = body.relics;
+    if (!Array.isArray(rawRelics)) {
+      return null;
+    }
+    const result: CommentedRelic[] = [];
+    for (const r of rawRelics) {
+      if (typeof r !== 'object' || r === null) continue;
+      if (!('relic_id' in r) || typeof r.relic_id !== 'string') continue;
+      const title =
+        'title' in r && typeof r.title === 'string' ? r.title : r.relic_id;
+      const rendererClass =
+        'renderer_class' in r && typeof r.renderer_class === 'string'
+          ? r.renderer_class
+          : 'generic';
+      const version =
+        'version' in r && typeof r.version === 'number' ? r.version : 1;
+      const publishedAt =
+        'published_at' in r && typeof r.published_at === 'string'
+          ? r.published_at
+          : '';
+      const expiresAt =
+        'expires_at' in r && typeof r.expires_at === 'string'
+          ? r.expires_at
+          : null;
+      const lastCommentAt =
+        'last_comment_at' in r && typeof r.last_comment_at === 'string'
+          ? r.last_comment_at
+          : '';
+      result.push({
+        relic_id: r.relic_id,
+        title,
+        renderer_class: rendererClass,
+        version,
+        published_at: publishedAt,
+        expires_at: expiresAt,
+        last_comment_at: lastCommentAt,
+      });
+    }
+    return result;
+  } catch {
+    return null;
+  }
 }
