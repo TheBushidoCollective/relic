@@ -252,6 +252,8 @@ interface Scripted {
   ranges: number;
   text: string;
   within: Node | undefined;
+  prefix?: string;
+  suffix?: string;
   /** Where the selection sits in the viewport, so the clamp can be reached. */
   top: number;
 }
@@ -318,6 +320,8 @@ function installDom(): void {
       toString: () => scripted.text,
       getRangeAt: () => ({
         commonAncestorContainer: scripted.within,
+        prefix: scripted.prefix,
+        suffix: scripted.suffix,
         getBoundingClientRect: () => ({
           left: 120,
           top: scripted.top,
@@ -603,15 +607,23 @@ describe('aiming a comment at a quote', () => {
   });
 
   test('pressing the bubble is what takes it', async () => {
-    const mounted = await mount();
+    const mounted = await mount({
+      content: new TextEncoder().encode(
+        '# notes\n\nfirst: the second paragraph\n\nsecond: the second paragraph\n'
+      ),
+    });
+    scripted.prefix = 'second: ';
+    scripted.suffix = '\n';
     select(mounted, 'the second paragraph');
     only(mounted.stage, 'mark-bubble').dispatch('click');
 
     expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
     const posted = await mounted.post('about that paragraph');
     expect(posted.anchor).toEqual({
-      kind: 'text',
-      quote: 'the second paragraph',
+      kind: 'quote',
+      exact: 'the second paragraph',
+      prefix: 'second: ',
+      suffix: '\n',
     });
   });
 
