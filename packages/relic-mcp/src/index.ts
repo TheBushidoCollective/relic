@@ -18,7 +18,7 @@ import { Readable } from 'node:stream';
 import { nodeFiles } from './files.ts';
 import { createHttpHandler } from './http.ts';
 import { runInstall, USAGE } from './installer.ts';
-import { requiredOrigin } from './origin.ts';
+import { requiredOrigin, resolveOrigin } from './origin.ts';
 import type { PublishDeps } from './publish.ts';
 import { serveStdio } from './server.ts';
 
@@ -36,10 +36,10 @@ if (argv[0] === '--help' || argv[0] === '-h' || argv[0] === 'help') {
   process.exit(0);
 }
 
-// The value travels with whatever installs this: the plugin sets it, and one
-// plugin version bump moves every install. See origin.ts for why there is no
-// default.
-const serviceOrigin = requiredOrigin(
+// Unset means the hosted service, which is what almost every install wants
+// and is why nothing has to name it. Set it to publish to your own; see
+// origin.ts for the cost that buys and how the destination stays visible.
+const serviceOrigin = resolveOrigin(
   'RELIC_SERVICE_ORIGIN',
   process.env['RELIC_SERVICE_ORIGIN']
 );

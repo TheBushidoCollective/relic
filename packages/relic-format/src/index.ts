@@ -12,6 +12,7 @@ export * from './container.ts';
 export * from './envelope.ts';
 export * from './errors.ts';
 export * from './fragment.ts';
+export * from './hosted.ts';
 export * from './id.ts';
 export * from './renderer-class.ts';
 export * from './rfc8188.ts';

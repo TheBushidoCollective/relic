@@ -225,12 +225,20 @@ async function installClaudeCode(options: Options): Promise<void> {
 
 function withOrigin(spec: ServerSpec, options: Options): ServerSpec {
   const raw = options.origin ?? process.env['RELIC_SERVICE_ORIGIN'];
+
+  // Nothing named, so nothing is written. The client resolves the hosted
+  // service on its own, and a config carrying the default would be a knob
+  // that looks like a decision: the next reader cannot tell whether the
+  // origin was chosen or inherited, and it goes stale if the service ever
+  // moves.
+  if (raw === undefined || raw.trim().length === 0) return spec;
+
   let origin: string;
   try {
     origin = requiredOrigin('--origin', raw);
   } catch (error) {
     process.stderr.write(
-      `${(error as Error).message}\n\nPass --origin https://relik.link\n`
+      `${(error as Error).message}\n\nPass --origin https://your-relic.example\n`
     );
     process.exit(2);
   }

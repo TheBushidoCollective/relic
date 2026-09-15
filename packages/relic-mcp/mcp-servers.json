@@ -4,7 +4,6 @@
     "command": "npx",
     "args": ["-y", "relic-mcp@0.2.0"],
     "env": {
-      "RELIC_SERVICE_ORIGIN": "https://relik.link",
       "RELIC_CLIENT_NAME": "relic-plugin/0.2.0"
     }
   }
