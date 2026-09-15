@@ -154,6 +154,15 @@ export function createApp(options: AppOptions = {}): RelicApp {
     // The same page as the homepage, because a shared /install link should
     // keep working and two copies of install copy would drift.
     if (head === 'install') return landingPage(config);
+    if (head === 'dashboard' || head === 'dashb0ard') {
+      if (segments.length === 1 && request.method === 'GET') {
+        return shell(config, { view: 'dashboard' }, store, now);
+      }
+      if (segments.length === 1) {
+        return new Response('Method not allowed', { status: 405 });
+      }
+      return new Response('Not found', { status: 404 });
+    }
 
     if (head === 'abuse') {
       if (request.method === 'GET') return abuseForm(config);
@@ -382,6 +391,12 @@ export function createApp(options: AppOptions = {}): RelicApp {
     }
     if (first === 'auth' && second === 'session' && request.method === 'GET') {
       return authSession(request, now);
+    }
+    if (first === 'auth' && second === 'relics') {
+      if (third === undefined && request.method === 'GET') {
+        return authRelics(request, now);
+      }
+      return new Response('Method not allowed', { status: 405 });
     }
 
     return new Response('Not found', { status: 404 });
@@ -1523,6 +1538,61 @@ export function createApp(options: AppOptions = {}): RelicApp {
     return json({ email: session.email });
   }
 
+  /**
+   * The caller's commented relics, for their dashboard.
+   *
+   * 401 when there is no valid session, RFC 9457 problem document.
+   * Scope is strictly the caller's verified address.
+   * Absent, tombstoned, and expired relics are filtered out.
+   */
+  async function authRelics(request: Request, now: number): Promise<Response> {
+    const token = sessionCookie(request);
+    if (token === undefined) return refuse('invalid_session');
+    const session = await store.getSession(await sha256Hex(token));
+    if (session === undefined || session.expiresAt <= now) {
+      return refuse('invalid_session');
+    }
+
+    const commented = await store.listCommentedRelics(session.email);
+    const items = await Promise.all(
+      commented.map(async (entry) => {
+        const [tombstone, row] = await Promise.all([
+          store.getTombstone(entry.relicId),
+          store.getRelic(entry.relicId),
+        ]);
+        if (tombstone !== undefined) return null;
+        if (row === undefined) return null;
+        if (row.expiresAt !== undefined && now >= row.expiresAt) return null;
+        return {
+          relic_id: row.id,
+          title: row.title ?? null,
+          renderer_class: row.rendererClass,
+          version: row.version,
+          published_at:
+            row.publishedAt !== undefined
+              ? new Date(row.publishedAt).toISOString()
+              : null,
+          expires_at:
+            row.expiresAt !== undefined
+              ? new Date(row.expiresAt).toISOString()
+              : null,
+          last_comment_at: new Date(entry.lastCommentAt).toISOString(),
+        };
+      })
+    );
+
+    const relics = items.filter(
+      (item): item is NonNullable<typeof item> => item !== null
+    );
+    relics.sort(
+      (a, b) =>
+        b.last_comment_at.localeCompare(a.last_comment_at) ||
+        (a.relic_id < b.relic_id ? -1 : 1)
+    );
+
+    return json({ relics });
+  }
+
   // --- helpers ------------------------------------------------------------
 
   function json(payload: unknown, status = 200): Response {
@@ -1688,7 +1758,7 @@ const CARD_IMAGE_ALT =
 
 async function shell(
   config: RelicConfig,
-  relicId: string,
+  target: string | { readonly view: 'dashboard' },
   store?: RelicStore,
   now = Date.now()
 ): Promise<Response> {
@@ -1698,40 +1768,44 @@ async function shell(
   let storedRendererClass: RendererClass | undefined;
   let canonicalId: string | undefined;
 
-  try {
-    canonicalId = parseRelicId(relicId);
-  } catch {
-    canonicalId = undefined;
-  }
-
-  if (store !== undefined && canonicalId !== undefined) {
+  if (typeof target === 'string') {
     try {
-      const tombstone = await store.getTombstone(canonicalId);
-      if (tombstone === undefined) {
-        const row = await store.getRelic(canonicalId);
-        if (row !== undefined) {
-          const isExpired = row.expiresAt !== undefined && now >= row.expiresAt;
-          if (!isExpired) {
-            storedRendererClass = row.rendererClass;
-            if (row.title !== undefined && row.title.length > 0) {
-              storedTitle = row.title;
+      canonicalId = parseRelicId(target);
+    } catch {
+      canonicalId = undefined;
+    }
+    if (store !== undefined && canonicalId !== undefined) {
+      try {
+        const tombstone = await store.getTombstone(canonicalId);
+        if (tombstone === undefined) {
+          const row = await store.getRelic(canonicalId);
+          if (row !== undefined) {
+            const isExpired =
+              row.expiresAt !== undefined && now >= row.expiresAt;
+            if (!isExpired) {
+              storedRendererClass = row.rendererClass;
+              if (row.title !== undefined && row.title.length > 0) {
+                storedTitle = row.title;
+              }
             }
           }
         }
+      } catch {
+        // A store read failure must still serve the shell with the constant card,
+        // never a 500.
+        storedTitle = undefined;
+        storedRendererClass = undefined;
       }
-    } catch {
-      // A store read failure must still serve the shell with the constant card,
-      // never a 500.
-      storedTitle = undefined;
-      storedRendererClass = undefined;
     }
   }
 
   const serviceOrigin = config.serviceOrigin.replace(/\/+$/, '');
   const ogUrl =
-    canonicalId !== undefined
-      ? `${serviceOrigin}/${canonicalId}`
-      : `${serviceOrigin}/`;
+    typeof target === 'string'
+      ? canonicalId !== undefined
+        ? `${serviceOrigin}/${canonicalId}`
+        : `${serviceOrigin}/`
+      : `${serviceOrigin}/dashboard`;
   const ogImage = `${serviceOrigin}/assets/card.v1.png`;
   const card = cardCopy(storedRendererClass);
   const cardTitle = storedTitle ?? card.title;
@@ -1741,6 +1815,15 @@ async function shell(
       : storedRendererClass !== undefined
         ? card.title
         : 'Relic';
+
+  const rootAttributes =
+    typeof target === 'string'
+      ? `data-relic-id="${escapeHtml(target)}" data-usercontent-origin="${escapeHtml(
+          new URL(config.usercontentOrigin).origin
+        )}"`
+      : `data-view="dashboard" data-usercontent-origin="${escapeHtml(
+          new URL(config.usercontentOrigin).origin
+        )}"`;
 
   const body = `<!doctype html>
 <meta charset="utf-8">
@@ -1764,9 +1847,7 @@ async function shell(
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/styles.css">
-<div id="relic-root" data-relic-id="${escapeHtml(relicId)}" data-usercontent-origin="${escapeHtml(
-    new URL(config.usercontentOrigin).origin
-  )}"></div>
+<div id="relic-root" ${rootAttributes}></div>
 <script type="module" src="/assets/viewer.js"></script>
 <script type="module" src="/assets/register-sw.js"></script>
 `;

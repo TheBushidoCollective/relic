@@ -16,6 +16,7 @@ import {
   stripToRelicId,
 } from '../src/app.ts';
 import { memoryAssets } from '../src/assets.ts';
+import { sha256Hex } from '../src/gcs.ts';
 import { ciphertextHash, MemoryStorage } from '../src/storage.ts';
 import { MemoryStore } from '../src/store.ts';
 
@@ -2568,5 +2569,288 @@ describe('magic-link identity', () => {
       })
     );
     expect(followed.headers.get('location')).toBe('/');
+  });
+});
+
+describe('session relic listing', () => {
+  async function createSession(
+    email = 'reader@example.com',
+    expiresAt = now + 3600 * 1000
+  ): Promise<string> {
+    const token = `token-${Math.random()}`;
+    const tokenHash = await sha256Hex(token);
+    await app.store.putSession({
+      tokenHash,
+      email,
+      createdAt: now,
+      expiresAt,
+    });
+    return `relic_session=${token}`;
+  }
+
+  async function postCommentAs(
+    relicId: string,
+    cookie: string,
+    ciphertext = 'YWJjZA'
+  ): Promise<Response> {
+    return app.fetch(
+      req(`/api/relics/${relicId}/comments`, {
+        method: 'POST',
+        headers: { cookie },
+        body: JSON.stringify({ ciphertext }),
+      })
+    );
+  }
+
+  test('GET /api/auth/relics returns 401 invalid_session with no session', async () => {
+    const response = await app.fetch(req('/api/auth/relics'));
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as { code: string };
+    expect(body.code).toBe('invalid_session');
+  });
+
+  test('GET /api/auth/relics returns 401 invalid_session with an expired session', async () => {
+    const cookie = await createSession('reader@example.com', now - 1000);
+    const response = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as { code: string };
+    expect(body.code).toBe('invalid_session');
+  });
+
+  test('a signed-in address sees exactly the relics it commented on, ordered by most recent engagement first', async () => {
+    const cookie = await createSession('reader@example.com');
+    const relic1 = await publish({ title: 'First Relic' });
+    const relic2 = await publish({ title: 'Second Relic' });
+
+    // Comment on relic1 at now = 1000
+    now = 1000;
+    await postCommentAs(relic1.id, cookie);
+
+    // Comment on relic2 at now = 2000
+    now = 2000;
+    await postCommentAs(relic2.id, cookie);
+
+    // Comment again on relic1 at now = 3000 (engagement becomes 3000)
+    now = 3000;
+    await postCommentAs(relic1.id, cookie);
+
+    const response = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      relics: Array<{
+        relic_id: string;
+        title: string | null;
+        renderer_class: string;
+        version: number;
+        published_at: string | null;
+        expires_at: string | null;
+        last_comment_at: string;
+      }>;
+    };
+
+    expect(body.relics).toHaveLength(2);
+    // relic1 had most recent engagement at 3000, so it appears first
+    expect(body.relics[0]?.relic_id).toBe(relic1.id);
+    expect(body.relics[0]?.title).toBe('First Relic');
+    expect(body.relics[0]?.last_comment_at).toBe(new Date(3000).toISOString());
+
+    expect(body.relics[1]?.relic_id).toBe(relic2.id);
+    expect(body.relics[1]?.title).toBe('Second Relic');
+    expect(body.relics[1]?.last_comment_at).toBe(new Date(2000).toISOString());
+  });
+
+  test("a second address's relics are absent", async () => {
+    const reader1Cookie = await createSession('reader1@example.com');
+    const reader2Cookie = await createSession('reader2@example.com');
+
+    const relic1 = await publish({ title: 'Reader 1 Relic' });
+    const relic2 = await publish({ title: 'Reader 2 Relic' });
+
+    now = 1000;
+    await postCommentAs(relic1.id, reader1Cookie);
+
+    now = 2000;
+    await postCommentAs(relic2.id, reader2Cookie);
+
+    // Reader 1 only sees relic1
+    const res1 = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie: reader1Cookie } })
+    );
+    const body1 = (await res1.json()) as {
+      relics: Array<{ relic_id: string }>;
+    };
+    expect(body1.relics.map((r) => r.relic_id)).toEqual([relic1.id]);
+
+    // Reader 2 only sees relic2
+    const res2 = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie: reader2Cookie } })
+    );
+    const body2 = (await res2.json()) as {
+      relics: Array<{ relic_id: string }>;
+    };
+    expect(body2.relics.map((r) => r.relic_id)).toEqual([relic2.id]);
+  });
+
+  test('tombstoned relics never appear', async () => {
+    const cookie = await createSession('reader@example.com');
+    const relic = await publish({ title: 'To Be Tombstoned' });
+
+    now = 1000;
+    await postCommentAs(relic.id, cookie);
+
+    // Verify it appears initially
+    const before = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    const beforeJson = (await before.json()) as { relics: unknown[] };
+    expect(beforeJson.relics).toHaveLength(1);
+
+    // Tombstone the relic
+    await app.store.putTombstone({
+      id: relic.id,
+      publishIp: '198.51.100.10',
+      publishedAt: 1000,
+      publishingClient: 'relic-mcp/0.1.0',
+      rendererClass: 'markdown',
+      ciphertextHash: 'abc',
+      deletedAt: 2000,
+      operator: 'jason',
+      reasonClass: 'legal',
+      reportReference: undefined,
+    });
+
+    const after = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    expect(((await after.json()) as { relics: unknown[] }).relics).toEqual([]);
+  });
+
+  test('expired relics never appear', async () => {
+    const cookie = await createSession('reader@example.com');
+    // Relic with ttl_days: 1
+    now = 1000;
+    const relic = await publish({ title: 'Expiring Relic', ttlDays: 1 });
+
+    await postCommentAs(relic.id, cookie);
+
+    // Before expiry, it appears
+    const before = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    const beforeJson = (await before.json()) as { relics: unknown[] };
+    expect(beforeJson.relics).toHaveLength(1);
+
+    // Advance time past expiry (1 day + 1000ms)
+    now += 86_400 * 1000 + 1000;
+
+    const after = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    expect(((await after.json()) as { relics: unknown[] }).relics).toEqual([]);
+  });
+
+  test('absent-row relics never appear', async () => {
+    const cookie = await createSession('reader@example.com');
+    // Directly record a comment on a relic ID that was never created in the store
+    await app.store.putComment({
+      id: 'c_ghost',
+      relicId: 'ghost_relic',
+      author: 'reader@example.com',
+      createdAt: now,
+      ciphertext: 'YWJjZA',
+    });
+
+    const response = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { relics: unknown[] };
+    expect(body.relics).toEqual([]);
+  });
+
+  test('the response body contains no key, fragment, ciphertext, or comment body under any field name', async () => {
+    const cookie = await createSession('reader@example.com');
+    const relic = await publish({ title: 'Secret Doc' });
+
+    now = 1000;
+    const secretCiphertext = 'secret_comment_ciphertext_payload';
+    await postCommentAs(relic.id, cookie, secretCiphertext);
+
+    const response = await app.fetch(
+      req('/api/auth/relics', { headers: { cookie } })
+    );
+    const rawJson = await response.text();
+    const parsed = JSON.parse(rawJson) as { relics: Record<string, unknown>[] };
+
+    expect(rawJson).not.toContain(secretCiphertext);
+    expect(rawJson).not.toContain('fragment');
+    expect(rawJson).not.toContain('ciphertext');
+    expect(rawJson).not.toContain('"key"');
+
+    const expectedKeys: Record<string, true> = {
+      relic_id: true,
+      title: true,
+      renderer_class: true,
+      version: true,
+      published_at: true,
+      expires_at: true,
+      last_comment_at: true,
+    };
+    for (const item of parsed.relics) {
+      for (const k of Object.keys(item)) {
+        expect(expectedKeys[k]).toBe(true);
+      }
+    }
+  });
+
+  test('non-GET methods on /api/auth/relics return 405 Method Not Allowed', async () => {
+    const cookie = await createSession('reader@example.com');
+    const response = await app.fetch(
+      req('/api/auth/relics', { method: 'POST', headers: { cookie } })
+    );
+    expect(response.status).toBe(405);
+  });
+});
+
+describe('GET /dashboard', () => {
+  test('returns 200 HTML with data-view="dashboard", no relic id value, no relic title, and noindex plus no-store headers', async () => {
+    const response = await app.fetch(req('/dashboard'));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(response.headers.get('x-robots-tag')).toBe('noindex');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("connect-src 'self'");
+
+    const body = await response.text();
+    expect(body).toContain('data-view="dashboard"');
+    expect(body).not.toContain('data-relic-id');
+    expect(body).toContain('<title>Relic</title>');
+    expect(body).toContain('content="A relic"');
+    expect(body).toContain('/dashboard');
+  });
+
+  test('is served to a signed-out reader', async () => {
+    const response = await app.fetch(req('/dashboard'));
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain('data-view="dashboard"');
+  });
+
+  test('dashboard is not parsed as a relic id', async () => {
+    const response = await app.fetch(req('/dashboard'));
+    const body = await response.text();
+    expect(body).not.toContain('data-relic-id="dashboard"');
+    expect(body).not.toContain('dashb0ard');
+  });
+
+  test('non-GET methods on /dashboard return 405 Method Not Allowed', async () => {
+    const response = await app.fetch(req('/dashboard', { method: 'POST' }));
+    expect(response.status).toBe(405);
   });
 });
