@@ -2261,6 +2261,14 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   let isDragging = false;
   let suppressClick = false;
   let drawingBox: HTMLElement | undefined;
+  /**
+   * Watches for an artifact that mounts after the stage does.
+   *
+   * The PDF renderer is a lazily imported chunk, so the page canvas appears
+   * well after `attach` runs. Without this the tools row describes a stage
+   * that has not finished rendering.
+   */
+  let lateArtifact: MutationObserver | undefined;
   let timeMode: HTMLElement | undefined;
   let timeHint: HTMLElement | undefined;
   let spanStart: number | null = null;
@@ -2797,16 +2805,36 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         tools.replaceChildren(timeToggle, toggle);
       } else {
         timeMode = undefined;
-        const textHint = document.createElement('span');
-        textHint.className = 'thread-note';
-        // A rendered page is a canvas, so there is no text in it to select.
-        // Naming selection here would be an affordance for an act the reader
-        // cannot perform, which is the defect this row exists to avoid.
-        textHint.textContent =
-          next.querySelector('canvas.relic-page') !== null
-            ? 'or drag a box on the page'
-            : 'or select text to quote';
-        tools.replaceChildren(toggle, textHint);
+        // What the reader can actually do here, decided from the artifact on
+        // the page rather than from the renderer class, and re-decided when
+        // the artifact changes. Two ways this was wrong when it was a single
+        // decision taken once at attach time, and both were invisible in
+        // tests and obvious in a browser.
+        //
+        // An image has no text in it, so offering selection named an act the
+        // reader cannot perform. A rendered page is a canvas, same thing, and
+        // worse: the PDF renderer is a lazily imported chunk, so at attach
+        // time there is no canvas yet and the row settled on the wrong hint
+        // before the artifact it describes existed.
+        const describe = (): void => {
+          const hint = document.createElement('span');
+          hint.className = 'thread-note';
+          if (next.querySelector('canvas.relic-page') !== null) {
+            hint.textContent = 'or drag a box on the page';
+          } else if (next.querySelector('img.relic-image') !== null) {
+            hint.textContent = 'or drag a box on the image';
+          } else {
+            hint.textContent = 'or select text to quote';
+          }
+          tools.replaceChildren(toggle, hint);
+        };
+        describe();
+        // Watches for the artifact arriving late. Torn down with the stage,
+        // because an observer outliving its subtree is a leak per navigation.
+        if (typeof MutationObserver !== 'undefined') {
+          lateArtifact = new MutationObserver(describe);
+          lateArtifact.observe(next, { childList: true, subtree: true });
+        }
       }
 
       // Repaint on resize and on image load so unit-coordinate regions update
@@ -2857,6 +2885,8 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
           onTouchEnd as unknown as EventListener
         );
         ro?.disconnect();
+        lateArtifact?.disconnect();
+        lateArtifact = undefined;
         if (onImgLoad && img && typeof img.removeEventListener === 'function') {
           img.removeEventListener('load', onImgLoad);
         }
