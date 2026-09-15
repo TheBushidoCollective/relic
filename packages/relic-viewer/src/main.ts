@@ -32,6 +32,7 @@ import {
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
+import { syncScrollers } from './scroll-sync.ts';
 
 // The adapter table is installed once, from the one module that knows the
 // complete built-in set. See `anchor-adapters.ts` for why registration is not
@@ -1396,6 +1397,12 @@ export function renderRenderedComparison(
   divider.setAttribute('aria-hidden', 'true');
 
   stage.append(beforePane, afterPane, beforeLabel, afterLabel, divider);
+
+  // Both layouts need this. Side by side, two panes at different offsets are
+  // not a comparison; under the swipe they are overlaid, so the revealed strip
+  // would show a different part of the document than the strip beside it.
+  // The listeners live on the panes, so they go when the stage does.
+  syncScrollers([beforePane, afterPane]);
 
   const controls = document.createElement('div');
   controls.className = 'compare-controls';
