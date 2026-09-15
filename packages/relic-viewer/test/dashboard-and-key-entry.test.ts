@@ -265,7 +265,11 @@ describe('isKeyEntryRecoverable', () => {
 describe('buildLocalDashboardRows and buildCommentedDashboardRows', () => {
   test('builds local rows from vault entries, defaulting title to relicId', () => {
     const vault = makeMockVault([
-      { relicId: 'r1', fragment: 'f1', title: 'Named', expiresAt: null },
+      // Shipped vault entries carry the leading hash. New entries do not.
+      // A dashboard link must have exactly one either way: prepending one to
+      // this value produced `##r1...`, which browsers interpret as the wrong
+      // decryption key.
+      { relicId: 'r1', fragment: '#f1', title: 'Named', expiresAt: null },
       { relicId: 'r2', fragment: 'f2', expiresAt: null },
     ]);
     const rows = buildLocalDashboardRows(vault);
@@ -286,7 +290,7 @@ describe('buildLocalDashboardRows and buildCommentedDashboardRows', () => {
 
   test('builds commented rows, distinguishing openable from unopenable', () => {
     const vault = makeMockVault([
-      { relicId: 'held', fragment: 'fheld', title: 'Held', expiresAt: null },
+      { relicId: 'held', fragment: '#fheld', title: 'Held', expiresAt: null },
     ]);
     const commented: CommentedRelic[] = [
       {

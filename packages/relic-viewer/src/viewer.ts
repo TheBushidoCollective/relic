@@ -1079,6 +1079,18 @@ export interface DashboardRelicRow {
   readonly fragment?: string | undefined;
 }
 
+/**
+ * A stored fragment can come from either side of the key-vault cutover.
+ *
+ * The shipped vault stored `#r1...`; new key entry stores `r1...`. Dashboard
+ * links add the address-bar marker themselves, so letting the old marker
+ * through produces `##r1...`, which is a different and invalid key. The row
+ * model owns canonicalisation so every renderer gets one shape.
+ */
+function canonicalStoredFragment(fragment: string): string {
+  return fragment.replace(/^#+/, '');
+}
+
 export function buildLocalDashboardRows(
   vault: KeyVault
 ): readonly DashboardRelicRow[] {
@@ -1087,7 +1099,7 @@ export function buildLocalDashboardRows(
     relicId: entry.relicId,
     title: entry.title && entry.title.length > 0 ? entry.title : entry.relicId,
     hasKey: true,
-    fragment: entry.fragment,
+    fragment: canonicalStoredFragment(entry.fragment),
   }));
 }
 
@@ -1096,7 +1108,9 @@ export function buildCommentedDashboardRows(
   vault: KeyVault
 ): readonly DashboardRelicRow[] {
   return commented.map((item) => {
-    const fragment = vault.recall(item.relic_id);
+    const recalled = vault.recall(item.relic_id);
+    const fragment =
+      recalled === undefined ? undefined : canonicalStoredFragment(recalled);
     return {
       relicId: item.relic_id,
       title: item.title && item.title.length > 0 ? item.title : item.relic_id,
