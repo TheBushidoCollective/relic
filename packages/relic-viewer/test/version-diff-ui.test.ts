@@ -223,7 +223,17 @@ describe('version comparison affordance', () => {
     expect(textOf(bar)).toContain('Version 2 of 5');
   });
 
-  test('download-only history states why it cannot compare and keeps the download view', () => {
+  /**
+   * These three assert the same guarantee on the three relics that cannot be
+   * compared, and they used to assert only half of it.
+   *
+   * Checking that the bar does not say "Compare versions" was true and
+   * insufficient: it passes just as well when the bar offers no way into the
+   * history at all, which is what it did, and which is the defect. So each
+   * one now also asserts the control is there under a label that describes
+   * what it actually does.
+   */
+  test('download-only history is reachable, and says why it cannot compare', () => {
     const current = view('download', 3);
     const bar = buildBar(current, 'aaaaaaaaaaaaaaaaaaaaaaaaaa', {
       onCompare: () => {},
@@ -234,6 +244,7 @@ describe('version comparison affordance', () => {
     ) as unknown as ElementStub;
 
     expect(textOf(bar)).not.toContain('Compare versions');
+    expect(textOf(bar)).toContain('Earlier versions');
     expect(textOf(stage)).toContain('download-only');
     expect(
       descendants(stage).some(
@@ -242,7 +253,7 @@ describe('version comparison affordance', () => {
     ).toBe(true);
   });
 
-  test('oversized code history states the ceiling and keeps rendering current', () => {
+  test('oversized code history is reachable, and states the ceiling', () => {
     const current = view('code', 3, new Uint8Array(MAX_DIFF_BYTES + 1));
     const bar = buildBar(current, 'aaaaaaaaaaaaaaaaaaaaaaaaaa', {
       onCompare: () => {},
@@ -253,13 +264,14 @@ describe('version comparison affordance', () => {
     ) as unknown as ElementStub;
 
     expect(textOf(bar)).not.toContain('Compare versions');
+    expect(textOf(bar)).toContain('Earlier versions');
     expect(textOf(stage)).toContain('16 MiB');
     expect(
       descendants(stage).some((element) => element.className === 'code')
     ).toBe(true);
   });
 
-  test('oversized rendered history states the same ceiling and still renders current', () => {
+  test('oversized rendered history is reachable, and states the same ceiling', () => {
     const current = view(
       'sandboxed-html',
       3,
@@ -274,6 +286,7 @@ describe('version comparison affordance', () => {
     ) as unknown as ElementStub;
 
     expect(textOf(bar)).not.toContain('Compare versions');
+    expect(textOf(bar)).toContain('Earlier versions');
     expect(textOf(stage)).toContain('16 MiB');
     expect(
       descendants(stage).some((element) =>
