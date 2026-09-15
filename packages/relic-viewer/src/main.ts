@@ -2378,18 +2378,26 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         else arm();
       });
       mode = toggle;
-      tools.replaceChildren(toggle);
+      const textHint = document.createElement('span');
+      textHint.className = 'thread-note';
+      textHint.textContent = 'or select text to quote';
+      tools.replaceChildren(toggle, textHint);
 
       if (next.dataset.markBind === '1') return;
       next.dataset.markBind = '1';
       next.addEventListener('mouseup', () => {
         afterSelection(offer);
       });
+      next.addEventListener('keyup', () => {
+        afterSelection(offer);
+      });
+      next.addEventListener('touchend', () => {
+        afterSelection(offer);
+      });
       next.addEventListener('click', place);
     },
   };
 }
-
 /**
  * The thread, in the service-origin chrome.
  *
