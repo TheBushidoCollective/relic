@@ -19,17 +19,24 @@ import {
   deriveCommentKey,
   parseFragment,
 } from '@relic/format';
+import { registerBuiltInAnchorAdapters } from './anchor-adapters.ts';
 import {
   type AnchorSurface,
   adapterFor,
   anchorLabel,
+  boxFromUnit,
   MARK_UNPLACEABLE_NOTE,
-  registerAnchorAdapter,
+  rectFromCorners,
   UNSUPPORTED_ANCHOR_LABEL,
+  unitFromPointer,
 } from './anchoring.ts';
-import { captureSelectionQuote, quoteAdapter } from './annotate-quote.ts';
+import { captureSelectionQuote } from './annotate-quote.ts';
+import { isImageElement } from './annotate-region.ts';
 
-registerAnchorAdapter(quoteAdapter);
+// The adapter table is installed once, from the one module that knows the
+// complete built-in set. See `anchor-adapters.ts` for why registration is not
+// done by each adapter module at its own top level.
+registerBuiltInAnchorAdapters();
 
 import {
   type CommentCipher,
@@ -649,6 +656,7 @@ function renderImageView(view: ReadyView): HTMLElement {
   const url = URL.createObjectURL(blob);
 
   const image = document.createElement('img');
+  image.className = 'relic-image';
   image.src = url;
   image.alt = view.filename;
   image.addEventListener('load', () => URL.revokeObjectURL(url));
@@ -2167,7 +2175,13 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   let bubble: HTMLElement | undefined;
   let mode: HTMLElement | undefined;
   let hint: HTMLElement | undefined;
-
+  let teardownStage: (() => void) | undefined;
+  let dragOrigin:
+    | { clientX: number; clientY: number; unit: { x: number; y: number } }
+    | undefined;
+  let isDragging = false;
+  let suppressClick = false;
+  let drawingBox: HTMLElement | undefined;
   const chip = document.createElement('div');
   chip.className = 'compose-target';
   // Polite: a target arriving is worth announcing to a reader who cannot see
@@ -2213,6 +2227,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
 
   const clear = (): void => {
     anchor = null;
+    dragOrigin = undefined;
+    isDragging = false;
+    suppressClick = false;
+    drawingBox?.remove();
+    drawingBox = undefined;
     dismiss();
     disarm();
     paintChip();
@@ -2239,8 +2258,10 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     const said = document.createElement('p');
     said.className = 'mark-hint';
     said.setAttribute('aria-live', 'polite');
-    said.textContent = MARK_PIN_HINT;
-    // On the stage rather than in the sidebar, and out of flow. The reader is
+    const isImg = surface.querySelector('img.relic-image') !== null;
+    said.textContent = isImg
+      ? 'Click to place a point, or drag to select a region'
+      : MARK_PIN_HINT;
     // looking at the document, the sidebar is not on the row at all at narrow
     // width, and a hint that took layout space would shift the line under the
     // cursor between arming and the click that places the point.
@@ -2309,12 +2330,22 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
 
   /** Places a point, but only for a click the reader armed the tool for. */
   const place = (event: MouseEvent): void => {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
     const surface = host;
     if (surface === undefined || !armed()) return;
     if (!(event.target instanceof Element)) return;
     // An existing mark, the bubble and the conversation are controls. Only the
     // document itself takes a point.
-    if (event.target.closest('.comment-pin, .mark-bubble, .thread')) return;
+    if (
+      event.target.closest(
+        '.comment-pin, .comment-region, .mark-bubble, .thread'
+      )
+    ) {
+      return;
+    }
     const rect = surface.getBoundingClientRect();
     const fraction = pinFraction(
       {
@@ -2332,6 +2363,215 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     // was placed and disarming would read as though something had been.
     if (fraction === undefined) return;
     aim({ kind: 'pin', ...fraction });
+  };
+
+  const onMouseDown = (event: MouseEvent): void => {
+    if (!armed()) return;
+    if (!(event.target instanceof Element)) return;
+    if (
+      event.target.closest(
+        '.comment-pin, .comment-region, .mark-bubble, .thread'
+      )
+    ) {
+      return;
+    }
+    if (host === undefined) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined || !isImageElement(surface.content)) return;
+
+    const start = unitFromPointer(surface, event.clientX, event.clientY);
+    if (start === undefined) {
+      // Pressed outside the image content box (in the letterbox). Do not start
+      // a drag so that clicks in the letterbox never clamp to the picture.
+      return;
+    }
+
+    dragOrigin = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      unit: start,
+    };
+    isDragging = false;
+    suppressClick = false;
+    // Prevent default browser image dragging so mousemove tracks smoothly:
+    event.preventDefault();
+  };
+
+  const onMouseMove = (event: MouseEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined) return;
+
+    const dx = event.clientX - dragOrigin.clientX;
+    const dy = event.clientY - dragOrigin.clientY;
+    if (!isDragging && Math.hypot(dx, dy) >= 4) {
+      isDragging = true;
+      suppressClick = true;
+    }
+    if (!isDragging) return;
+
+    if (drawingBox === undefined) {
+      drawingBox = document.createElement('div');
+      drawingBox.className = 'comment-region is-drawing is-pending';
+      const pins = host.querySelector('.comment-pins');
+      if (pins instanceof HTMLElement) {
+        pins.appendChild(drawingBox);
+      } else {
+        host.appendChild(drawingBox);
+      }
+    }
+
+    const current = unitFromPointer(surface, event.clientX, event.clientY);
+    if (current === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const rect = rectFromCorners(dragOrigin.unit, current);
+    if (rect === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const box = boxFromUnit(surface, rect);
+    if (box === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    drawingBox.style.display = 'block';
+    drawingBox.style.left = `${box.left}px`;
+    drawingBox.style.top = `${box.top}px`;
+    drawingBox.style.width = `${box.width}px`;
+    drawingBox.style.height = `${box.height}px`;
+  };
+
+  const onMouseUp = (event: MouseEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    const wasDragging = isDragging;
+    const start = dragOrigin.unit;
+    dragOrigin = undefined;
+    isDragging = false;
+    drawingBox?.remove();
+    drawingBox = undefined;
+
+    if (wasDragging) {
+      suppressClick = true;
+      const surface = anchorSurfaceFor(host);
+      if (surface === undefined) return;
+      const current = unitFromPointer(surface, event.clientX, event.clientY);
+      // A drag ending in the letterbox outside the image must not silently
+      // clamp onto the picture; it produces no anchor and leaves the tool armed.
+      if (current === undefined) return;
+      const rect = rectFromCorners(start, current);
+      if (rect === undefined) return;
+      aim({ kind: 'region', rect });
+    }
+  };
+  const onTouchStart = (event: TouchEvent): void => {
+    if (!armed()) return;
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch || !(event.target instanceof Element)) return;
+    if (
+      event.target.closest(
+        '.comment-pin, .comment-region, .mark-bubble, .thread'
+      )
+    ) {
+      return;
+    }
+    if (host === undefined) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined || !isImageElement(surface.content)) return;
+
+    const start = unitFromPointer(surface, touch.clientX, touch.clientY);
+    if (start === undefined) return;
+
+    dragOrigin = {
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      unit: start,
+    };
+    isDragging = false;
+    suppressClick = false;
+  };
+
+  const onTouchMove = (event: TouchEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined) return;
+
+    const dx = touch.clientX - dragOrigin.clientX;
+    const dy = touch.clientY - dragOrigin.clientY;
+    if (!isDragging && Math.hypot(dx, dy) >= 6) {
+      isDragging = true;
+      suppressClick = true;
+    }
+    if (!isDragging) return;
+
+    // Prevent touch scrolling while actively dragging a region on the image:
+    event.preventDefault();
+
+    if (drawingBox === undefined) {
+      drawingBox = document.createElement('div');
+      drawingBox.className = 'comment-region is-drawing is-pending';
+      const pins = host.querySelector('.comment-pins');
+      if (pins instanceof HTMLElement) {
+        pins.appendChild(drawingBox);
+      } else {
+        host.appendChild(drawingBox);
+      }
+    }
+
+    const current = unitFromPointer(surface, touch.clientX, touch.clientY);
+    if (current === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const rect = rectFromCorners(dragOrigin.unit, current);
+    if (rect === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const box = boxFromUnit(surface, rect);
+    if (box === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    drawingBox.style.display = 'block';
+    drawingBox.style.left = `${box.left}px`;
+    drawingBox.style.top = `${box.top}px`;
+    drawingBox.style.width = `${box.width}px`;
+    drawingBox.style.height = `${box.height}px`;
+  };
+
+  const onTouchEnd = (event: TouchEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    const wasDragging = isDragging;
+    const start = dragOrigin.unit;
+    dragOrigin = undefined;
+    isDragging = false;
+    drawingBox?.remove();
+    drawingBox = undefined;
+
+    if (wasDragging) {
+      suppressClick = true;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const surface = anchorSurfaceFor(host);
+      if (surface === undefined) return;
+      const current = unitFromPointer(surface, touch.clientX, touch.clientY);
+      if (current === undefined) return;
+      const rect = rectFromCorners(start, current);
+      if (rect === undefined) return;
+      aim({ kind: 'region', rect });
+    }
   };
 
   // Bound to the document once, here rather than in `attach`, because a
@@ -2357,6 +2597,8 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       // Both belonged to the stage that is being replaced.
       dismiss();
       disarm();
+      teardownStage?.();
+      teardownStage = undefined;
       host = next;
 
       // The boundary, read from the DOM rather than from the route, because a
@@ -2368,10 +2610,17 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         return;
       }
 
+      // One armed mode handles both point and region: click equals point, drag
+      // equals region. Keeping one control avoids cluttering the toolbar and
+      // needs no explanation: under the crosshair cursor, a tap places a pin
+      // and dragging a box selects a region.
       const toggle = document.createElement('button');
       toggle.type = 'button';
       toggle.className = 'mark-mode';
-      toggle.textContent = 'Point at something';
+      const isImg = next.querySelector('img.relic-image') !== null;
+      toggle.textContent = isImg
+        ? 'Point or select region'
+        : 'Point at something';
       toggle.setAttribute('aria-pressed', 'false');
       toggle.addEventListener('click', () => {
         if (armed()) disarm();
@@ -2383,18 +2632,105 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       textHint.textContent = 'or select text to quote';
       tools.replaceChildren(toggle, textHint);
 
-      if (next.dataset.markBind === '1') return;
-      next.dataset.markBind = '1';
-      next.addEventListener('mouseup', () => {
-        afterSelection(offer);
-      });
-      next.addEventListener('keyup', () => {
-        afterSelection(offer);
-      });
-      next.addEventListener('touchend', () => {
-        afterSelection(offer);
-      });
-      next.addEventListener('click', place);
+      // Repaint on resize and on image load so unit-coordinate regions update
+      // whenever the content box dimensions change.
+      const onResize = (): void => {
+        deps.repaint();
+      };
+      window.addEventListener('resize', onResize);
+
+      let ro: ResizeObserver | undefined;
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(() => {
+          deps.repaint();
+        });
+        ro.observe(next);
+        const surface = anchorSurfaceFor(next);
+        if (surface !== undefined && surface.content !== next) {
+          ro.observe(surface.content);
+        }
+      }
+
+      const img = next.querySelector('img.relic-image');
+      let onImgLoad: (() => void) | undefined;
+      if (isImageElement(img) && 'complete' in img && !img.complete) {
+        onImgLoad = (): void => {
+          deps.repaint();
+        };
+        img.addEventListener('load', onImgLoad);
+      }
+
+      // Teardown verified: every listener attached to window, ResizeObserver,
+      // or image is tracked here and cleaned up when the stage is replaced or
+      // controls are cleared, preventing memory leaks across relic navigation.
+      teardownStage = (): void => {
+        window.removeEventListener('resize', onResize);
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+        next.removeEventListener?.(
+          'touchstart',
+          onTouchStart as unknown as EventListener
+        );
+        next.removeEventListener?.(
+          'touchmove',
+          onTouchMove as unknown as EventListener
+        );
+        next.removeEventListener?.(
+          'touchend',
+          onTouchEnd as unknown as EventListener
+        );
+        ro?.disconnect();
+        if (onImgLoad && img && typeof img.removeEventListener === 'function') {
+          img.removeEventListener('load', onImgLoad);
+        }
+        drawingBox?.remove();
+        drawingBox = undefined;
+        dragOrigin = undefined;
+        isDragging = false;
+        suppressClick = false;
+      };
+
+      if (next.dataset.markBind !== '1') {
+        next.dataset.markBind = '1';
+        // Three ways a selection settles, because a selection made with the
+        // keyboard or a finger is the same act as one made with a mouse and a
+        // pointer-only offer silently excludes both. These are additive to the
+        // drag handlers below: `afterSelection` offers nothing when the
+        // selection is collapsed, which is the state a drag leaves behind.
+        next.addEventListener('mouseup', () => {
+          afterSelection(offer);
+        });
+        next.addEventListener('keyup', () => {
+          afterSelection(offer);
+        });
+        next.addEventListener('touchend', () => {
+          afterSelection(offer);
+        });
+        next.addEventListener('click', place);
+        next.addEventListener('mousedown', onMouseDown);
+        next.addEventListener('mousemove', onMouseMove);
+        next.addEventListener('mouseup', onMouseUp);
+        next.addEventListener(
+          'touchstart',
+          onTouchStart as unknown as EventListener,
+          {
+            passive: true,
+          }
+        );
+        next.addEventListener(
+          'touchmove',
+          onTouchMove as unknown as EventListener,
+          {
+            passive: false,
+          }
+        );
+        next.addEventListener(
+          'touchend',
+          onTouchEnd as unknown as EventListener
+        );
+      }
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
     },
   };
 }

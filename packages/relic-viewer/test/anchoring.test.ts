@@ -8,7 +8,8 @@
  * screen landing beside the thing it marks on a narrow one.
  */
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { registerBuiltInAnchorAdapters } from '../src/anchor-adapters.ts';
 import {
   type AnchorSurface,
   adapterFor,
@@ -198,8 +199,20 @@ describe('a drag', () => {
 });
 
 describe('the adapter registry', () => {
-  afterEach(() => resetAnchorAdapters());
-
+  // Clean going in, restored coming out, and both halves are load bearing.
+  //
+  // Clean, because these tests assert the exact contents of the table and
+  // another file in the same run may already have installed the built-ins by
+  // importing the viewer.
+  //
+  // Restored, because the table is process-wide and bun runs every file in
+  // one process, so leaving it empty hands the rest of the suite a viewer
+  // with no adapters. That exact mistake produced a failure which passed when
+  // this file ran alone and failed in the full run, in an unrelated test,
+  // asserting a composer chip that had quietly fallen back to saying this
+  // page cannot show the mark.
+  beforeEach(() => resetAnchorAdapters());
+  afterEach(() => registerBuiltInAnchorAdapters());
   const anywhere = surface(
     { left: 0, top: 0, width: 100, height: 100 },
     { left: 0, top: 0, width: 100, height: 100 }
