@@ -1135,6 +1135,21 @@ afterEach(async () => {
 });
 
 describe('comment anchor resolution against decrypted relic content', () => {
+  /**
+   * A real PNG, read off disk, needing no external tool.
+   *
+   * For the cases that only need bytes which classify as an image. The
+   * synthesised fixtures below exist to put a known colour at a known
+   * coordinate, which is worth a subprocess; merely being a PNG is not.
+   */
+  async function realPngFixture(): Promise<Uint8Array> {
+    const path = new URL(
+      '../../relic-viewer/public/card.v1.png',
+      import.meta.url
+    ).pathname;
+    return new Uint8Array(await readFile(path));
+  }
+
   async function makeSyntheticPng(
     width: number,
     height: number,
@@ -1510,7 +1525,12 @@ describe('comment anchor resolution against decrypted relic content', () => {
   });
 
   test('ffmpeg being absent degrades to text and does not throw', async () => {
-    const pngBytes = await makeSyntheticPng(100, 100);
+    // A real PNG off disk rather than a synthesised one, because this test is
+    // about ffmpeg being unavailable and building its fixture with ffmpeg
+    // made it require the very thing whose absence it asserts. It passed only
+    // on a machine that had ffmpeg, which is the one machine where the
+    // behaviour under test never happens.
+    const pngBytes = await realPngFixture();
     const imagePath = join(scratch, 'fallback.png');
     await writeFile(imagePath, pngBytes);
     const relic = await publish(

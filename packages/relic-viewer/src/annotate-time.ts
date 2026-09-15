@@ -149,7 +149,18 @@ function registerMetadataRepaint(
       for (const item of current.entries) {
         paintTimeMark(item.surface, item.overlay, item.anchor, item.commentId);
       }
-      if (typeof surface.host.dispatchEvent === 'function') {
+      // Both halves are checked, the method and the constructor. The method
+      // was guarded and the constructor was not, so this threw
+      // `ReferenceError: CustomEvent is not defined` wherever the global is
+      // absent. It passed locally only because another test file installs a
+      // DOM shim on `globalThis` first, so the failure depended on the order
+      // bun happened to load files in, and it surfaced on CI rather than
+      // here. A repaint notice is decoration; being unable to send one is
+      // never worth throwing from inside a metadata handler.
+      if (
+        typeof CustomEvent === 'function' &&
+        typeof surface.host.dispatchEvent === 'function'
+      ) {
         surface.host.dispatchEvent(new CustomEvent('relic-repaint'));
       }
     };

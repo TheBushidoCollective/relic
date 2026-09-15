@@ -27,19 +27,44 @@ describe('card metadata isolation', () => {
     });
     expect(built.exitCode).toBe(0);
 
-    const bundleFiles = ['viewer.js', 'sandbox.js', 'sandbox.html'];
+    // Named tokens rather than five bare assertions. The previous shape
+    // reported only "Expected: false, Received: true", which says neither
+    // which bundle tripped nor which token did it, and that cost a CI cycle
+    // to find out because the failure did not reproduce locally.
+    //
+    // The property prefixes require quoting, and that is a correctness fix
+    // rather than a loosening. `\bog:` matches a minified identifier named
+    // `og`, and the bundle now carries 377 KB of third-party code whose
+    // mangled names are chosen by whichever version of the minifier ran. So
+    // the old pattern passed here and failed on CI, and it would have kept
+    // flapping with every toolchain bump. A card read is a string literal,
+    // `'og:title'`, or a selector; a mangled binding has no quote in front
+    // of it. The nearest miss the tree already contains is `log:"code"` in
+    // the extension map, which is exactly the shape that makes an unquoted
+    // match worthless.
+    const forbidden: readonly (readonly [string, RegExp])[] = [
+      ['og: property literal', /["']og:/],
+      ['twitter: property literal', /["']twitter:/],
+      ['card raster name', /card\.v1/],
+      ['meta-by-property selector', /meta\[property/],
+      ['meta-by-name selector', /meta\[name/],
+    ];
 
-    for (const file of bundleFiles) {
+    // Every emitted script, not a fixed list. Code splitting means the
+    // routing code can move into a chunk, and a guard that names files by
+    // hand stops covering the code the moment the bundler rearranges it.
+    const emitted = [...new Bun.Glob('*.js').scanSync(`${pkgDir}dist`)];
+    expect(emitted.length).toBeGreaterThan(0);
+    const files = [...emitted, 'sandbox.html'];
+
+    const hits: string[] = [];
+    for (const file of files) {
       const content = await Bun.file(`${pkgDir}dist/${file}`).text();
-
-      // Card property prefixes and metadata tokens.
-      expect(/\bog:/.test(content)).toBe(false);
-      expect(/\btwitter:/.test(content)).toBe(false);
-      expect(content.includes('card.v1')).toBe(false);
-
-      // DOM selectors targeting meta tags by property or name.
-      expect(content.includes('meta[property')).toBe(false);
-      expect(content.includes('meta[name')).toBe(false);
+      for (const [label, pattern] of forbidden) {
+        if (pattern.test(content)) hits.push(`${file}: ${label}`);
+      }
     }
+
+    expect(hits).toEqual([]);
   });
 });
