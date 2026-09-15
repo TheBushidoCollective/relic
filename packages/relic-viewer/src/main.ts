@@ -920,7 +920,7 @@ export function renderMediaView(view: ReadyView): HTMLElement {
   let player: HTMLVideoElement | HTMLAudioElement;
   if (isAudio) {
     const audio = document.createElement('audio');
-    audio.className = 'media-player media-audio';
+    audio.className = 'media-player media-audio relic-media';
     audio.controls = true;
     audio.setAttribute('controls', '');
     audio.preload = 'metadata';
@@ -929,7 +929,7 @@ export function renderMediaView(view: ReadyView): HTMLElement {
     player = audio;
   } else {
     const video = document.createElement('video');
-    video.className = 'media-player media-video';
+    video.className = 'media-player media-video relic-media';
     video.controls = true;
     video.setAttribute('controls', '');
     video.playsInline = true;
@@ -2182,6 +2182,9 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   let isDragging = false;
   let suppressClick = false;
   let drawingBox: HTMLElement | undefined;
+  let timeMode: HTMLElement | undefined;
+  let timeHint: HTMLElement | undefined;
+  let spanStart: number | null = null;
   const chip = document.createElement('div');
   chip.className = 'compose-target';
   // Polite: a target arriving is worth announcing to a reader who cannot see
@@ -2206,6 +2209,19 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
 
   /** The button's own pressed state is the armed state, so there is one. */
   const armed = (): boolean => mode?.getAttribute('aria-pressed') === 'true';
+
+  const disarmSpan = (): void => {
+    spanStart = null;
+    if (timeMode !== undefined) {
+      timeMode.setAttribute('aria-pressed', 'false');
+      const isAudio = host?.querySelector('audio') !== null;
+      timeMode.textContent = isAudio
+        ? 'Comment on this moment'
+        : 'Comment on this frame';
+    }
+    timeHint?.remove();
+    timeHint = undefined;
+  };
 
   const disarm = (): void => {
     mode?.setAttribute('aria-pressed', 'false');
@@ -2234,22 +2250,22 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     drawingBox = undefined;
     dismiss();
     disarm();
+    disarmSpan();
     paintChip();
     deps.repaint();
   };
-
   reset.addEventListener('click', clear);
 
-  const aim = (next: CommentAnchor): void => {
+  const aim = (next: CommentAnchor, keepSpanArmed = false): void => {
     anchor = next;
     dismiss();
     disarm();
+    if (!keepSpanArmed) disarmSpan();
     paintChip();
     deps.repaint();
     deps.open();
     deps.focusBody();
   };
-
   const arm = (): void => {
     const surface = host;
     if (mode === undefined || surface === undefined) return;
@@ -2579,6 +2595,10 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   // there would accumulate one copy per visit.
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
+    if (spanStart !== null) {
+      disarmSpan();
+      return;
+    }
     clear();
   });
   document.addEventListener('selectionchange', () => {
@@ -2599,8 +2619,8 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       disarm();
       teardownStage?.();
       teardownStage = undefined;
+      disarmSpan();
       host = next;
-
       // The boundary, read from the DOM rather than from the route, because a
       // component that will not compile falls back to its own source and that
       // source renders right here in the page where a mark can reach it.
@@ -2623,14 +2643,68 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         : 'Point at something';
       toggle.setAttribute('aria-pressed', 'false');
       toggle.addEventListener('click', () => {
+        disarmSpan();
         if (armed()) disarm();
         else arm();
       });
       mode = toggle;
-      const textHint = document.createElement('span');
-      textHint.className = 'thread-note';
-      textHint.textContent = 'or select text to quote';
-      tools.replaceChildren(toggle, textHint);
+      const media = next.querySelector(
+        'video.relic-media, audio.relic-media, video, audio'
+      ) as HTMLMediaElement | null;
+
+      if (media !== null) {
+        const isAudio = media.tagName === 'AUDIO';
+        const timeToggle = document.createElement('button');
+        timeToggle.type = 'button';
+        timeToggle.className = 'mark-mode mark-time';
+        timeToggle.textContent = isAudio
+          ? 'Comment on this moment'
+          : 'Comment on this frame';
+        timeToggle.setAttribute('aria-pressed', 'false');
+        timeToggle.addEventListener('click', () => {
+          disarm();
+          const t = media.currentTime;
+          if (typeof media.pause === 'function') {
+            media.pause();
+          }
+          if (spanStart === null) {
+            spanStart = t;
+            timeToggle.setAttribute('aria-pressed', 'true');
+            timeToggle.textContent = 'Mark end of span';
+            aim({ kind: 'time', t }, true);
+            const said = document.createElement('p');
+            said.className = 'mark-hint mark-time-hint';
+            said.setAttribute('aria-live', 'polite');
+            said.textContent = isAudio
+              ? 'Play or seek to mark the end of the span, or press Escape to keep this moment.'
+              : 'Play or seek to mark the end of the span, or press Escape to keep this frame.';
+            next.appendChild(said);
+            timeHint = said;
+          } else {
+            const tEnd = t;
+            if (tEnd !== spanStart) {
+              const start = Math.min(spanStart, tEnd);
+              const end = Math.max(spanStart, tEnd);
+              aim({ kind: 'time', t: start, t_end: end });
+            } else {
+              aim({ kind: 'time', t: spanStart });
+            }
+            disarmSpan();
+          }
+        });
+        timeMode = timeToggle;
+        // No text hint on media. "Select text to quote" describes nothing a
+        // reader can do to a video or an audio track, and an affordance that
+        // names an impossible act is the defect the annotation work already
+        // decided to treat as a correctness problem rather than a rough edge.
+        tools.replaceChildren(timeToggle, toggle);
+      } else {
+        timeMode = undefined;
+        const textHint = document.createElement('span');
+        textHint.className = 'thread-note';
+        textHint.textContent = 'or select text to quote';
+        tools.replaceChildren(toggle, textHint);
+      }
 
       // Repaint on resize and on image load so unit-coordinate regions update
       // whenever the content box dimensions change.

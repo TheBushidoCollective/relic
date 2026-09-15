@@ -34,9 +34,11 @@
 import { registerAnchorAdapter, resetAnchorAdapters } from './anchoring.ts';
 import { quoteAdapter } from './annotate-quote.ts';
 import { regionAdapter } from './annotate-region.ts';
+import { timeAdapter } from './annotate-time.ts';
 
 export function registerBuiltInAnchorAdapters(): void {
   resetAnchorAdapters();
   registerAnchorAdapter(quoteAdapter);
   registerAnchorAdapter(regionAdapter);
+  registerAnchorAdapter(timeAdapter);
 }

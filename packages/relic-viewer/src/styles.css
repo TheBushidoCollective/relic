@@ -2037,3 +2037,109 @@ body {
   pointer-events: none;
   user-select: none;
 }
+
+/* --------------------------------------------------------------------------
+   Time anchor markers and timeline track
+   -------------------------------------------------------------------------- */
+
+.time-track {
+  position: absolute;
+  height: 6px;
+  background: color-mix(in srgb, var(--ink) 18%, transparent);
+  border-radius: 3px;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.time-marker {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--patina);
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 0.1s ease, background 0.1s ease;
+}
+
+.time-marker:hover,
+.time-marker.is-active {
+  transform: translate(-50%, -50%) scale(1.3);
+  background: var(--accent, var(--patina));
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+  z-index: 2;
+}
+
+.time-marker.is-pending {
+  background: var(--accent, #d97706);
+  border-style: dashed;
+}
+
+.time-marker-span {
+  height: 6px;
+  top: 0;
+  border-radius: 3px;
+  border: none;
+  background: color-mix(in srgb, var(--patina) 50%, transparent);
+  transform: none;
+  min-width: 4px;
+}
+
+.time-marker-span:hover,
+.time-marker-span.is-active {
+  transform: none;
+  background: color-mix(in srgb, var(--patina) 80%, transparent);
+  outline: 2px solid var(--patina);
+  outline-offset: 1px;
+}
+
+.time-marker-span.is-pending {
+  background: color-mix(in srgb, var(--accent, #d97706) 60%, transparent);
+}
+
+.time-frame-box {
+  position: absolute;
+  border: 2px solid var(--patina);
+  background: color-mix(in srgb, var(--patina) 15%, transparent);
+  pointer-events: none;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.time-frame-box.is-hidden,
+.time-frame-box[hidden] {
+  display: none !important;
+}
+
+.time-frame-box.is-active {
+  border-color: var(--accent, var(--patina));
+  background: color-mix(in srgb, var(--patina) 30%, transparent);
+  box-shadow: 0 0 0 1px var(--surface);
+}
+
+.time-frame-box.is-pending {
+  border-style: dashed;
+}
+
+.mark-time-hint {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  padding: 0.35rem 0.75rem;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  color: var(--ink);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
