@@ -142,10 +142,19 @@ body {
 
 /* The target a reader has aimed and not yet posted. Dashed, because the thing
    it marks is a sentence they are about to talk about rather than one anybody
-   has said anything about yet. */
+   has said anything about yet.
+
+   Heavier than a posted mark rather than lighter, which is how it read until
+   a comment aimed inside an existing mark was painted rather than dropped.
+   This is the one thing on the page the reader is working with, and it has to
+   stay identifiable where it lands on top of somebody else's mark, so the
+   difference from posted is one of kind (dashed, outlined) and not only of
+   degree. The outline is dashed where `is-active` is solid, so the provisional
+   target and a lit thread never read as the same state. */
 .relic-text-mark.is-pending {
-  background: color-mix(in srgb, var(--patina) 14%, transparent);
+  background: color-mix(in srgb, var(--patina) 30%, transparent);
   border-bottom: 2px dashed var(--patina);
+  outline: 2px dashed var(--patina);
 }
 
 .comment-pin.is-pending {
