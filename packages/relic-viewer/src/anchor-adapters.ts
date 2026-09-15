@@ -33,6 +33,7 @@
 
 import { registerAnchorAdapter, resetAnchorAdapters } from './anchoring.ts';
 import { frameQuoteAdapter, frameRegionAdapter } from './annotate-frame.ts';
+import { pageAnchorAdapter } from './annotate-page.ts';
 import { quoteAdapter } from './annotate-quote.ts';
 import { regionAdapter } from './annotate-region.ts';
 import { timeAdapter } from './annotate-time.ts';
@@ -48,4 +49,5 @@ export function registerBuiltInAnchorAdapters(): void {
   registerAnchorAdapter(quoteAdapter);
   registerAnchorAdapter(regionAdapter);
   registerAnchorAdapter(timeAdapter);
+  registerAnchorAdapter(pageAnchorAdapter);
 }

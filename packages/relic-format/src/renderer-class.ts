@@ -20,13 +20,14 @@
  * carrying the same top privilege as `html`.
  */
 
-/** The eight values. Stored server-side against the relic ID, nowhere else. */
+/** The nine values. Stored server-side against the relic ID, nowhere else. */
 export type RendererClass =
   | 'markdown'
   | 'code'
   | 'html'
   | 'jsx'
   | 'image'
+  | 'pdf'
   | 'media'
   | 'archive'
   | 'binary';
@@ -37,6 +38,7 @@ export const RENDERER_CLASSES: readonly RendererClass[] = [
   'html',
   'jsx',
   'image',
+  'pdf',
   'media',
   'archive',
   'binary',
@@ -59,6 +61,7 @@ export const RENDERABLE_CLASSES: readonly RendererClass[] = [
   'html',
   'jsx',
   'image',
+  'pdf',
 ];
 
 /**
@@ -86,6 +89,7 @@ export const CLASS_BEHAVIOUR: Record<RendererClass, ClassBehaviour> = {
   html: 'renders',
   jsx: 'renders',
   image: 'renders',
+  pdf: 'renders',
   media: 'plays',
   archive: 'downloads',
   binary: 'downloads',
@@ -118,7 +122,7 @@ const MAGIC: readonly MagicSignature[] = [
   { bytes: [0xfd, 0x37, 0x7a, 0x58, 0x5a], offset: 0, cls: 'archive' }, // xz
   { bytes: [0x28, 0xb5, 0x2f, 0xfd], offset: 0, cls: 'archive' }, // zstd
   { bytes: [0x75, 0x73, 0x74, 0x61, 0x72], offset: 257, cls: 'archive' }, // tar
-  { bytes: [0x25, 0x50, 0x44, 0x46], offset: 0, cls: 'binary' }, // PDF
+  { bytes: [0x25, 0x50, 0x44, 0x46], offset: 0, cls: 'pdf' }, // PDF
   { bytes: [0x49, 0x44, 0x33], offset: 0, cls: 'media' }, // MP3 with ID3
   { bytes: [0x4f, 0x67, 0x67, 0x53], offset: 0, cls: 'media' }, // Ogg
   { bytes: [0x66, 0x74, 0x79, 0x70], offset: 4, cls: 'media' }, // MP4 family
@@ -226,6 +230,7 @@ const EXTENSIONS: Readonly<Record<string, RendererClass>> = {
   txt: 'code',
   log: 'code',
   text: 'code',
+  pdf: 'pdf',
 };
 
 function extensionOf(filename: string): string | undefined {
@@ -370,6 +375,7 @@ export function privilegeTier(cls: RendererClass): 0 | 1 | 2 | 3 {
     case 'jsx':
       return 3;
     case 'image':
+    case 'pdf':
       return 2;
     case 'markdown':
     case 'code':
@@ -431,6 +437,7 @@ export function leastPrivileged(
     'html',
     'jsx',
     'image',
+    'pdf',
     'markdown',
     'code',
     'media',
