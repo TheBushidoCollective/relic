@@ -24,8 +24,13 @@ import {
   adapterFor,
   anchorLabel,
   MARK_UNPLACEABLE_NOTE,
+  registerAnchorAdapter,
   UNSUPPORTED_ANCHOR_LABEL,
 } from './anchoring.ts';
+import { captureSelectionQuote, quoteAdapter } from './annotate-quote.ts';
+
+registerAnchorAdapter(quoteAdapter);
+
 import {
   type CommentCipher,
   type CommentEntry,
@@ -41,6 +46,7 @@ import {
   PUBLISHER_AUTHOR,
   plainLabel,
   postComment,
+  quotedTargetLabel,
   type Refusal,
   readSession,
   requestMagicLink,
@@ -50,6 +56,9 @@ import {
   utf8Bytes,
   wrapTextQuote,
 } from './comments.ts';
+
+export { quotedTargetLabel } from './comments.ts';
+
 import {
   bytesEqual,
   comparisonAvailability,
@@ -1971,9 +1980,6 @@ export function pinOffsets(
   };
 }
 
-/** How much of a quote the chip shows before it abbreviates. */
-const MARK_QUOTE_DISPLAY_LIMIT = 60;
-
 /** What an armed pin tool tells the reader to do next. */
 export const MARK_PIN_HINT = 'Click the document to place a point';
 
@@ -2052,10 +2058,12 @@ export function paintPendingMark(
   const adapter = adapterFor(anchor, surface);
   if (adapter === undefined) return;
   adapter.paint(surface, pins, anchor, PENDING_MARK_ID);
-  for (const painted of pins.querySelectorAll(
-    `[data-comment-id="${PENDING_MARK_ID}"]`
-  )) {
-    painted.classList.add('is-pending');
+  for (const root of [pins, host]) {
+    for (const painted of root.querySelectorAll(
+      `[data-comment-id="${PENDING_MARK_ID}"]`
+    )) {
+      painted.classList.add('is-pending');
+    }
   }
 }
 
@@ -2076,7 +2084,7 @@ export function anchorSurfaceFor(host: HTMLElement): AnchorSurface | undefined {
     'img.relic-image, video.relic-media, audio.relic-media, iframe.usercontent-frame, canvas.relic-page'
   );
   if (candidates.length > 1) return undefined;
-  const only = candidates.item(0);
+  const only = candidates.item?.(0) ?? candidates[0];
   return {
     host,
     content: only instanceof HTMLElement ? only : host,
@@ -2096,21 +2104,6 @@ export function markTargetLabel(anchor: CommentAnchor | null): string {
   if (anchor.kind === 'pin') return 'Commenting on a point';
   if (anchor.kind === 'text') return quotedTargetLabel(anchor.quote);
   return anchorLabel(anchor) ?? UNSUPPORTED_ANCHOR_LABEL;
-}
-
-/**
- * A quote as the chip shows it.
- *
- * Display only, and shared by every kind that carries a quote. The stored
- * value stays exact, because it is what a later paint is matched against.
- */
-export function quotedTargetLabel(quote: string): string {
-  const plain = plainLabel(quote);
-  const shown =
-    plain.length > MARK_QUOTE_DISPLAY_LIMIT
-      ? `${plain.slice(0, MARK_QUOTE_DISPLAY_LIMIT).trimEnd()}…`
-      : plain;
-  return `Commenting on "${shown}"`;
 }
 
 /** The aiming controls, and the one target they hold between them. */
@@ -2297,8 +2290,12 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     });
     // The quote is captured here rather than re-read on click, so what gets
     // anchored is what the bubble appeared for.
+    const target = captureSelectionQuote(surface, range, selection) ?? {
+      kind: 'quote',
+      exact: quote,
+    };
     offered.addEventListener('click', () => {
-      aim({ kind: 'text', quote });
+      aim(target);
     });
     surface.appendChild(offered);
     // Above the selection, and never above the content box. The stage clips

@@ -182,6 +182,24 @@ export function plainLabel(text: string): string {
   return text.replace(/[\u202a-\u202e\u2066-\u2069\u200e\u200f]/g, '');
 }
 
+/** How much of a quote the chip shows before it abbreviates. */
+export const MARK_QUOTE_DISPLAY_LIMIT = 60;
+
+/**
+ * What a chip or row says about a quote target.
+ *
+ * Quotes are bounded so a reader who selected three paragraphs gets a label
+ * that fits in the chip rather than pushing the composer off the screen.
+ */
+export function quotedTargetLabel(quote: string): string {
+  const plain = plainLabel(quote);
+  const shown =
+    plain.length > MARK_QUOTE_DISPLAY_LIMIT
+      ? `${plain.slice(0, MARK_QUOTE_DISPLAY_LIMIT).trimEnd()}…`
+      : plain;
+  return `Commenting on "${shown}"`;
+}
+
 export type LinkRequestResult =
   | { readonly kind: 'sent' }
   | { readonly kind: 'refused'; readonly refusal: Refusal };
@@ -687,4 +705,185 @@ export function unwrapTextQuotes(root: ParentNode): void {
     parent.removeChild(mark);
     parent.normalize();
   }
+}
+
+export interface QuoteContext {
+  readonly exact: string;
+  readonly prefix?: string;
+  readonly suffix?: string;
+}
+
+/**
+ * Collects content text nodes from a root, skipping text inside existing marks
+ * and non-content controls so marks never nest on repaint.
+ */
+export function walkContentTextNodes(root: ParentNode): Text[] {
+  const nodes: Text[] = [];
+  if (
+    typeof document !== 'undefined' &&
+    typeof document.createTreeWalker === 'function'
+  ) {
+    const walker = document.createTreeWalker(
+      root as Node,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const parent = (node as Text).parentElement;
+          if (
+            parent?.closest(
+              'mark.relic-text-mark, .comment-pins, .mark-bubble, script, style'
+            )
+          ) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      }
+    );
+    let curr = walker.nextNode();
+    while (curr !== null) {
+      const textNode = curr as Text;
+      const parent = textNode.parentElement;
+      if (
+        !parent?.closest(
+          'mark.relic-text-mark, .comment-pins, .mark-bubble, script, style'
+        )
+      ) {
+        nodes.push(textNode);
+      }
+      curr = walker.nextNode();
+    }
+    return nodes;
+  }
+  return nodes;
+}
+
+/**
+ * Wrap the occurrence of `quote` in `root` that best matches surrounding context.
+ *
+ * This supports quotes spanning inline elements (such as `the <em>third</em> paragraph`)
+ * by walking text nodes, finding the best-scoring candidate occurrence across the
+ * concatenated content flow, and wrapping the overlapping text slices in each text node
+ * with `<mark class="relic-text-mark" data-comment-id="${id}">`.
+ *
+ * All occurrences of `exact` are candidates. Each is scored by how much of `prefix`
+ * matches immediately before it and `suffix` immediately after. A unique best match
+ * wins; a tie falls back to the first candidate, deterministically.
+ *
+ * Returns false when the quote is not present on the page or when `exact` is empty.
+ * Never matches inside an existing `mark` to avoid nesting.
+ */
+export function wrapTextQuoteWithContext(
+  root: ParentNode,
+  quote: QuoteContext,
+  id: string
+): boolean {
+  if (quote.exact.length === 0) return false;
+
+  const textNodes = walkContentTextNodes(root);
+  if (textNodes.length === 0) return false;
+
+  interface NodeSpan {
+    readonly node: Text;
+    readonly start: number;
+    readonly end: number;
+  }
+
+  const spans: NodeSpan[] = [];
+  let fullText = '';
+  for (const node of textNodes) {
+    const start = fullText.length;
+    fullText += node.data;
+    spans.push({ node, start, end: fullText.length });
+  }
+
+  const exact = quote.exact;
+  const candidates: number[] = [];
+  let idx = fullText.indexOf(exact);
+  while (idx !== -1) {
+    candidates.push(idx);
+    idx = fullText.indexOf(exact, idx + 1);
+  }
+
+  const firstCand = candidates[0];
+  if (firstCand === undefined) return false;
+
+  const prefix = quote.prefix ?? '';
+  const suffix = quote.suffix ?? '';
+
+  let bestIndex = firstCand;
+  let bestScore = -1;
+
+  for (const candStart of candidates) {
+    const candEnd = candStart + exact.length;
+
+    let prefixScore = 0;
+    if (prefix.length > 0) {
+      for (let k = 1; k <= prefix.length && k <= candStart; k++) {
+        if (fullText[candStart - k] === prefix[prefix.length - k]) {
+          prefixScore++;
+        } else {
+          break;
+        }
+      }
+    }
+
+    let suffixScore = 0;
+    if (suffix.length > 0) {
+      for (let k = 0; k < suffix.length && candEnd + k < fullText.length; k++) {
+        if (fullText[candEnd + k] === suffix[k]) {
+          suffixScore++;
+        } else {
+          break;
+        }
+      }
+    }
+
+    const score = prefixScore + suffixScore;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = candStart;
+    }
+  }
+
+  const matchStart = bestIndex;
+  const matchEnd = matchStart + exact.length;
+
+  let markedAny = false;
+  for (const span of spans) {
+    if (span.end <= matchStart || span.start >= matchEnd) {
+      continue;
+    }
+
+    const textNode = span.node;
+    const localStart = Math.max(0, matchStart - span.start);
+    const localEnd = Math.min(textNode.data.length, matchEnd - span.start);
+    if (localStart >= localEnd) continue;
+
+    let target: Text;
+    if (localStart === 0 && localEnd === textNode.data.length) {
+      target = textNode;
+    } else if (localStart === 0) {
+      target = textNode;
+      target.splitText(localEnd);
+    } else {
+      target = textNode.splitText(localStart);
+      const targetLength = localEnd - localStart;
+      if (target.data.length > targetLength) {
+        target.splitText(targetLength);
+      }
+    }
+
+    const mark = document.createElement('mark');
+    mark.className = 'relic-text-mark';
+    mark.dataset.commentId = id;
+    if (id === 'pending:target') {
+      mark.classList.add('is-pending');
+    }
+    target.parentNode?.insertBefore(mark, target);
+    mark.appendChild(target);
+    markedAny = true;
+  }
+
+  return markedAny;
 }
