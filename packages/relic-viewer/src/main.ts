@@ -39,6 +39,16 @@ import { isImageElement } from './annotate-region.ts';
 registerBuiltInAnchorAdapters();
 
 import {
+  type FrameMarkClickMessage,
+  type FramePointMessage,
+  type FrameRegionMessage,
+  type FrameSelectionMessage,
+  isFrameMarkClickMessage,
+  isFramePointMessage,
+  isFrameRegionMessage,
+  isFrameSelectionMessage,
+} from './annotate-frame.ts';
+import {
   type CommentCipher,
   type CommentEntry,
   commentCipher,
@@ -745,6 +755,43 @@ function sandboxFrame(
     // sanitized before it is read: there is nothing to sanitize.
     if (onTree !== undefined && isTreeMessage(event.data)) {
       onTree(event.data.tree);
+      return;
+    }
+    if (isFrameSelectionMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-selection', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
+    if (isFramePointMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-point', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
+    if (isFrameRegionMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-region', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
+    if (isFrameMarkClickMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-mark-click', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
     }
   };
   window.addEventListener('message', onMessage);
@@ -1999,23 +2046,6 @@ export const MARK_PIN_HINT = 'Click the document to place a point';
 const MARK_BUBBLE_GAP = 6;
 
 /**
- * Why a sandboxed relic offers no aiming controls yet.
- *
- * The render frame is a different origin with `allow-same-origin` withheld,
- * so this page cannot read a selection inside it, and a click inside it never
- * reaches a listener out here. Controls that looked available and then did
- * nothing would be worse than one sentence saying so.
- *
- * The sentence claims only the selection, because only the selection is
- * impossible. A pin is painted by this page into its own overlay on the
- * stage, so pointing at a location in a framed document is unwired rather
- * than out of reach, and it is not this change's to wire.
- */
-export const MARK_SANDBOX_NOTE =
-  'This document renders in an isolated frame, so text inside it cannot be ' +
-  'selected from this page.';
-
-/**
  * The key a provisional mark is painted under.
  *
  * A colon cannot occur in a server-minted comment id, which is base64url, so
@@ -2037,7 +2067,15 @@ export function paintPendingMark(
   pins: HTMLElement,
   anchor: CommentAnchor | null
 ): void {
-  if (anchor === null) return;
+  if (anchor === null) {
+    host
+      .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage(
+        { type: 'relic:clear-mark', id: PENDING_MARK_ID },
+        '*'
+      );
+    return;
+  }
   if (anchor.kind === 'text') {
     wrapTextQuote(host, anchor.quote, PENDING_MARK_ID);
     const painted = host.querySelector(
@@ -2095,7 +2133,10 @@ export function anchorSurfaceFor(host: HTMLElement): AnchorSurface | undefined {
   const only = candidates.item?.(0) ?? candidates[0];
   return {
     host,
-    content: only instanceof HTMLElement ? only : host,
+    content:
+      only instanceof HTMLElement || (only && typeof only === 'object')
+        ? (only as HTMLElement)
+        : host,
   };
 }
 
@@ -2228,6 +2269,12 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     host?.classList.remove('is-pinning');
     hint?.remove();
     hint = undefined;
+    host
+      ?.querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage(
+        { type: 'relic:arm-pointing', armed: false },
+        '*'
+      );
   };
 
   const paintChip = (): void => {
@@ -2283,6 +2330,12 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     // cursor between arming and the click that places the point.
     surface.appendChild(said);
     hint = said;
+    surface
+      .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage(
+        { type: 'relic:arm-pointing', armed: true },
+        '*'
+      );
   };
 
   /** Offers a target for a settled selection, and offers nothing otherwise. */
@@ -2624,11 +2677,6 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       // The boundary, read from the DOM rather than from the route, because a
       // component that will not compile falls back to its own source and that
       // source renders right here in the page where a mark can reach it.
-      if (next.querySelector('iframe.usercontent-frame') !== null) {
-        mode = undefined;
-        tools.replaceChildren(line('thread-note', MARK_SANDBOX_NOTE));
-        return;
-      }
 
       // One armed mode handles both point and region: click equals point, drag
       // equals region. Keeping one control avoids cluttering the toolbar and
@@ -2652,7 +2700,18 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         'video.relic-media, audio.relic-media, video, audio'
       ) as HTMLMediaElement | null;
 
-      if (media !== null) {
+      const isFramed = next.querySelector('iframe.usercontent-frame') !== null;
+      // Framed content is the one surface where the artifact is a document
+      // this origin cannot read into, so the affordance has to name the thing
+      // that does work there rather than withdraw. Both kinds now arrive over
+      // postMessage from the shim, so the point toggle is real and a selection
+      // inside the frame reaches the composer.
+      if (isFramed) {
+        const framedHint = document.createElement('span');
+        framedHint.className = 'thread-note';
+        framedHint.textContent = 'or select text inside the document';
+        tools.replaceChildren(toggle, framedHint);
+      } else if (media !== null) {
         const isAudio = media.tagName === 'AUDIO';
         const timeToggle = document.createElement('button');
         timeToggle.type = 'button';
@@ -2771,9 +2830,15 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         // pointer-only offer silently excludes both. These are additive to the
         // drag handlers below: `afterSelection` offers nothing when the
         // selection is collapsed, which is the state a drag leaves behind.
-        next.addEventListener('mouseup', () => {
-          afterSelection(offer);
-        });
+        // Pointer gestures on the stage only. Inside a framed document
+        // they never reach this origin, and binding them anyway would let a
+        // drag in the margin around the frame produce a region anchor
+        // measured against the wrong box.
+        if (!isFramed) {
+          next.addEventListener('mouseup', () => {
+            afterSelection(offer);
+          });
+        }
         next.addEventListener('keyup', () => {
           afterSelection(offer);
         });
@@ -2805,6 +2870,58 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       }
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
+
+      // The four the shim sends outward. They can only originate in the
+      // frame, so they need no framed guard of their own.
+      next.addEventListener('relic:frame-selection', ((
+        event: CustomEvent<FrameSelectionMessage>
+      ) => {
+        const msg = event.detail;
+        if (msg?.exact && msg.exact.trim().length > 0) {
+          aim({
+            kind: 'quote',
+            exact: msg.exact.trim(),
+            ...(msg.prefix ? { prefix: msg.prefix } : {}),
+            ...(msg.suffix ? { suffix: msg.suffix } : {}),
+          });
+        }
+      }) as EventListener);
+      next.addEventListener('relic:frame-point', ((
+        event: CustomEvent<FramePointMessage>
+      ) => {
+        if (!armed()) return;
+        const msg = event.detail;
+        if (!msg) return;
+        const w = 0.03;
+        const h = 0.03;
+        const rect = {
+          x: Math.max(0, Math.min(1 - w, msg.x - w / 2)),
+          y: Math.max(0, Math.min(1 - h, msg.y - h / 2)),
+          w,
+          h,
+        };
+        aim({ kind: 'region', rect });
+      }) as EventListener);
+      next.addEventListener('relic:frame-region', ((
+        event: CustomEvent<FrameRegionMessage>
+      ) => {
+        if (!armed()) return;
+        if (event.detail?.rect) {
+          aim({ kind: 'region', rect: event.detail.rect });
+        }
+      }) as EventListener);
+      next.addEventListener('relic:frame-mark-click', ((
+        event: CustomEvent<FrameMarkClickMessage>
+      ) => {
+        if (!event.detail?.id) return;
+        const row = document.querySelector(
+          `[data-comment-id="${event.detail.id}"]`
+        );
+        if (row instanceof HTMLElement) {
+          deps.open();
+          row.scrollIntoView({ block: 'nearest' });
+        }
+      }) as EventListener);
     },
   };
 }
@@ -2979,6 +3096,9 @@ export function buildThread(
     if (host === undefined) return;
     unwrapTextQuotes(host);
     host.querySelector('.comment-pins')?.remove();
+    host
+      .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage({ type: 'relic:clear-marks' }, '*');
     const pins = document.createElement('div');
     pins.className = 'comment-pins';
     let number = 0;

@@ -32,12 +32,19 @@
  */
 
 import { registerAnchorAdapter, resetAnchorAdapters } from './anchoring.ts';
+import { frameQuoteAdapter, frameRegionAdapter } from './annotate-frame.ts';
 import { quoteAdapter } from './annotate-quote.ts';
 import { regionAdapter } from './annotate-region.ts';
 import { timeAdapter } from './annotate-time.ts';
 
 export function registerBuiltInAnchorAdapters(): void {
   resetAnchorAdapters();
+  // Framed adapters first. Order is the tie-break when two adapters claim one
+  // kind, and these accept only a surface holding a usercontent frame, which
+  // is the narrower test; asking the page-DOM adapters first would let them
+  // answer for a document they cannot reach into.
+  registerAnchorAdapter(frameQuoteAdapter);
+  registerAnchorAdapter(frameRegionAdapter);
   registerAnchorAdapter(quoteAdapter);
   registerAnchorAdapter(regionAdapter);
   registerAnchorAdapter(timeAdapter);
