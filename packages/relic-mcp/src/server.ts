@@ -20,6 +20,7 @@
  * unusable in most of the agents this product exists to serve.
  */
 
+import { MNEMONIC_WORDS } from '@relic/format/mnemonic';
 import {
   type CommentAnchorInput,
   type CommentRecord,
@@ -271,7 +272,7 @@ export const TOOL_DEFINITION = {
       resolved_path: { type: 'string' },
       key_phrase: {
         type: 'string',
-        description: `A 12-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
+        description: `A ${MNEMONIC_WORDS}-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
       },
     },
     required: [
@@ -353,7 +354,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
       resolved_path: { type: 'string' },
       key_phrase: {
         type: 'string',
-        description: `A 12-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
+        description: `A ${MNEMONIC_WORDS}-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
       },
     },
     required: [
@@ -672,7 +673,7 @@ export const SHOW_TOOL_DEFINITION = {
       source: { type: ['string', 'null'] },
       key_phrase: {
         type: 'string',
-        description: `A 12-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
+        description: `A ${MNEMONIC_WORDS}-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
       },
       status: { type: 'string' },
       status_basis: { type: 'string', enum: ['mint', 'record', 'local'] },
