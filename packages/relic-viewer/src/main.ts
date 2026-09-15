@@ -20,6 +20,12 @@ import {
   parseFragment,
 } from '@relic/format';
 import {
+  type AnchorSurface,
+  adapterFor,
+  MARK_UNPLACEABLE_NOTE,
+  UNSUPPORTED_ANCHOR_LABEL,
+} from './anchoring.ts';
+import {
   type CommentCipher,
   type CommentEntry,
   commentCipher,
@@ -1647,7 +1653,17 @@ function field(
  * answered, so both go in through `textContent` with the bidirectional
  * controls stripped.
  */
-export function commentRow(entry: CommentEntry): HTMLElement {
+export function commentRow(
+  entry: CommentEntry,
+  /**
+   * Whether this comment's mark exists and could not be placed on the page.
+   *
+   * Read as a parameter rather than derived here, because whether a mark
+   * lands depends on what is currently rendered and only the paint pass
+   * knows that.
+   */
+  unplaceable = false
+): HTMLElement {
   const row = document.createElement('li');
   row.className =
     entry.kind === 'open' ? 'comment' : 'comment comment-undecryptable';
@@ -1716,6 +1732,12 @@ export function commentRow(entry: CommentEntry): HTMLElement {
           'one you cannot trust the length of.'
       )
     );
+  }
+  // Said on the row rather than left to be inferred from a missing mark. A
+  // comment that points at something and shows nothing reads as a comment
+  // about the whole relic, which is the wrong thing to conclude from it.
+  if (unplaceable) {
+    row.appendChild(line('comment-unplaceable', MARK_UNPLACEABLE_NOTE));
   }
   return row;
 }
@@ -2009,15 +2031,55 @@ export function paintPendingMark(
     painted?.classList.add('is-pending');
     return;
   }
-  const pin = document.createElement('div');
-  // Not a button: there is no comment to scroll to yet, and a control that
-  // answers a press by doing nothing is the defect this whole change removed.
-  pin.className = 'comment-pin is-pending';
-  pin.dataset.commentId = PENDING_MARK_ID;
-  const offsets = pinOffsets(anchor, host);
-  pin.style.left = `${offsets.left}px`;
-  pin.style.top = `${offsets.top}px`;
-  pins.appendChild(pin);
+  if (anchor.kind === 'pin') {
+    const pin = document.createElement('div');
+    // Not a button: there is no comment to scroll to yet, and a control that
+    // answers a press by doing nothing is the defect this whole change removed.
+    pin.className = 'comment-pin is-pending';
+    pin.dataset.commentId = PENDING_MARK_ID;
+    const offsets = pinOffsets(anchor, host);
+    pin.style.left = `${offsets.left}px`;
+    pin.style.top = `${offsets.top}px`;
+    pins.appendChild(pin);
+    return;
+  }
+  // A precise kind paints its provisional mark through the same adapter that
+  // paints the posted one, so the reader sees the thing they aimed at rather
+  // than a preview that differs from the result.
+  const surface = anchorSurfaceFor(host);
+  if (surface === undefined) return;
+  const adapter = adapterFor(anchor);
+  if (adapter === undefined || !adapter.supports(surface)) return;
+  adapter.paint(surface, pins, anchor, PENDING_MARK_ID);
+  for (const painted of pins.querySelectorAll(
+    `[data-comment-id="${PENDING_MARK_ID}"]`
+  )) {
+    painted.classList.add('is-pending');
+  }
+}
+
+/**
+ * The element geometry is measured against, given the stage marks live on.
+ *
+ * The artifact, when there is exactly one: the `img`, the `video`, the frame,
+ * the page canvas. Otherwise the stage stands in as its own content box,
+ * which is right for flowing text where there is no single framed object and
+ * the host *is* the content.
+ *
+ * `undefined` never happens today and is kept in the signature because a
+ * future class could render more than one candidate, and silently picking
+ * the first would put marks on whichever one happened to be first in the DOM.
+ */
+export function anchorSurfaceFor(host: HTMLElement): AnchorSurface | undefined {
+  const candidates = host.querySelectorAll(
+    'img.relic-image, video.relic-media, audio.relic-media, iframe.usercontent-frame, canvas.relic-page'
+  );
+  if (candidates.length > 1) return undefined;
+  const only = candidates.item(0);
+  return {
+    host,
+    content: only instanceof HTMLElement ? only : host,
+  };
 }
 
 /**
@@ -2031,13 +2093,24 @@ export function paintPendingMark(
 export function markTargetLabel(anchor: CommentAnchor | null): string {
   if (anchor === null) return 'Commenting on the whole document';
   if (anchor.kind === 'pin') return 'Commenting on a point';
-  // Display only. The stored quote stays exact, because it is what the
-  // painted mark is matched against when the thread loads.
-  const quote = plainLabel(anchor.quote);
+  if (anchor.kind === 'text') return quotedTargetLabel(anchor.quote);
+  const adapter = adapterFor(anchor);
+  if (adapter === undefined) return UNSUPPORTED_ANCHOR_LABEL;
+  return adapter.label(anchor);
+}
+
+/**
+ * A quote as the chip shows it.
+ *
+ * Display only, and shared by every kind that carries a quote. The stored
+ * value stays exact, because it is what a later paint is matched against.
+ */
+export function quotedTargetLabel(quote: string): string {
+  const plain = plainLabel(quote);
   const shown =
-    quote.length > MARK_QUOTE_DISPLAY_LIMIT
-      ? `${quote.slice(0, MARK_QUOTE_DISPLAY_LIMIT).trimEnd()}…`
-      : quote;
+    plain.length > MARK_QUOTE_DISPLAY_LIMIT
+      ? `${plain.slice(0, MARK_QUOTE_DISPLAY_LIMIT).trimEnd()}…`
+      : plain;
   return `Commenting on "${shown}"`;
 }
 
@@ -2422,6 +2495,15 @@ export function buildThread(
   let session: SessionState = { kind: 'unknown' };
   let host: HTMLElement | undefined;
   let lastEntries: readonly CommentEntry[] = [];
+  /**
+   * Comment ids whose mark is real but has nowhere to land on this page.
+   *
+   * Two causes, one reader-visible consequence: a kind this build has no
+   * adapter for, and a quote the current version of the relic no longer
+   * contains. The thread says so on the row, because a comment that appears
+   * to point at nothing is worse than one that says where it pointed.
+   */
+  const unplaceable = new Set<string>();
   /** Puts the width where the sidebar and the divider both read it. */
   const applyWidth = (width: number): number => {
     const clamped = Math.round(clampThreadWidth(width, window.innerWidth));
@@ -2486,6 +2568,11 @@ export function buildThread(
     const pins = document.createElement('div');
     pins.className = 'comment-pins';
     let number = 0;
+    // Ids whose mark could not be placed on this page, so the thread can say
+    // so on the row instead of showing a comment that appears to point at
+    // nothing. Rebuilt every pass, because whether a mark lands depends on
+    // the content currently rendered.
+    unplaceable.clear();
     for (const entry of entries) {
       if (entry.kind !== 'open' || entry.anchor === null) continue;
       number += 1;
@@ -2493,27 +2580,43 @@ export function buildThread(
         wrapTextQuote(host, entry.anchor.quote, entry.id);
         continue;
       }
-      const pin = document.createElement('button');
-      pin.type = 'button';
-      pin.className = 'comment-pin';
-      pin.textContent = String(number);
-      // Addressable, so hovering the pin can light its comment. Posted pins
-      // and marks now carry the same key, which is what lets one pairing
-      // handler serve both shapes.
-      pin.dataset.commentId = entry.id;
-      const offsets = pinOffsets(entry.anchor, host);
-      pin.style.left = `${offsets.left}px`;
-      pin.style.top = `${offsets.top}px`;
-      pin.title = entry.body;
-      pin.addEventListener('click', (event) => {
-        event.preventDefault();
-        setOpen(true);
-        const row = list.querySelector(`[data-comment-id="${entry.id}"]`);
-        if (row instanceof HTMLElement) {
-          row.scrollIntoView({ block: 'nearest' });
-        }
-      });
-      pins.appendChild(pin);
+      if (entry.anchor.kind === 'pin') {
+        const pin = document.createElement('button');
+        pin.type = 'button';
+        pin.className = 'comment-pin';
+        pin.textContent = String(number);
+        // Addressable, so hovering the pin can light its comment. Posted pins
+        // and marks now carry the same key, which is what lets one pairing
+        // handler serve both shapes.
+        pin.dataset.commentId = entry.id;
+        const offsets = pinOffsets(entry.anchor, host);
+        pin.style.left = `${offsets.left}px`;
+        pin.style.top = `${offsets.top}px`;
+        pin.title = entry.body;
+        pin.addEventListener('click', (event) => {
+          event.preventDefault();
+          setOpen(true);
+          const row = list.querySelector(`[data-comment-id="${entry.id}"]`);
+          if (row instanceof HTMLElement) {
+            row.scrollIntoView({ block: 'nearest' });
+          }
+        });
+        pins.appendChild(pin);
+        continue;
+      }
+      // Every precise kind, through its adapter. A kind with no adapter
+      // registered, or one whose mark has nowhere to land because the relic
+      // was republished, leaves the comment in the thread and marks the row
+      // as unplaceable rather than dropping either.
+      const surface = anchorSurfaceFor(host);
+      const adapter =
+        surface === undefined ? undefined : adapterFor(entry.anchor);
+      const placed =
+        adapter !== undefined &&
+        surface !== undefined &&
+        adapter.supports(surface) &&
+        adapter.paint(surface, pins, entry.anchor, entry.id);
+      if (!placed) unplaceable.add(entry.id);
     }
     paintPendingMark(host, pins, marks.target());
     host.appendChild(pins);
@@ -2590,7 +2693,18 @@ export function buildThread(
       );
       return;
     }
-    list.replaceChildren(...state.entries.map(commentRow));
+    // Paint first, then build the rows. Which marks landed is only known
+    // after the paint pass, and a row that has to say its mark could not be
+    // placed cannot be built before that is decided.
+    paintMarks(state.entries);
+    list.replaceChildren(
+      // Not a bare `map(commentRow)`: `map` passes the index as the second
+      // argument, which would make every row after the first claim its mark
+      // was unplaceable.
+      ...state.entries.map((entry) =>
+        commentRow(entry, entry.id !== null && unplaceable.has(entry.id))
+      )
+    );
     updateThreadToggle(toggle, state.entries.length);
     status.replaceChildren(
       ...(state.entries.length === 0
@@ -2598,7 +2712,6 @@ export function buildThread(
         : [])
     );
     onCount(state.entries.length);
-    paintMarks(state.entries);
   };
 
   /** The address form, for a reader this browser has not verified. */
