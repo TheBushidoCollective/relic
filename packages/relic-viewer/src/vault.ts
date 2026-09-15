@@ -4,6 +4,7 @@ export interface VaultEntry {
   readonly expiresAt: number | null;
   readonly title?: string | undefined;
   readonly lastOpenedAt?: number | undefined;
+  readonly renderer?: string | undefined;
 }
 
 export interface KeyVault {
@@ -11,7 +12,10 @@ export interface KeyVault {
     relicId: string,
     fragment: string,
     expiresAt: number,
-    meta?: { readonly title?: string | undefined }
+    meta?: {
+      readonly title?: string | undefined;
+      readonly renderer?: string | undefined;
+    }
   ): void;
   recall(relicId: string): string | undefined;
   list(): readonly VaultEntry[];
@@ -111,18 +115,35 @@ export function localStorageKeyVault(
 
       let title: string | undefined =
         typeof meta?.title === 'string' ? meta.title : undefined;
-      if (title === undefined) {
+      let renderer: string | undefined =
+        typeof meta?.renderer === 'string' ? meta.renderer : undefined;
+      if (title === undefined || renderer === undefined) {
         try {
           const raw = store.getItem(`${VAULT_PREFIX}${relicId}`);
           if (raw !== null) {
             const existing: unknown = JSON.parse(raw);
-            if (
-              existing !== null &&
-              typeof existing === 'object' &&
-              'title' in existing &&
-              typeof existing.title === 'string'
-            ) {
-              title = existing.title;
+            if (existing !== null && typeof existing === 'object') {
+              if (
+                title === undefined &&
+                'title' in existing &&
+                typeof existing.title === 'string'
+              ) {
+                title = existing.title;
+              }
+              if (
+                renderer === undefined &&
+                'renderer' in existing &&
+                typeof existing.renderer === 'string'
+              ) {
+                renderer = existing.renderer;
+              }
+              if (
+                renderer === undefined &&
+                'renderer' in existing &&
+                typeof existing.renderer === 'string'
+              ) {
+                renderer = existing.renderer;
+              }
             }
           }
         } catch {
@@ -138,6 +159,7 @@ export function localStorageKeyVault(
             expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
             lastOpenedAt: now(),
             ...(title !== undefined ? { title } : {}),
+            ...(renderer !== undefined ? { renderer } : {}),
           })
         );
       } catch {
@@ -233,6 +255,10 @@ export function localStorageKeyVault(
               'title' in parsed && typeof parsed.title === 'string'
                 ? parsed.title
                 : undefined;
+            const renderer =
+              'renderer' in parsed && typeof parsed.renderer === 'string'
+                ? parsed.renderer
+                : undefined;
             const lastOpenedAt =
               'lastOpenedAt' in parsed &&
               typeof parsed.lastOpenedAt === 'number' &&
@@ -245,6 +271,7 @@ export function localStorageKeyVault(
               expiresAt: expiresAt as number | null,
               ...(title !== undefined ? { title } : {}),
               ...(lastOpenedAt !== undefined ? { lastOpenedAt } : {}),
+              ...(renderer !== undefined ? { renderer } : {}),
             });
           } catch {
             try {
@@ -391,6 +418,15 @@ export function localStorageKeyVault(
           title = raw.title;
         }
 
+        let renderer: string | undefined;
+        if ('renderer' in raw && raw.renderer !== undefined) {
+          if (typeof raw.renderer !== 'string' || raw.renderer.length === 0) {
+            skipped++;
+            continue;
+          }
+          renderer = raw.renderer;
+        }
+
         let lastOpenedAt: number | undefined;
         if ('lastOpenedAt' in raw && raw.lastOpenedAt !== undefined) {
           if (
@@ -455,6 +491,7 @@ export function localStorageKeyVault(
               expiresAt,
               ...(title !== undefined ? { title } : {}),
               ...(lastOpenedAt !== undefined ? { lastOpenedAt } : {}),
+              ...(renderer !== undefined ? { renderer } : {}),
             })
           );
           added++;

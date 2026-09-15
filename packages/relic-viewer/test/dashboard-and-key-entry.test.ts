@@ -269,8 +269,14 @@ describe('buildLocalDashboardRows and buildCommentedDashboardRows', () => {
       // A dashboard link must have exactly one either way: prepending one to
       // this value produced `##r1...`, which browsers interpret as the wrong
       // decryption key.
-      { relicId: 'r1', fragment: '#f1', title: 'Named', expiresAt: null },
-      { relicId: 'r2', fragment: 'f2', expiresAt: null },
+      {
+        relicId: 'r1',
+        fragment: '#f1',
+        title: 'Named',
+        expiresAt: null,
+        renderer: 'markdown',
+      },
+      { relicId: 'r2', fragment: 'f2', expiresAt: null, renderer: 'code' },
     ]);
     const rows = buildLocalDashboardRows(vault);
     expect(rows).toHaveLength(2);
@@ -279,18 +285,28 @@ describe('buildLocalDashboardRows and buildCommentedDashboardRows', () => {
       title: 'Named',
       hasKey: true,
       fragment: 'f1',
+      previewKind: 'document',
+      previewLabel: 'Document',
     });
     expect(rows[1]).toEqual({
       relicId: 'r2',
       title: 'r2',
       hasKey: true,
       fragment: 'f2',
+      previewKind: 'code',
+      previewLabel: 'Code',
     });
   });
 
   test('builds commented rows, distinguishing openable from unopenable', () => {
     const vault = makeMockVault([
-      { relicId: 'held', fragment: '#fheld', title: 'Held', expiresAt: null },
+      {
+        relicId: 'held',
+        fragment: '#fheld',
+        title: 'Held',
+        expiresAt: null,
+        renderer: 'markdown',
+      },
     ]);
     const commented: CommentedRelic[] = [
       {
@@ -317,6 +333,8 @@ describe('buildLocalDashboardRows and buildCommentedDashboardRows', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]?.hasKey).toBe(true);
     expect(rows[0]?.fragment).toBe('fheld');
+    expect(rows[0]?.previewKind).toBe('document');
+    expect(rows[0]?.previewLabel).toBe('Document');
     expect(rows[1]?.hasKey).toBe(false);
     expect(rows[1]?.fragment).toBeUndefined();
   });
@@ -943,11 +961,13 @@ describe('Dashboard rendering (DOM)', () => {
         fragment: frag1,
         title: 'Project Roadmap',
         expiresAt: null,
+        renderer: 'markdown',
       },
       {
         relicId: 'rel2',
         fragment: frag2,
         expiresAt: null,
+        renderer: 'code',
       },
     ]);
 
@@ -981,6 +1001,13 @@ describe('Dashboard rendering (DOM)', () => {
     const secondLink = items[1]?.querySelector('.relic-link') as ElementStub;
     expect(secondLink.textContent).toBe('rel2');
     expect(secondLink.href).toBe(`/rel2#${frag2}`);
+
+    const firstThumbnail = items[0]?.querySelector('.relic-thumbnail');
+    expect(firstThumbnail?.getAttribute('aria-label')).toBe('Document relic');
+    expect(firstThumbnail?.className).toContain('relic-thumbnail-document');
+    const secondThumbnail = items[1]?.querySelector('.relic-thumbnail');
+    expect(secondThumbnail?.getAttribute('aria-label')).toBe('Code relic');
+    expect(secondThumbnail?.className).toContain('relic-thumbnail-code');
 
     for (const item of items) {
       const allText = item.children.map((c) => c.textContent).join(' ');

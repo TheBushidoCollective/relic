@@ -655,6 +655,21 @@ describe('failure states', () => {
     expect(state.dead.detail).toContain('no way to tell');
   });
 
+  test('a well-formed wrong key is never remembered as openable', async () => {
+    const { id } = await seed(utf8('# hi'), 'notes.md', 'text/markdown');
+    const { encodeFragment } = await import('@relic/format');
+    const { vault, entries, rememberCalls } = fakeVault();
+
+    const state = await load(
+      id,
+      deps(encodeFragment(generateKey()), `${SERVICE}/${id}`, vault)
+    );
+
+    expect(state.kind).toBe('dead');
+    expect(entries.has(id)).toBe(false);
+    expect(rememberCalls.has(id)).toBe(false);
+  });
+
   test('a removed relic reads as removed, never as a decrypt failure', async () => {
     const { id, fragment } = await seed(
       utf8('# hi'),

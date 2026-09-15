@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { localStorageKeyVault, type VaultEntry } from '../src/vault.ts';
+import { localStorageKeyVault } from '../src/vault.ts';
 
 function memoryStorage(): Storage {
   const map = new Map<string, string>();
@@ -439,9 +439,13 @@ describe('browser key vault', () => {
     let clock = 1000;
     const vault = localStorageKeyVault(storage, () => clock);
 
-    vault.remember('r1', '#r1first', 10000, { title: 'Original Title' });
+    vault.remember('r1', '#r1first', 10000, {
+      title: 'Original Title',
+      renderer: 'markdown',
+    });
     let entry = vault.list().find((e) => e.relicId === 'r1');
     expect(entry?.title).toBe('Original Title');
+    expect(entry?.renderer).toBe('markdown');
     expect(entry?.lastOpenedAt).toBe(1000);
 
     // Calling remember again on reload without meta title preserves the title and updates lastOpenedAt
@@ -449,13 +453,18 @@ describe('browser key vault', () => {
     vault.remember('r1', '#r1first', 10000);
     entry = vault.list().find((e) => e.relicId === 'r1');
     expect(entry?.title).toBe('Original Title');
+    expect(entry?.renderer).toBe('markdown');
     expect(entry?.lastOpenedAt).toBe(2500);
 
     // Calling remember with a new title replaces it
     clock = 3500;
-    vault.remember('r1', '#r1first', 10000, { title: 'Updated Title' });
+    vault.remember('r1', '#r1first', 10000, {
+      title: 'Updated Title',
+      renderer: 'code',
+    });
     entry = vault.list().find((e) => e.relicId === 'r1');
     expect(entry?.title).toBe('Updated Title');
+    expect(entry?.renderer).toBe('code');
     expect(entry?.lastOpenedAt).toBe(3500);
   });
 

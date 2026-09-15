@@ -130,7 +130,10 @@ export interface KeyVault {
     relicId: string,
     fragment: string,
     expiresAt: number,
-    meta?: { readonly title?: string | undefined }
+    meta?: {
+      readonly title?: string | undefined;
+      readonly renderer?: string | undefined;
+    }
   ): void;
   recall(relicId: string): string | undefined;
   forget(relicId: string): void;
@@ -259,19 +262,6 @@ export async function load(
   }
   const mintResponse = minted.mint;
 
-  // The relic is real and this key reached it, so it is worth remembering
-  // until the relic itself expires. Done after the mint rather than before,
-  // so a key for a relic that does not exist is never written down. A relic
-  // with no lifetime never expires, and Date.parse(null) is NaN, which the
-  // vault would rightly refuse: map it to the explicit never-expires value.
-  deps.keyVault.remember(
-    relicId,
-    fragment,
-    mintResponse.relic_expires_at === null
-      ? Number.POSITIVE_INFINITY
-      : Date.parse(mintResponse.relic_expires_at)
-  );
-
   // Refuse before allocating, using a bound computed from the object length
   // and the record size rather than anything the server declared.
   const upperBound = plaintextSizeUpperBound(mintResponse.object_length);
@@ -323,6 +313,18 @@ export async function load(
     }
 
     const route = routeFor(entry.filename, entry.mimetype, opened.content);
+
+    // Mint proves the relic exists. Successful AEAD authentication proves this
+    // browser holds its key. Remember only here: writing after mint but before
+    // decrypt made a well-formed wrong key appear as an openable dashboard row.
+    deps.keyVault.remember(
+      relicId,
+      fragment,
+      mintResponse.relic_expires_at === null
+        ? Number.POSITIVE_INFINITY
+        : Date.parse(mintResponse.relic_expires_at),
+      { title: entry.filename, renderer: route.route }
+    );
 
     return {
       kind: 'ready',
@@ -1004,6 +1006,7 @@ export async function openRelicWithKey(
 
     deps.keyVault.remember(relicId, fragment, expiresAt, {
       title: entry.filename,
+      renderer: route.route,
     });
 
     return {
@@ -1072,11 +1075,56 @@ export interface CommentedRelic {
   readonly last_comment_at: string;
 }
 
+export type DashboardPreviewKind =
+  | 'document'
+  | 'code'
+  | 'image'
+  | 'page'
+  | 'component'
+  | 'media'
+  | 'pdf'
+  | 'archive'
+  | 'file'
+  | 'relic';
+
 export interface DashboardRelicRow {
   readonly relicId: string;
   readonly title: string;
   readonly hasKey: boolean;
   readonly fragment?: string | undefined;
+  readonly previewKind: DashboardPreviewKind;
+  readonly previewLabel: string;
+}
+
+function dashboardPreview(renderer: string | undefined): {
+  readonly kind: DashboardPreviewKind;
+  readonly label: string;
+} {
+  switch (renderer) {
+    case 'markdown':
+      return { kind: 'document', label: 'Document' };
+    case 'code':
+      return { kind: 'code', label: 'Code' };
+    case 'image':
+      return { kind: 'image', label: 'Image' };
+    case 'html':
+    case 'sandboxed-html':
+      return { kind: 'page', label: 'Page' };
+    case 'jsx':
+    case 'sandboxed-jsx':
+      return { kind: 'component', label: 'Component' };
+    case 'media':
+      return { kind: 'media', label: 'Media' };
+    case 'pdf':
+      return { kind: 'pdf', label: 'PDF' };
+    case 'archive':
+      return { kind: 'archive', label: 'Archive' };
+    case 'binary':
+    case 'download':
+      return { kind: 'file', label: 'File' };
+    default:
+      return { kind: 'relic', label: 'Relic' };
+  }
 }
 
 /**
@@ -1095,12 +1143,18 @@ export function buildLocalDashboardRows(
   vault: KeyVault
 ): readonly DashboardRelicRow[] {
   const list = vault.list ? vault.list() : [];
-  return list.map((entry: VaultEntry) => ({
-    relicId: entry.relicId,
-    title: entry.title && entry.title.length > 0 ? entry.title : entry.relicId,
-    hasKey: true,
-    fragment: canonicalStoredFragment(entry.fragment),
-  }));
+  return list.map((entry: VaultEntry) => {
+    const preview = dashboardPreview(entry.renderer);
+    return {
+      relicId: entry.relicId,
+      title:
+        entry.title && entry.title.length > 0 ? entry.title : entry.relicId,
+      hasKey: true,
+      fragment: canonicalStoredFragment(entry.fragment),
+      previewKind: preview.kind,
+      previewLabel: preview.label,
+    };
+  });
 }
 
 export function buildCommentedDashboardRows(
@@ -1111,11 +1165,14 @@ export function buildCommentedDashboardRows(
     const recalled = vault.recall(item.relic_id);
     const fragment =
       recalled === undefined ? undefined : canonicalStoredFragment(recalled);
+    const preview = dashboardPreview(item.renderer_class);
     return {
       relicId: item.relic_id,
       title: item.title && item.title.length > 0 ? item.title : item.relic_id,
       hasKey: fragment !== undefined,
       fragment,
+      previewKind: preview.kind,
+      previewLabel: preview.label,
     };
   });
 }

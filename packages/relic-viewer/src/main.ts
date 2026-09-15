@@ -101,6 +101,7 @@ import {
 import {
   buildCommentedDashboardRows,
   buildLocalDashboardRows,
+  type DashboardRelicRow,
   type DeadView,
   formatBytes,
   isKeyEntryRecoverable,
@@ -4252,6 +4253,25 @@ export function renderDead(
   document.body.appendChild(main);
 }
 
+/** A small cover for a dashboard row, built only from local/plain metadata. */
+function dashboardThumbnail(row: DashboardRelicRow): HTMLElement {
+  const thumb = document.createElement('span');
+  thumb.className = `relic-thumbnail relic-thumbnail-${row.previewKind}`;
+  thumb.setAttribute('role', 'img');
+  thumb.setAttribute('aria-label', `${row.previewLabel} relic`);
+
+  const rule = document.createElement('span');
+  rule.className = 'relic-thumbnail-rule';
+  rule.setAttribute('aria-hidden', 'true');
+
+  const label = document.createElement('span');
+  label.className = 'relic-thumbnail-label';
+  label.textContent = row.previewLabel;
+
+  thumb.append(rule, label);
+  return thumb;
+}
+
 export async function renderDashboard(deps: ViewerDeps): Promise<void> {
   const bar = document.createElement('header');
   bar.className = 'bar';
@@ -4336,7 +4356,7 @@ export async function renderDashboard(deps: ViewerDeps): Promise<void> {
       });
       actions.appendChild(forgetBtn);
 
-      li.append(info, actions);
+      li.append(dashboardThumbnail(row), info, actions);
       ul.appendChild(li);
     }
     localListContainer.appendChild(ul);
@@ -4497,7 +4517,7 @@ export async function renderDashboard(deps: ViewerDeps): Promise<void> {
           info.append(titleSpan, unopenableNote);
         }
 
-        li.appendChild(info);
+        li.append(dashboardThumbnail(row), info);
         ul.appendChild(li);
       }
       commentedList.appendChild(ul);

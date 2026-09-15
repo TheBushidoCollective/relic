@@ -181,6 +181,10 @@ body {
   left: 50%;
   z-index: 6;
   margin: 0;
+  /* With `left` set and no `right`, a shrink-to-fit box is capped at half the
+     container, so a sentence that fits on one line wrapped anyway. */
+  width: max-content;
+  max-width: calc(100% - 1.4rem);
   padding: 0.35rem 0.7rem;
   background: var(--patina);
   color: #fff;
@@ -2318,10 +2322,17 @@ canvas.relic-page {
   border-style: dashed;
 }
 
+/* Anchored to the bottom of the media stage, so `top` from `.mark-hint` has to
+   be released. Carrying both classes with both edges set stretched the tooltip
+   from the top of the stage to just above its base: a one-line sentence became
+   a white panel covering the video it was describing. */
 .mark-time-hint {
   position: absolute;
+  top: auto;
   bottom: 1rem;
   left: 50%;
+  width: max-content;
+  max-width: calc(100% - 2rem);
   transform: translateX(-50%);
   background: var(--surface);
   border: 1px solid var(--rule);
@@ -2447,6 +2458,69 @@ canvas.relic-page {
 
 .dashboard-relic-item:last-child {
   border-bottom: none;
+}
+
+/* A thumbnail here is an accession cover, not cached relic content. It uses
+   metadata this browser or the server already holds, so painting the dashboard
+   never spends an open and never creates a second plaintext copy of the file. */
+.relic-thumbnail {
+  --thumb-tone: var(--ink-soft);
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  flex: 0 0 4.75rem;
+  width: 4.75rem;
+  height: 3.35rem;
+  padding: 0.42rem;
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  border-top: 4px solid var(--thumb-tone);
+  background:
+    linear-gradient(
+      90deg,
+      transparent 0 18%,
+      color-mix(in srgb, var(--thumb-tone) 12%, transparent) 18% 19%,
+      transparent 19% 100%
+    ),
+    var(--ground);
+  color: var(--ink);
+}
+
+.relic-thumbnail-rule {
+  align-self: center;
+  height: 1.05rem;
+  border-block: 1px solid color-mix(in srgb, var(--thumb-tone) 46%, transparent);
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0 0.22rem,
+    color-mix(in srgb, var(--thumb-tone) 24%, transparent) 0.22rem 0.28rem
+  );
+}
+
+.relic-thumbnail-label {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relic-thumbnail-code,
+.relic-thumbnail-component {
+  --thumb-tone: var(--oxide);
+}
+
+.relic-thumbnail-image,
+.relic-thumbnail-media {
+  --thumb-tone: var(--patina);
+}
+
+.relic-thumbnail-pdf,
+.relic-thumbnail-archive {
+  --thumb-tone: var(--patina-ink);
 }
 
 .dashboard-relic-info {
