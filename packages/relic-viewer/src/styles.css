@@ -940,6 +940,108 @@ body {
   border-top: 1px solid var(--rule);
 }
 
+/* ---------- PDF stage and marks ---------- */
+
+.stage-pdf {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: auto;
+  padding: 1.5rem 1rem;
+}
+
+.doc-pdf {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  color: var(--ink);
+}
+
+.pdf-toolbar button {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.pdf-page-indicator {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.pdf-page-container {
+  position: relative;
+  display: inline-block;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  background: #ffffff;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+canvas.relic-page {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #ffffff;
+}
+
+.pdf-status-card {
+  max-width: 34rem;
+  margin: 3rem auto;
+  padding: 1.75rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--patina);
+}
+
+.pdf-status-title {
+  font-family: var(--sans);
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+}
+
+.mark-page,
+.mark-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--patina);
+  background: rgba(31, 107, 100, 0.15);
+  border-radius: 2px;
+  pointer-events: auto;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.mark-page.is-active,
+.mark-region.is-active {
+  background: rgba(31, 107, 100, 0.35);
+  border-color: var(--patina-ink);
+  box-shadow: 0 0 0 2px rgba(31, 107, 100, 0.4);
+}
+
+.mark-page.is-pending,
+.mark-region.is-pending {
+  border-style: dashed;
+  background: rgba(31, 107, 100, 0.1);
+  pointer-events: none;
+}
+
 /* ---------- version history ---------- */
 
 .stage-diff {
@@ -1640,6 +1742,51 @@ body {
   outline-offset: 2px;
 }
 
+/* Discoverability hint in thread tools, announcing how to aim on this artifact. */
+.thread-hint {
+  font-family: var(--sans);
+  font-size: 0.76rem;
+  color: var(--ink-secondary, #666);
+  font-style: italic;
+  line-height: 1.4;
+}
+
+/* Keyboard and click action in tools row when text is selected in the document. */
+.mark-quote-action {
+  padding: 0.35rem 0.7rem;
+  color: var(--patina-ink);
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--patina-wash, rgba(46, 125, 107, 0.1));
+  border: 1px solid var(--patina);
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.mark-quote-action:hover {
+  background: var(--patina);
+  color: #fff;
+}
+
+.mark-quote-action:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
+/* Keyboard-aimed region box on images with clear focus indication. */
+.comment-region.is-keyboard {
+  outline: 2px dashed var(--patina);
+  background: rgba(46, 125, 107, 0.15);
+}
+
+.stage-wrap.is-pinning:focus-visible,
+.stage-wrap.is-pinning img.relic-image:focus-visible,
+.stage-wrap.is-pinning .doc:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
 /*
  * Below this width, side by side is twenty characters of relic beside twenty
  * characters of conversation, which is neither reading nor commenting. The
@@ -1979,4 +2126,167 @@ body {
       transform: translate(-50%, 0.5rem);
     }
   }
+}
+
+/* ---------- comment region mark ---------- */
+
+/* The region mark outline uses a dual-stroke technique to guarantee high
+   contrast against arbitrary imagery. A 2px solid patina border is paired
+   with an outer dark shadow and an inner light shadow. On pure white photos,
+   the dark outer shadow and patina border provide crisp contrast. On pure
+   black photos, the bright inner shadow and patina border provide crisp
+   contrast. On any background luminance, at least one boundary edge remains
+   visible. */
+.comment-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--patina);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.9);
+  background: color-mix(in srgb, var(--patina) 14%, transparent);
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.comment-region:hover,
+.comment-region.is-active {
+  background: color-mix(in srgb, var(--patina) 28%, transparent);
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
+.comment-region.is-pending,
+.comment-region.is-drawing {
+  border-style: dashed;
+  pointer-events: none;
+  cursor: default;
+}
+
+.comment-region-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.25rem;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: var(--patina);
+  color: #fff;
+  font-family: var(--sans);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85), 0 2px 4px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* --------------------------------------------------------------------------
+   Time anchor markers and timeline track
+   -------------------------------------------------------------------------- */
+
+.time-track {
+  position: absolute;
+  height: 6px;
+  background: color-mix(in srgb, var(--ink) 18%, transparent);
+  border-radius: 3px;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.time-marker {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--patina);
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 0.1s ease, background 0.1s ease;
+}
+
+.time-marker:hover,
+.time-marker.is-active {
+  transform: translate(-50%, -50%) scale(1.3);
+  background: var(--accent, var(--patina));
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+  z-index: 2;
+}
+
+.time-marker.is-pending {
+  background: var(--accent, #d97706);
+  border-style: dashed;
+}
+
+.time-marker-span {
+  height: 6px;
+  top: 0;
+  border-radius: 3px;
+  border: none;
+  background: color-mix(in srgb, var(--patina) 50%, transparent);
+  transform: none;
+  min-width: 4px;
+}
+
+.time-marker-span:hover,
+.time-marker-span.is-active {
+  transform: none;
+  background: color-mix(in srgb, var(--patina) 80%, transparent);
+  outline: 2px solid var(--patina);
+  outline-offset: 1px;
+}
+
+.time-marker-span.is-pending {
+  background: color-mix(in srgb, var(--accent, #d97706) 60%, transparent);
+}
+
+.time-frame-box {
+  position: absolute;
+  border: 2px solid var(--patina);
+  background: color-mix(in srgb, var(--patina) 15%, transparent);
+  pointer-events: none;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.time-frame-box.is-hidden,
+.time-frame-box[hidden] {
+  display: none !important;
+}
+
+.time-frame-box.is-active {
+  border-color: var(--accent, var(--patina));
+  background: color-mix(in srgb, var(--patina) 30%, transparent);
+  box-shadow: 0 0 0 1px var(--surface);
+}
+
+.time-frame-box.is-pending {
+  border-style: dashed;
+}
+
+.mark-time-hint {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  padding: 0.35rem 0.75rem;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  color: var(--ink);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
 }

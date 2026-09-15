@@ -19,6 +19,35 @@ import {
   deriveCommentKey,
   parseFragment,
 } from '@relic/format';
+import { registerBuiltInAnchorAdapters } from './anchor-adapters.ts';
+import {
+  type AnchorSurface,
+  adapterFor,
+  anchorLabel,
+  boxFromUnit,
+  MARK_UNPLACEABLE_NOTE,
+  rectFromCorners,
+  UNSUPPORTED_ANCHOR_LABEL,
+  unitFromPointer,
+} from './anchoring.ts';
+import { captureSelectionQuote } from './annotate-quote.ts';
+import { isImageElement } from './annotate-region.ts';
+
+// The adapter table is installed once, from the one module that knows the
+// complete built-in set. See `anchor-adapters.ts` for why registration is not
+// done by each adapter module at its own top level.
+registerBuiltInAnchorAdapters();
+
+import {
+  type FrameMarkClickMessage,
+  type FramePointMessage,
+  type FrameRegionMessage,
+  type FrameSelectionMessage,
+  isFrameMarkClickMessage,
+  isFramePointMessage,
+  isFrameRegionMessage,
+  isFrameSelectionMessage,
+} from './annotate-frame.ts';
 import {
   type CommentCipher,
   type CommentEntry,
@@ -34,6 +63,7 @@ import {
   PUBLISHER_AUTHOR,
   plainLabel,
   postComment,
+  quotedTargetLabel,
   type Refusal,
   readSession,
   requestMagicLink,
@@ -43,6 +73,9 @@ import {
   utf8Bytes,
   wrapTextQuote,
 } from './comments.ts';
+
+export { quotedTargetLabel } from './comments.ts';
+
 import {
   bytesEqual,
   comparisonAvailability,
@@ -633,6 +666,7 @@ function renderImageView(view: ReadyView): HTMLElement {
   const url = URL.createObjectURL(blob);
 
   const image = document.createElement('img');
+  image.className = 'relic-image';
   image.src = url;
   image.alt = view.filename;
   image.addEventListener('load', () => URL.revokeObjectURL(url));
@@ -721,6 +755,43 @@ function sandboxFrame(
     // sanitized before it is read: there is nothing to sanitize.
     if (onTree !== undefined && isTreeMessage(event.data)) {
       onTree(event.data.tree);
+      return;
+    }
+    if (isFrameSelectionMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-selection', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
+    if (isFramePointMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-point', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
+    if (isFrameRegionMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-region', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
+    if (isFrameMarkClickMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-mark-click', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
     }
   };
   window.addEventListener('message', onMessage);
@@ -836,6 +907,41 @@ function renderDownloadView(view: ReadyView): HTMLElement {
   return wrapper;
 }
 
+export function renderPdfView(view: ReadyView): HTMLElement {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'doc doc-pdf';
+
+  const loading = document.createElement('div');
+  loading.className = 'pdf-status-card';
+  const headline = document.createElement('p');
+  headline.className = 'pdf-status-title';
+  headline.textContent = 'Loading PDF document';
+  const detail = document.createElement('p');
+  detail.className = 'thread-note';
+  detail.textContent =
+    'Loading the PDF renderer. It is loaded on demand so other documents do not pay for it.';
+  loading.append(headline, detail);
+  wrapper.appendChild(loading);
+
+  void import('./pdf.ts')
+    .then(({ mountPdf }) => {
+      void mountPdf(wrapper, view.content, view.filename);
+    })
+    .catch(() => {
+      loading.replaceChildren();
+      const errTitle = document.createElement('p');
+      errTitle.className = 'pdf-status-title';
+      errTitle.textContent = 'Could not load PDF renderer';
+      const errDetail = document.createElement('p');
+      errDetail.className = 'thread-note';
+      errDetail.textContent =
+        'The viewer could not load the PDF rendering component. Check your connection and try again.';
+      loading.append(errTitle, errDetail);
+    });
+
+  return wrapper;
+}
+
 const AUDIO_EXTENSIONS: Record<string, true> = {
   mp3: true,
   wav: true,
@@ -896,7 +1002,7 @@ export function renderMediaView(view: ReadyView): HTMLElement {
   let player: HTMLVideoElement | HTMLAudioElement;
   if (isAudio) {
     const audio = document.createElement('audio');
-    audio.className = 'media-player media-audio';
+    audio.className = 'media-player media-audio relic-media';
     audio.controls = true;
     audio.setAttribute('controls', '');
     audio.preload = 'metadata';
@@ -905,7 +1011,7 @@ export function renderMediaView(view: ReadyView): HTMLElement {
     player = audio;
   } else {
     const video = document.createElement('video');
-    video.className = 'media-player media-video';
+    video.className = 'media-player media-video relic-media';
     video.controls = true;
     video.setAttribute('controls', '');
     video.playsInline = true;
@@ -978,6 +1084,9 @@ export function buildCurrentStage(
       break;
     case 'sandboxed-jsx':
       main.appendChild(renderSandboxedJsx(view, usercontentOrigin));
+      break;
+    case 'pdf':
+      main.appendChild(renderPdfView(view));
       break;
     default:
       main.appendChild(renderDownloadView(view));
@@ -1647,7 +1756,17 @@ function field(
  * answered, so both go in through `textContent` with the bidirectional
  * controls stripped.
  */
-export function commentRow(entry: CommentEntry): HTMLElement {
+export function commentRow(
+  entry: CommentEntry,
+  /**
+   * Whether this comment's mark exists and could not be placed on the page.
+   *
+   * Read as a parameter rather than derived here, because whether a mark
+   * lands depends on what is currently rendered and only the paint pass
+   * knows that.
+   */
+  unplaceable = false
+): HTMLElement {
   const row = document.createElement('li');
   row.className =
     entry.kind === 'open' ? 'comment' : 'comment comment-undecryptable';
@@ -1716,6 +1835,12 @@ export function commentRow(entry: CommentEntry): HTMLElement {
           'one you cannot trust the length of.'
       )
     );
+  }
+  // Said on the row rather than left to be inferred from a missing mark. A
+  // comment that points at something and shows nothing reads as a comment
+  // about the whole relic, which is the wrong thing to conclude from it.
+  if (unplaceable) {
+    row.appendChild(line('comment-unplaceable', MARK_UNPLACEABLE_NOTE));
   }
   return row;
 }
@@ -1948,11 +2073,12 @@ export function pinOffsets(
   };
 }
 
-/** How much of a quote the chip shows before it abbreviates. */
-const MARK_QUOTE_DISPLAY_LIMIT = 60;
-
 /** What an armed pin tool tells the reader to do next. */
 export const MARK_PIN_HINT = 'Click the document to place a point';
+
+/** What an armed region tool tells the reader to do next. */
+export const MARK_REGION_HINT =
+  'Click to place a point, or drag to select a region (use arrows and Enter for keyboard)';
 
 /**
  * The clearance between a selection and the button offered above it, in CSS
@@ -1960,23 +2086,6 @@ export const MARK_PIN_HINT = 'Click the document to place a point';
  * it does not sit on the words it is about.
  */
 const MARK_BUBBLE_GAP = 6;
-
-/**
- * Why a sandboxed relic offers no aiming controls yet.
- *
- * The render frame is a different origin with `allow-same-origin` withheld,
- * so this page cannot read a selection inside it, and a click inside it never
- * reaches a listener out here. Controls that looked available and then did
- * nothing would be worse than one sentence saying so.
- *
- * The sentence claims only the selection, because only the selection is
- * impossible. A pin is painted by this page into its own overlay on the
- * stage, so pointing at a location in a framed document is unwired rather
- * than out of reach, and it is not this change's to wire.
- */
-export const MARK_SANDBOX_NOTE =
-  'This document renders in an isolated frame, so text inside it cannot be ' +
-  'selected from this page.';
 
 /**
  * The key a provisional mark is painted under.
@@ -2000,7 +2109,15 @@ export function paintPendingMark(
   pins: HTMLElement,
   anchor: CommentAnchor | null
 ): void {
-  if (anchor === null) return;
+  if (anchor === null) {
+    host
+      .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage(
+        { type: 'relic:clear-mark', id: PENDING_MARK_ID },
+        '*'
+      );
+    return;
+  }
   if (anchor.kind === 'text') {
     wrapTextQuote(host, anchor.quote, PENDING_MARK_ID);
     const painted = host.querySelector(
@@ -2009,15 +2126,60 @@ export function paintPendingMark(
     painted?.classList.add('is-pending');
     return;
   }
-  const pin = document.createElement('div');
-  // Not a button: there is no comment to scroll to yet, and a control that
-  // answers a press by doing nothing is the defect this whole change removed.
-  pin.className = 'comment-pin is-pending';
-  pin.dataset.commentId = PENDING_MARK_ID;
-  const offsets = pinOffsets(anchor, host);
-  pin.style.left = `${offsets.left}px`;
-  pin.style.top = `${offsets.top}px`;
-  pins.appendChild(pin);
+  if (anchor.kind === 'pin') {
+    const pin = document.createElement('div');
+    // Not a button: there is no comment to scroll to yet, and a control that
+    // answers a press by doing nothing is the defect this whole change removed.
+    pin.className = 'comment-pin is-pending';
+    pin.dataset.commentId = PENDING_MARK_ID;
+    const offsets = pinOffsets(anchor, host);
+    pin.style.left = `${offsets.left}px`;
+    pin.style.top = `${offsets.top}px`;
+    pins.appendChild(pin);
+    return;
+  }
+  // A precise kind paints its provisional mark through the same adapter that
+  // paints the posted one, so the reader sees the thing they aimed at rather
+  // than a preview that differs from the result.
+  const surface = anchorSurfaceFor(host);
+  if (surface === undefined) return;
+  const adapter = adapterFor(anchor, surface);
+  if (adapter === undefined) return;
+  adapter.paint(surface, pins, anchor, PENDING_MARK_ID);
+  for (const root of [pins, host]) {
+    for (const painted of root.querySelectorAll(
+      `[data-comment-id="${PENDING_MARK_ID}"]`
+    )) {
+      painted.classList.add('is-pending');
+    }
+  }
+}
+
+/**
+ * The element geometry is measured against, given the stage marks live on.
+ *
+ * The artifact, when there is exactly one: the `img`, the `video`, the frame,
+ * the page canvas. Otherwise the stage stands in as its own content box,
+ * which is right for flowing text where there is no single framed object and
+ * the host *is* the content.
+ *
+ * `undefined` never happens today and is kept in the signature because a
+ * future class could render more than one candidate, and silently picking
+ * the first would put marks on whichever one happened to be first in the DOM.
+ */
+export function anchorSurfaceFor(host: HTMLElement): AnchorSurface | undefined {
+  const candidates = host.querySelectorAll(
+    'img.relic-image, video.relic-media, audio.relic-media, iframe.usercontent-frame, canvas.relic-page'
+  );
+  if (candidates.length > 1) return undefined;
+  const only = candidates.item?.(0) ?? candidates[0];
+  return {
+    host,
+    content:
+      only instanceof HTMLElement || (only && typeof only === 'object')
+        ? (only as HTMLElement)
+        : host,
+  };
 }
 
 /**
@@ -2031,14 +2193,8 @@ export function paintPendingMark(
 export function markTargetLabel(anchor: CommentAnchor | null): string {
   if (anchor === null) return 'Commenting on the whole document';
   if (anchor.kind === 'pin') return 'Commenting on a point';
-  // Display only. The stored quote stays exact, because it is what the
-  // painted mark is matched against when the thread loads.
-  const quote = plainLabel(anchor.quote);
-  const shown =
-    quote.length > MARK_QUOTE_DISPLAY_LIMIT
-      ? `${quote.slice(0, MARK_QUOTE_DISPLAY_LIMIT).trimEnd()}…`
-      : quote;
-  return `Commenting on "${shown}"`;
+  if (anchor.kind === 'text') return quotedTargetLabel(anchor.quote);
+  return anchorLabel(anchor) ?? UNSUPPORTED_ANCHOR_LABEL;
 }
 
 /** The aiming controls, and the one target they hold between them. */
@@ -2102,7 +2258,27 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   let bubble: HTMLElement | undefined;
   let mode: HTMLElement | undefined;
   let hint: HTMLElement | undefined;
-
+  let teardownStage: (() => void) | undefined;
+  let dragOrigin:
+    | { clientX: number; clientY: number; unit: { x: number; y: number } }
+    | undefined;
+  let isDragging = false;
+  let suppressClick = false;
+  let drawingBox: HTMLElement | undefined;
+  /**
+   * Watches for an artifact that mounts after the stage does.
+   *
+   * The PDF renderer is a lazily imported chunk, so the page canvas appears
+   * well after `attach` runs. Without this the tools row describes a stage
+   * that has not finished rendering.
+   */
+  let lateArtifact: MutationObserver | undefined;
+  let timeMode: HTMLElement | undefined;
+  let timeHint: HTMLElement | undefined;
+  let spanStart: number | null = null;
+  let quoteAction: HTMLElement | undefined;
+  let keyboardBox: HTMLElement | undefined;
+  let keyboardRect: { x: number; y: number; w: number; h: number } | undefined;
   const chip = document.createElement('div');
   chip.className = 'compose-target';
   // Polite: a target arriving is worth announcing to a reader who cannot see
@@ -2123,16 +2299,51 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   const dismiss = (): void => {
     bubble?.remove();
     bubble = undefined;
+    quoteAction?.remove();
+    quoteAction = undefined;
   };
 
   /** The button's own pressed state is the armed state, so there is one. */
   const armed = (): boolean => mode?.getAttribute('aria-pressed') === 'true';
+
+  const removeKeyboardBox = (): void => {
+    keyboardBox?.remove();
+    keyboardBox = undefined;
+    keyboardRect = undefined;
+  };
+
+  const disarmSpan = (): void => {
+    spanStart = null;
+    if (timeMode !== undefined) {
+      timeMode.setAttribute('aria-pressed', 'false');
+      const isAudio = host?.querySelector('audio') !== null;
+      timeMode.textContent = isAudio
+        ? 'Comment on this moment'
+        : 'Comment on this frame';
+    }
+    timeHint?.remove();
+    timeHint = undefined;
+  };
 
   const disarm = (): void => {
     mode?.setAttribute('aria-pressed', 'false');
     host?.classList.remove('is-pinning');
     hint?.remove();
     hint = undefined;
+    removeKeyboardBox();
+    host
+      ?.querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage(
+        { type: 'relic:arm-pointing', armed: false },
+        '*'
+      );
+  };
+
+  const cancelAiming = (): void => {
+    dismiss();
+    disarm();
+    disarmSpan();
+    removeKeyboardBox();
   };
 
   const paintChip = (): void => {
@@ -2148,24 +2359,29 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
 
   const clear = (): void => {
     anchor = null;
-    dismiss();
-    disarm();
+    dragOrigin = undefined;
+    isDragging = false;
+    suppressClick = false;
+    drawingBox?.remove();
+    drawingBox = undefined;
+    cancelAiming();
     paintChip();
     deps.repaint();
+    deps.focusBody();
   };
-
   reset.addEventListener('click', clear);
 
-  const aim = (next: CommentAnchor): void => {
+  const aim = (next: CommentAnchor, keepSpanArmed = false): void => {
     anchor = next;
     dismiss();
     disarm();
+    if (!keepSpanArmed) disarmSpan();
+    removeKeyboardBox();
     paintChip();
     deps.repaint();
     deps.open();
     deps.focusBody();
   };
-
   const arm = (): void => {
     const surface = host;
     if (mode === undefined || surface === undefined) return;
@@ -2174,13 +2390,43 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     const said = document.createElement('p');
     said.className = 'mark-hint';
     said.setAttribute('aria-live', 'polite');
-    said.textContent = MARK_PIN_HINT;
-    // On the stage rather than in the sidebar, and out of flow. The reader is
+    const isImg = surface.querySelector('img.relic-image') !== null;
+    said.textContent = isImg ? MARK_REGION_HINT : MARK_PIN_HINT;
     // looking at the document, the sidebar is not on the row at all at narrow
     // width, and a hint that took layout space would shift the line under the
     // cursor between arming and the click that places the point.
     surface.appendChild(said);
     hint = said;
+
+    const s = anchorSurfaceFor(surface);
+    if (isImg && s) {
+      removeKeyboardBox();
+      keyboardRect = { x: 0.35, y: 0.35, w: 0.3, h: 0.3 };
+      const kbox = document.createElement('div');
+      kbox.className = 'comment-region is-drawing is-pending is-keyboard';
+      surface.appendChild(kbox);
+      keyboardBox = kbox;
+
+      const box = boxFromUnit(s, keyboardRect);
+      if (box) {
+        kbox.style.left = `${box.left}px`;
+        kbox.style.top = `${box.top}px`;
+        kbox.style.width = `${box.width}px`;
+        kbox.style.height = `${box.height}px`;
+      }
+      if (surface.tabIndex < 0) surface.tabIndex = 0;
+      surface.focus?.();
+    } else {
+      if (surface.tabIndex < 0) surface.tabIndex = 0;
+      surface.focus?.();
+    }
+
+    surface
+      .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage(
+        { type: 'relic:arm-pointing', armed: true },
+        '*'
+      );
   };
 
   /** Offers a target for a settled selection, and offers nothing otherwise. */
@@ -2225,8 +2471,12 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     });
     // The quote is captured here rather than re-read on click, so what gets
     // anchored is what the bubble appeared for.
+    const target = captureSelectionQuote(surface, range, selection) ?? {
+      kind: 'quote',
+      exact: quote,
+    };
     offered.addEventListener('click', () => {
-      aim({ kind: 'text', quote });
+      aim(target);
     });
     surface.appendChild(offered);
     // Above the selection, and never above the content box. The stage clips
@@ -2236,16 +2486,40 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     const above = rect.top - box.top + surface.scrollTop;
     offered.style.top = `${Math.max(above - offered.offsetHeight - MARK_BUBBLE_GAP, 0)}px`;
     bubble = offered;
+
+    // Keyboard and sidebar affordance
+    const qa = document.createElement('button');
+    qa.type = 'button';
+    qa.className = 'mark-quote-action';
+    qa.textContent = 'Quote selection';
+    const shortQuote =
+      quote.length > 24 ? `${quote.slice(0, 24).trimEnd()}…` : quote;
+    qa.setAttribute('aria-label', `Quote "${shortQuote}"`);
+    qa.addEventListener('click', () => {
+      aim(target);
+    });
+    tools.appendChild(qa);
+    quoteAction = qa;
   };
 
   /** Places a point, but only for a click the reader armed the tool for. */
   const place = (event: MouseEvent): void => {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
     const surface = host;
     if (surface === undefined || !armed()) return;
     if (!(event.target instanceof Element)) return;
     // An existing mark, the bubble and the conversation are controls. Only the
     // document itself takes a point.
-    if (event.target.closest('.comment-pin, .mark-bubble, .thread')) return;
+    if (
+      event.target.closest(
+        '.comment-pin, .comment-region, .mark-bubble, .thread'
+      )
+    ) {
+      return;
+    }
     const rect = surface.getBoundingClientRect();
     const fraction = pinFraction(
       {
@@ -2265,13 +2539,300 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     aim({ kind: 'pin', ...fraction });
   };
 
+  const onMouseDown = (event: MouseEvent): void => {
+    if (!armed()) return;
+    if (!(event.target instanceof Element)) return;
+    if (
+      event.target.closest(
+        '.comment-pin, .comment-region, .mark-bubble, .thread'
+      )
+    ) {
+      return;
+    }
+    if (host === undefined) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined || !isImageElement(surface.content)) return;
+
+    const start = unitFromPointer(surface, event.clientX, event.clientY);
+    if (start === undefined) {
+      // Pressed outside the image content box (in the letterbox). Do not start
+      // a drag so that clicks in the letterbox never clamp to the picture.
+      return;
+    }
+
+    dragOrigin = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      unit: start,
+    };
+    isDragging = false;
+    suppressClick = false;
+    // Prevent default browser image dragging so mousemove tracks smoothly:
+    event.preventDefault();
+  };
+
+  const onMouseMove = (event: MouseEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined) return;
+
+    const dx = event.clientX - dragOrigin.clientX;
+    const dy = event.clientY - dragOrigin.clientY;
+    if (!isDragging && Math.hypot(dx, dy) >= 4) {
+      isDragging = true;
+      suppressClick = true;
+    }
+    if (!isDragging) return;
+
+    if (drawingBox === undefined) {
+      drawingBox = document.createElement('div');
+      drawingBox.className = 'comment-region is-drawing is-pending';
+      host.appendChild(drawingBox);
+    }
+
+    const current = unitFromPointer(surface, event.clientX, event.clientY);
+    if (current === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const rect = rectFromCorners(dragOrigin.unit, current);
+    if (rect === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const box = boxFromUnit(surface, rect);
+    if (box === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    drawingBox.style.display = 'block';
+    drawingBox.style.left = `${box.left}px`;
+    drawingBox.style.top = `${box.top}px`;
+    drawingBox.style.width = `${box.width}px`;
+    drawingBox.style.height = `${box.height}px`;
+  };
+
+  const onMouseUp = (event: MouseEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    const wasDragging = isDragging;
+    const start = dragOrigin.unit;
+    dragOrigin = undefined;
+    isDragging = false;
+    drawingBox?.remove();
+    drawingBox = undefined;
+
+    if (wasDragging) {
+      suppressClick = true;
+      const surface = anchorSurfaceFor(host);
+      if (surface === undefined) return;
+      const current = unitFromPointer(surface, event.clientX, event.clientY);
+      // A drag ending in the letterbox outside the image must not silently
+      // clamp onto the picture; it produces no anchor and leaves the tool armed.
+      if (current === undefined) return;
+      const rect = rectFromCorners(start, current);
+      if (rect === undefined) return;
+      aim({ kind: 'region', rect });
+    }
+  };
+  const onTouchStart = (event: TouchEvent): void => {
+    if (!armed()) return;
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch || !(event.target instanceof Element)) return;
+    if (
+      event.target.closest(
+        '.comment-pin, .comment-region, .mark-bubble, .thread'
+      )
+    ) {
+      return;
+    }
+    if (host === undefined) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined || !isImageElement(surface.content)) return;
+
+    const start = unitFromPointer(surface, touch.clientX, touch.clientY);
+    if (start === undefined) return;
+
+    dragOrigin = {
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      unit: start,
+    };
+    isDragging = false;
+    suppressClick = false;
+  };
+
+  const onTouchMove = (event: TouchEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined) return;
+
+    const dx = touch.clientX - dragOrigin.clientX;
+    const dy = touch.clientY - dragOrigin.clientY;
+    if (!isDragging && Math.hypot(dx, dy) >= 6) {
+      isDragging = true;
+      suppressClick = true;
+    }
+    if (!isDragging) return;
+
+    // Prevent touch scrolling while actively dragging a region on the image:
+    event.preventDefault();
+
+    if (drawingBox === undefined) {
+      drawingBox = document.createElement('div');
+      drawingBox.className = 'comment-region is-drawing is-pending';
+      host.appendChild(drawingBox);
+    }
+
+    const current = unitFromPointer(surface, touch.clientX, touch.clientY);
+    if (current === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const rect = rectFromCorners(dragOrigin.unit, current);
+    if (rect === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const box = boxFromUnit(surface, rect);
+    if (box === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    drawingBox.style.display = 'block';
+    drawingBox.style.left = `${box.left}px`;
+    drawingBox.style.top = `${box.top}px`;
+    drawingBox.style.width = `${box.width}px`;
+    drawingBox.style.height = `${box.height}px`;
+  };
+
+  const onTouchEnd = (event: TouchEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    const wasDragging = isDragging;
+    const start = dragOrigin.unit;
+    dragOrigin = undefined;
+    isDragging = false;
+    drawingBox?.remove();
+    drawingBox = undefined;
+
+    if (wasDragging) {
+      suppressClick = true;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const surface = anchorSurfaceFor(host);
+      if (surface === undefined) return;
+      const current = unitFromPointer(surface, touch.clientX, touch.clientY);
+      if (current === undefined) return;
+      const rect = rectFromCorners(start, current);
+      if (rect === undefined) return;
+      aim({ kind: 'region', rect });
+    }
+  };
+
   // Bound to the document once, here rather than in `attach`, because a
   // comparison closing rebuilds the stage and attaches again: listeners added
   // there would accumulate one copy per visit.
-  document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    clear();
-  });
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      if (spanStart !== null) {
+        disarmSpan();
+        return;
+      }
+      if (
+        armed() ||
+        keyboardBox !== undefined ||
+        bubble !== undefined ||
+        isDragging
+      ) {
+        cancelAiming();
+        return;
+      }
+      if (anchor !== null) {
+        clear();
+      }
+      return;
+    }
+
+    if (!armed()) return;
+
+    const surface = host;
+    if (surface === undefined) return;
+    const s = anchorSurfaceFor(surface);
+    const content = s?.content ?? surface;
+    const isImg =
+      content.tagName === 'IMG' || surface.querySelector('img') !== null;
+
+    if (isImg && keyboardRect !== undefined) {
+      let handled = false;
+      const step = 0.05;
+      if (event.shiftKey) {
+        if (event.key === 'ArrowRight') {
+          keyboardRect.w = Math.min(1 - keyboardRect.x, keyboardRect.w + step);
+          handled = true;
+        } else if (event.key === 'ArrowLeft') {
+          keyboardRect.w = Math.max(0.05, keyboardRect.w - step);
+          handled = true;
+        } else if (event.key === 'ArrowDown') {
+          keyboardRect.h = Math.min(1 - keyboardRect.y, keyboardRect.h + step);
+          handled = true;
+        } else if (event.key === 'ArrowUp') {
+          keyboardRect.h = Math.max(0.05, keyboardRect.h - step);
+          handled = true;
+        }
+      } else {
+        if (event.key === 'ArrowRight') {
+          keyboardRect.x = Math.min(1 - keyboardRect.w, keyboardRect.x + step);
+          handled = true;
+        } else if (event.key === 'ArrowLeft') {
+          keyboardRect.x = Math.max(0, keyboardRect.x - step);
+          handled = true;
+        } else if (event.key === 'ArrowDown') {
+          keyboardRect.y = Math.min(1 - keyboardRect.h, keyboardRect.y + step);
+          handled = true;
+        } else if (event.key === 'ArrowUp') {
+          keyboardRect.y = Math.max(0, keyboardRect.y - step);
+          handled = true;
+        }
+      }
+
+      if (handled) {
+        event.preventDefault();
+        if (keyboardBox && s) {
+          const box = boxFromUnit(s, keyboardRect);
+          if (box) {
+            keyboardBox.style.left = `${box.left}px`;
+            keyboardBox.style.top = `${box.top}px`;
+            keyboardBox.style.width = `${box.width}px`;
+            keyboardBox.style.height = `${box.height}px`;
+          }
+        }
+        return;
+      }
+
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        aim({ kind: 'region', rect: { ...keyboardRect } });
+        return;
+      }
+    } else if (!isImg) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        aim({ kind: 'pin', x: 0.5, y: 0.5 });
+        return;
+      }
+    }
+  };
+
+  document.addEventListener('keydown', onKeyDown);
   document.addEventListener('selectionchange', () => {
     const live = window.getSelection();
     if (live === null || live.isCollapsed) dismiss();
@@ -2285,42 +2846,463 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     target: () => anchor,
     clear,
     attach: (next) => {
-      // Both belonged to the stage that is being replaced.
-      dismiss();
-      disarm();
-      host = next;
+      const stageChanged = host !== next;
+      if (stageChanged) {
+        dismiss();
+        disarm();
+        teardownStage?.();
+        teardownStage = undefined;
+        disarmSpan();
+        host = next;
+      }
 
-      // The boundary, read from the DOM rather than from the route, because a
-      // component that will not compile falls back to its own source and that
-      // source renders right here in the page where a mark can reach it.
-      if (next.querySelector('iframe.usercontent-frame') !== null) {
+      if (
+        next.querySelector('.doc-download') !== null ||
+        next.classList?.contains?.('stage-download') ||
+        (next.querySelector('.notice') !== null &&
+          next.querySelector('.doc, img, video, audio, canvas, iframe') ===
+            null)
+      ) {
         mode = undefined;
-        tools.replaceChildren(line('thread-note', MARK_SANDBOX_NOTE));
+        timeMode = undefined;
+        tools.replaceChildren();
         return;
       }
 
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'mark-mode';
-      toggle.textContent = 'Point at something';
-      toggle.setAttribute('aria-pressed', 'false');
-      toggle.addEventListener('click', () => {
-        if (armed()) disarm();
-        else arm();
-      });
-      mode = toggle;
-      tools.replaceChildren(toggle);
+      // Hoisted because the listener binding below needs it too, and unlike
+      // the page canvas a frame is present the moment the stage is built:
+      // `sandboxFrame` creates the iframe synchronously, so there is no late
+      // arrival to wait for here.
+      const isFramed = next.querySelector('iframe.usercontent-frame') !== null;
 
-      if (next.dataset.markBind === '1') return;
-      next.dataset.markBind = '1';
-      next.addEventListener('mouseup', () => {
-        afterSelection(offer);
+      /**
+       * Build the row from the artifact that is on the page right now.
+       *
+       * Wrapped in a function rather than run once, because one of these
+       * artifacts mounts after `attach` does. The PDF renderer is a lazily
+       * imported chunk, deliberately, so that readers of every other class
+       * do not download it; the consequence is that at attach time there is
+       * no page canvas and a row decided here would describe a stage that
+       * has not finished rendering. That is not a race to tolerate, it is
+       * the normal case for that class.
+       */
+      const describeTools = (): void => {
+        const isImg = next.querySelector('img.relic-image') !== null;
+        const isPdf = next.querySelector('canvas.relic-page') !== null;
+        const media = next.querySelector(
+          'video.relic-media, audio.relic-media, video, audio'
+        ) as HTMLMediaElement | null;
+
+        if (isFramed) {
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'mark-mode';
+          toggle.textContent = 'Point at something';
+          toggle.setAttribute('aria-pressed', 'false');
+          toggle.addEventListener('click', () => {
+            if (armed()) disarm();
+            else arm();
+          });
+          mode = toggle;
+
+          const framedHint = document.createElement('span');
+          framedHint.className = 'thread-hint';
+          framedHint.textContent = 'Select text inside document to quote';
+          tools.replaceChildren(toggle, framedHint);
+        } else if (media !== null) {
+          const isAudio = media.tagName === 'AUDIO';
+          const timeToggle = document.createElement('button');
+          timeToggle.type = 'button';
+          timeToggle.className = 'mark-mode mark-time';
+          timeToggle.textContent = isAudio
+            ? 'Comment on this moment'
+            : 'Comment on this frame';
+          timeToggle.setAttribute('aria-pressed', 'false');
+          timeToggle.addEventListener('click', () => {
+            disarm();
+            const t = media.currentTime;
+            if (typeof media.pause === 'function') {
+              media.pause();
+            }
+            if (spanStart === null) {
+              spanStart = t;
+              timeToggle.setAttribute('aria-pressed', 'true');
+              timeToggle.textContent = 'Mark end of span';
+              aim({ kind: 'time', t }, true);
+              const said = document.createElement('p');
+              said.className = 'mark-hint mark-time-hint';
+              said.setAttribute('aria-live', 'polite');
+              said.textContent = isAudio
+                ? 'Play or seek to mark the end of the span, or press Escape to keep this moment.'
+                : 'Play or seek to mark the end of the span, or press Escape to keep this frame.';
+              next.appendChild(said);
+              timeHint = said;
+            } else {
+              const tEnd = t;
+              if (tEnd !== spanStart) {
+                const start = Math.min(spanStart, tEnd);
+                const end = Math.max(spanStart, tEnd);
+                aim({ kind: 'time', t: start, t_end: end });
+              } else {
+                aim({ kind: 'time', t: spanStart });
+              }
+              disarmSpan();
+            }
+          });
+          timeMode = timeToggle;
+          mode = undefined;
+          // Audio gets only time mode; video gets time mode. No text hints or broken point controls.
+          tools.replaceChildren(timeToggle);
+        } else if (isImg) {
+          timeMode = undefined;
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'mark-mode mark-region';
+          toggle.textContent = 'Mark a region or point';
+          toggle.setAttribute('aria-pressed', 'false');
+          toggle.addEventListener('click', () => {
+            if (armed()) disarm();
+            else arm();
+          });
+          mode = toggle;
+          // Images carry no text to select, so only the region/point control is offered.
+          tools.replaceChildren(toggle);
+        } else if (isPdf) {
+          timeMode = undefined;
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'mark-mode mark-page';
+          toggle.textContent = 'Mark on page';
+          toggle.setAttribute('aria-pressed', 'false');
+          toggle.addEventListener('click', () => {
+            if (armed()) disarm();
+            else arm();
+          });
+          mode = toggle;
+          const pdfHint = document.createElement('span');
+          pdfHint.className = 'thread-hint';
+          pdfHint.textContent = 'Drag a box on the page to mark an area';
+          tools.replaceChildren(toggle, pdfHint);
+        } else {
+          timeMode = undefined;
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'mark-mode mark-pin';
+          toggle.textContent = 'Point at something';
+          toggle.setAttribute('aria-pressed', 'false');
+          toggle.addEventListener('click', () => {
+            if (armed()) disarm();
+            else arm();
+          });
+          mode = toggle;
+
+          const textHint = document.createElement('span');
+          textHint.className = 'thread-hint';
+          textHint.textContent = 'Select text in document to quote';
+          tools.replaceChildren(toggle, textHint);
+        }
+      };
+
+      /**
+       * Which artifacts are on the stage, as a comparable string.
+       *
+       * The row is rebuilt only when this changes, and that condition is not
+       * an optimisation. Arming appends a hint and a keyboard box into the
+       * stage, so an observer that reacted to any subtree mutation rebuilt
+       * the row in response to its own controls: the fresh toggle came back
+       * with `aria-pressed="false"`, `armed()` then read false, and every
+       * arrow key was dropped by the handler's own guard. Arming looked
+       * correct on screen, with the crosshair and the keyboard box both
+       * visible, and did nothing.
+       */
+      const artifacts = (): string =>
+        [
+          'iframe.usercontent-frame',
+          'img.relic-image',
+          'canvas.relic-page',
+          'video.relic-media',
+          'audio.relic-media',
+        ]
+          .filter((selector) => next.querySelector(selector) !== null)
+          .join(',');
+
+      // `attach` runs again on every repaint, and a repaint happens while a
+      // reader is aiming: the resize observer fires as the keyboard box is
+      // sized. Rebuilding the row then replaces the toggle that `arm` had
+      // just marked pressed, so `mode` ends up on an orphaned button and
+      // `armed()` reads false while the stage still shows the crosshair, the
+      // hint, and the keyboard box. Arming looked correct and every arrow key
+      // was dropped by the handler's own guard.
+      //
+      // So the row is rebuilt only when the artifacts it describes change.
+      // The signature is stored on the element rather than in a closure,
+      // because each `attach` call makes a fresh closure and a fresh closure
+      // remembers nothing.
+      const signature = artifacts();
+      if (next.dataset.markTools !== signature) {
+        next.dataset.markTools = signature;
+        describeTools();
+      }
+      // Watches for an artifact that mounts after the stage does, which for a
+      // pdf relic is the normal case rather than a race. Disconnected with
+      // the stage: an observer outliving the subtree it watches leaks on
+      // every navigation.
+      if (typeof MutationObserver !== 'undefined') {
+        lateArtifact?.disconnect();
+        lateArtifact = new MutationObserver(() => {
+          const now = artifacts();
+          if (next.dataset.markTools === now) return;
+          next.dataset.markTools = now;
+          describeTools();
+        });
+        lateArtifact.observe(next, { childList: true, subtree: true });
+      }
+
+      // Repaint on resize and on image load so unit-coordinate regions update
+      // whenever the content box dimensions change.
+      const updateKeyboardBox = (): void => {
+        if (keyboardBox !== undefined && keyboardRect !== undefined) {
+          const s = anchorSurfaceFor(host ?? next);
+          if (s) {
+            const box = boxFromUnit(s, keyboardRect);
+            if (box) {
+              keyboardBox.style.left = `${box.left}px`;
+              keyboardBox.style.top = `${box.top}px`;
+              keyboardBox.style.width = `${box.width}px`;
+              keyboardBox.style.height = `${box.height}px`;
+            }
+          }
+        }
+      };
+
+      // Repaint on resize and on image load so unit-coordinate regions update
+      // whenever the content box dimensions change.
+      const onResize = (): void => {
+        updateKeyboardBox();
+        deps.repaint();
+      };
+      window.addEventListener('resize', onResize);
+
+      let ro: ResizeObserver | undefined;
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(() => {
+          updateKeyboardBox();
+          deps.repaint();
+        });
+        ro.observe(next);
+        const surface = anchorSurfaceFor(next);
+        if (surface !== undefined && surface.content !== next) {
+          ro.observe(surface.content);
+        }
+      }
+
+      const img = next.querySelector('img.relic-image');
+      let onImgLoad: (() => void) | undefined;
+      if (isImageElement(img) && 'complete' in img && !img.complete) {
+        onImgLoad = (): void => {
+          updateKeyboardBox();
+          deps.repaint();
+        };
+        img.addEventListener('load', onImgLoad);
+      }
+
+      // Teardown verified: every listener attached to window, ResizeObserver,
+      // or image is tracked here and cleaned up when the stage is replaced or
+      // controls are cleared, preventing memory leaks across relic navigation.
+      teardownStage = (): void => {
+        window.removeEventListener('resize', onResize);
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+        next.removeEventListener?.(
+          'touchstart',
+          onTouchStart as unknown as EventListener
+        );
+        next.removeEventListener?.(
+          'touchmove',
+          onTouchMove as unknown as EventListener
+        );
+        next.removeEventListener?.(
+          'touchend',
+          onTouchEnd as unknown as EventListener
+        );
+        ro?.disconnect();
+        lateArtifact?.disconnect();
+        lateArtifact = undefined;
+        if (onImgLoad && img && typeof img.removeEventListener === 'function') {
+          img.removeEventListener('load', onImgLoad);
+        }
+        drawingBox?.remove();
+        drawingBox = undefined;
+        dragOrigin = undefined;
+        isDragging = false;
+        suppressClick = false;
+      };
+
+      if (next.dataset.markBind !== '1') {
+        next.dataset.markBind = '1';
+        // Three ways a selection settles, because a selection made with the
+        // keyboard or a finger is the same act as one made with a mouse and a
+        // pointer-only offer silently excludes both. These are additive to the
+        // drag handlers below: `afterSelection` offers nothing when the
+        // selection is collapsed, which is the state a drag leaves behind.
+        // Pointer gestures on the stage only. Inside a framed document
+        // they never reach this origin, and binding them anyway would let a
+        // drag in the margin around the frame produce a region anchor
+        // measured against the wrong box.
+        if (!isFramed) {
+          next.addEventListener('mouseup', () => {
+            afterSelection(offer);
+          });
+        }
+        next.addEventListener('keyup', () => {
+          afterSelection(offer);
+        });
+        next.addEventListener('touchend', () => {
+          afterSelection(offer);
+        });
+        next.addEventListener('click', place);
+        next.addEventListener('mousedown', onMouseDown);
+        next.addEventListener('mousemove', onMouseMove);
+        next.addEventListener('mouseup', onMouseUp);
+        next.addEventListener(
+          'touchstart',
+          onTouchStart as unknown as EventListener,
+          {
+            passive: true,
+          }
+        );
+        next.addEventListener(
+          'touchmove',
+          onTouchMove as unknown as EventListener,
+          {
+            passive: false,
+          }
+        );
+        next.addEventListener(
+          'touchend',
+          onTouchEnd as unknown as EventListener
+        );
+      }
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+
+      // The four the shim sends outward. They can only originate in the
+      // frame, so they need no framed guard of their own.
+      next.addEventListener('relic:frame-selection', ((
+        event: CustomEvent<FrameSelectionMessage>
+      ) => {
+        const msg = event.detail;
+        if (msg?.exact && msg.exact.trim().length > 0) {
+          aim({
+            kind: 'quote',
+            exact: msg.exact.trim(),
+            ...(msg.prefix ? { prefix: msg.prefix } : {}),
+            ...(msg.suffix ? { suffix: msg.suffix } : {}),
+          });
+        }
+      }) as EventListener);
+      next.addEventListener('relic:frame-point', ((
+        event: CustomEvent<FramePointMessage>
+      ) => {
+        if (!armed()) return;
+        const msg = event.detail;
+        if (!msg) return;
+        const w = 0.03;
+        const h = 0.03;
+        const rect = {
+          x: Math.max(0, Math.min(1 - w, msg.x - w / 2)),
+          y: Math.max(0, Math.min(1 - h, msg.y - h / 2)),
+          w,
+          h,
+        };
+        aim({ kind: 'region', rect });
+      }) as EventListener);
+      next.addEventListener('relic:frame-region', ((
+        event: CustomEvent<FrameRegionMessage>
+      ) => {
+        if (!armed()) return;
+        if (event.detail?.rect) {
+          aim({ kind: 'region', rect: event.detail.rect });
+        }
+      }) as EventListener);
+      next.addEventListener('relic:frame-mark-click', ((
+        event: CustomEvent<FrameMarkClickMessage>
+      ) => {
+        if (!event.detail?.id) return;
+        const row = document.querySelector(
+          `[data-comment-id="${event.detail.id}"]`
+        );
+        if (row instanceof HTMLElement) {
+          deps.open();
+          row.scrollIntoView({ block: 'nearest' });
+        }
+      }) as EventListener);
+
+      // A box on a rendered page. Self-guarding on a `canvas.relic-page`
+      // target, so it costs nothing on the classes that have no pages.
+      let dragStart: { readonly x: number; readonly y: number } | null = null;
+      let dragPage = 1;
+      let isDragging = false;
+
+      next.addEventListener('pointerdown', (event: PointerEvent) => {
+        if (armed()) return;
+        const target = event.target;
+        if (
+          !(target instanceof HTMLCanvasElement) ||
+          !target.classList.contains('relic-page')
+        ) {
+          return;
+        }
+        const surface = anchorSurfaceFor(next);
+        if (surface === undefined) return;
+        const point = unitFromPointer(surface, event.clientX, event.clientY);
+        if (point === undefined) return;
+        dragStart = point;
+        const pageAttr = target.dataset['pageNumber'];
+        dragPage = pageAttr !== undefined ? Number.parseInt(pageAttr, 10) : 1;
+        isDragging = false;
       });
-      next.addEventListener('click', place);
+
+      next.addEventListener('pointermove', (event: PointerEvent) => {
+        if (dragStart === null) return;
+        const surface = anchorSurfaceFor(next);
+        if (surface === undefined) return;
+        const current = unitFromPointer(surface, event.clientX, event.clientY);
+        if (current === undefined) return;
+        const rect = rectFromCorners(dragStart, current);
+        if (rect !== undefined) {
+          isDragging = true;
+          anchor = { kind: 'page', page: dragPage, rect };
+          paintChip();
+          deps.repaint();
+        }
+      });
+
+      const finishDrag = (event: PointerEvent): void => {
+        if (dragStart === null) return;
+        const wasDragging = isDragging;
+        const start = dragStart;
+        dragStart = null;
+        isDragging = false;
+        if (!wasDragging) return;
+        const surface = anchorSurfaceFor(next);
+        if (surface === undefined) return;
+        const current = unitFromPointer(surface, event.clientX, event.clientY);
+        const rect =
+          current !== undefined ? rectFromCorners(start, current) : undefined;
+        if (rect !== undefined) {
+          aim({ kind: 'page', page: dragPage, rect });
+        }
+      };
+
+      next.addEventListener('pointerup', finishDrag);
+      next.addEventListener('pointercancel', () => {
+        dragStart = null;
+        isDragging = false;
+      });
     },
   };
 }
-
 /**
  * The thread, in the service-origin chrome.
  *
@@ -2422,6 +3404,15 @@ export function buildThread(
   let session: SessionState = { kind: 'unknown' };
   let host: HTMLElement | undefined;
   let lastEntries: readonly CommentEntry[] = [];
+  /**
+   * Comment ids whose mark is real but has nowhere to land on this page.
+   *
+   * Two causes, one reader-visible consequence: a kind this build has no
+   * adapter for, and a quote the current version of the relic no longer
+   * contains. The thread says so on the row, because a comment that appears
+   * to point at nothing is worse than one that says where it pointed.
+   */
+  const unplaceable = new Set<string>();
   /** Puts the width where the sidebar and the divider both read it. */
   const applyWidth = (width: number): number => {
     const clamped = Math.round(clampThreadWidth(width, window.innerWidth));
@@ -2483,9 +3474,17 @@ export function buildThread(
     if (host === undefined) return;
     unwrapTextQuotes(host);
     host.querySelector('.comment-pins')?.remove();
+    host
+      .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage({ type: 'relic:clear-marks' }, '*');
     const pins = document.createElement('div');
     pins.className = 'comment-pins';
     let number = 0;
+    // Ids whose mark could not be placed on this page, so the thread can say
+    // so on the row instead of showing a comment that appears to point at
+    // nothing. Rebuilt every pass, because whether a mark lands depends on
+    // the content currently rendered.
+    unplaceable.clear();
     for (const entry of entries) {
       if (entry.kind !== 'open' || entry.anchor === null) continue;
       number += 1;
@@ -2493,27 +3492,42 @@ export function buildThread(
         wrapTextQuote(host, entry.anchor.quote, entry.id);
         continue;
       }
-      const pin = document.createElement('button');
-      pin.type = 'button';
-      pin.className = 'comment-pin';
-      pin.textContent = String(number);
-      // Addressable, so hovering the pin can light its comment. Posted pins
-      // and marks now carry the same key, which is what lets one pairing
-      // handler serve both shapes.
-      pin.dataset.commentId = entry.id;
-      const offsets = pinOffsets(entry.anchor, host);
-      pin.style.left = `${offsets.left}px`;
-      pin.style.top = `${offsets.top}px`;
-      pin.title = entry.body;
-      pin.addEventListener('click', (event) => {
-        event.preventDefault();
-        setOpen(true);
-        const row = list.querySelector(`[data-comment-id="${entry.id}"]`);
-        if (row instanceof HTMLElement) {
-          row.scrollIntoView({ block: 'nearest' });
-        }
-      });
-      pins.appendChild(pin);
+      if (entry.anchor.kind === 'pin') {
+        const pin = document.createElement('button');
+        pin.type = 'button';
+        pin.className = 'comment-pin';
+        pin.textContent = String(number);
+        // Addressable, so hovering the pin can light its comment. Posted pins
+        // and marks now carry the same key, which is what lets one pairing
+        // handler serve both shapes.
+        pin.dataset.commentId = entry.id;
+        const offsets = pinOffsets(entry.anchor, host);
+        pin.style.left = `${offsets.left}px`;
+        pin.style.top = `${offsets.top}px`;
+        pin.title = entry.body;
+        pin.addEventListener('click', (event) => {
+          event.preventDefault();
+          setOpen(true);
+          const row = list.querySelector(`[data-comment-id="${entry.id}"]`);
+          if (row instanceof HTMLElement) {
+            row.scrollIntoView({ block: 'nearest' });
+          }
+        });
+        pins.appendChild(pin);
+        continue;
+      }
+      // Every precise kind, through its adapter. A kind with no adapter
+      // registered, or one whose mark has nowhere to land because the relic
+      // was republished, leaves the comment in the thread and marks the row
+      // as unplaceable rather than dropping either.
+      const surface = anchorSurfaceFor(host);
+      const adapter =
+        surface === undefined ? undefined : adapterFor(entry.anchor, surface);
+      const placed =
+        adapter !== undefined &&
+        surface !== undefined &&
+        adapter.paint(surface, pins, entry.anchor, entry.id);
+      if (!placed) unplaceable.add(entry.id);
     }
     paintPendingMark(host, pins, marks.target());
     host.appendChild(pins);
@@ -2566,6 +3580,21 @@ export function buildThread(
   };
 
   bindPairing(list);
+  list.addEventListener('click', (event: Event) => {
+    if (!(event.target instanceof Element)) return;
+    const row = event.target.closest<HTMLElement>('[data-comment-id]');
+    if (row === null) return;
+    const commentId = row.dataset['commentId'];
+    if (commentId === undefined || host === undefined) return;
+    const entry = lastEntries.find((e) => e.id === commentId);
+    if (entry === undefined || entry.kind !== 'open' || entry.anchor === null) {
+      return;
+    }
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined) return;
+    const adapter = adapterFor(entry.anchor, surface);
+    adapter?.reveal?.(surface, entry.anchor);
+  });
 
   const policyLink = (): HTMLElement => {
     const link = document.createElement('a');
@@ -2590,7 +3619,18 @@ export function buildThread(
       );
       return;
     }
-    list.replaceChildren(...state.entries.map(commentRow));
+    // Paint first, then build the rows. Which marks landed is only known
+    // after the paint pass, and a row that has to say its mark could not be
+    // placed cannot be built before that is decided.
+    paintMarks(state.entries);
+    list.replaceChildren(
+      // Not a bare `map(commentRow)`: `map` passes the index as the second
+      // argument, which would make every row after the first claim its mark
+      // was unplaceable.
+      ...state.entries.map((entry) =>
+        commentRow(entry, entry.id !== null && unplaceable.has(entry.id))
+      )
+    );
     updateThreadToggle(toggle, state.entries.length);
     status.replaceChildren(
       ...(state.entries.length === 0
@@ -2598,7 +3638,6 @@ export function buildThread(
         : [])
     );
     onCount(state.entries.length);
-    paintMarks(state.entries);
   };
 
   /** The address form, for a reader this browser has not verified. */
@@ -2864,6 +3903,9 @@ export function buildThread(
       if (next.dataset.pairBind !== '1') {
         next.dataset.pairBind = '1';
         bindPairing(next);
+        next.addEventListener('relic:page-changed', () => {
+          paintMarks(lastEntries);
+        });
       }
       paintMarks(lastEntries);
       marks.attach(next);

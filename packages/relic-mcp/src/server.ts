@@ -20,7 +20,14 @@
  * unusable in most of the agents this product exists to serve.
  */
 
-import { type CommentRecord, postComment, readComments } from './comments.ts';
+import {
+  type CommentAnchorInput,
+  type CommentRecord,
+  describeAnchor,
+  formatTimecode,
+  postComment,
+  readComments,
+} from './comments.ts';
 import {
   type ListResult,
   listRelics,
@@ -712,6 +719,14 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
     'on this machine. Use it before changing content somebody was asked to ' +
     'review, and after sharing a link, because a comment is the only way a ' +
     'reader can answer back. ' +
+    'Each comment can be a remark on the relic as a whole or an exact mark: ' +
+    'a text quote with surrounding context, a stage pin, an artifact region, ' +
+    'a timestamp or span in audio or video, or a page in a document. ' +
+    'Pass `resolve_anchors: true` to fetch and decrypt the relic content and ' +
+    'resolve anchors against the actual content (source context runs for quotes, ' +
+    'crops and annotated views for image regions, and extracted video frames). ' +
+    'This defaults to false because content resolution spends a signed download ' +
+    'URL mint and download quota. ' +
     COMMENT_MACHINE_BOUNDARY +
     ' Takes the relic id, never the share URL: the URL carries the key in ' +
     'its fragment. A comment that will not decrypt is returned marked ' +
@@ -723,6 +738,14 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
       relic_id: {
         type: 'string',
         description: 'The 26-character relic id the original publish returned.',
+      },
+      resolve_anchors: {
+        type: 'boolean',
+        description:
+          'Whether to fetch and decrypt the relic to resolve anchors against the actual content ' +
+          '(e.g. text quotes with surrounding source context, image region crops and annotated views, video frames). ' +
+          'Defaults to false because resolving content mints a signed download URL and fetches the ciphertext, ' +
+          'which consumes download quota and bandwidth.',
       },
     },
     required: ['relic_id'],
@@ -758,19 +781,56 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             anchor: {
               type: ['object', 'null'],
               description:
-                'What the comment marks, or null for a freeform one. ' +
-                '`{kind:"text", quote}` is a passage the reader selected, so ' +
-                'the quote names the line to act on. `{kind:"pin", x, y}` is ' +
-                'a point on the rendered page in unit coordinates.',
+                'What the comment marks, or null for a remark about the whole relic. ' +
+                'Can be a quote ({kind: "quote", exact, prefix?, suffix?}), ' +
+                'legacy text ({kind: "text", quote}), ' +
+                'stage pin ({kind: "pin", x, y}), ' +
+                'artifact region ({kind: "region", rect: {x, y, w, h}}), ' +
+                'media timestamp or span ({kind: "time", t, t_end?, rect?}), ' +
+                'paged document page ({kind: "page", page, rect?, exact?}), ' +
+                'or unsupported ({kind: "unsupported", declared}).',
               properties: {
-                kind: { type: 'string', enum: ['text', 'pin'] },
+                kind: {
+                  type: 'string',
+                  enum: [
+                    'quote',
+                    'text',
+                    'pin',
+                    'region',
+                    'time',
+                    'page',
+                    'unsupported',
+                  ],
+                },
+                exact: { type: 'string' },
                 quote: { type: 'string' },
+                prefix: { type: 'string' },
+                suffix: { type: 'string' },
                 x: { type: 'number' },
                 y: { type: 'number' },
+                rect: {
+                  type: 'object',
+                  properties: {
+                    x: { type: 'number' },
+                    y: { type: 'number' },
+                    w: { type: 'number' },
+                    h: { type: 'number' },
+                  },
+                  required: ['x', 'y', 'w', 'h'],
+                },
+                t: { type: 'number' },
+                t_end: { type: 'number' },
+                page: { type: 'integer' },
+                declared: { type: 'string' },
               },
             },
             readable: { type: 'boolean' },
             unreadable_reason: { type: ['string', 'null'] },
+            resolved: {
+              type: ['object', 'null'],
+              description:
+                'The resolved content and status for this anchor, when resolve_anchors is enabled.',
+            },
           },
           required: [
             'comment_id',
@@ -801,6 +861,11 @@ export const COMMENT_TOOL_DEFINITION = {
     'attributed to "publisher" rather than to an email address: an agent has ' +
     'no mailbox and cannot verify one. That is attribution and not ' +
     'authorization. ' +
+    'Comments can be anchored to an exact location: a text quote, a stage ' +
+    'pin, an artifact region, a moment or span in audio or video, or a page ' +
+    'in a document. Passing an anchor attaches your reply at that location, ' +
+    'so the reader sees what you are answering; omitting it leaves a remark ' +
+    'about the whole relic. ' +
     COMMENT_MACHINE_BOUNDARY +
     ' Takes the relic id, never the share URL.',
   inputSchema: {
@@ -822,6 +887,87 @@ export const COMMENT_TOOL_DEFINITION = {
           'Optional. A name shown beside the comment, up to 64 bytes of ' +
           'UTF-8. It aliases the attribution for presentation and never ' +
           'replaces it.',
+      },
+      anchor: {
+        type: 'object',
+        description:
+          'Optional. Where the comment sits on the relic, so the reader sees ' +
+          'exactly what the comment is about. Can be a text selection ' +
+          '({kind: "quote", exact, prefix?, suffix?} or {kind: "text", quote}), ' +
+          'a point on the stage ({kind: "pin", x, y}), ' +
+          'a box on the artifact ({kind: "region", rect: {x, y, w, h}}), ' +
+          'a moment or span in audio/video ({kind: "time", t, t_end?, rect?}, with t ' +
+          'given as seconds or as a timecode like "1:23"), ' +
+          'or a page in a paged document ({kind: "page", page, rect?, exact?}). ' +
+          'Omit for a remark about the whole relic.',
+        properties: {
+          kind: {
+            type: 'string',
+            enum: ['quote', 'text', 'pin', 'region', 'time', 'page'],
+            description: 'The kind of anchor mark.',
+          },
+          exact: {
+            type: 'string',
+            description:
+              'For quote anchors: the exact text selection, up to 512 bytes.',
+          },
+          quote: {
+            type: 'string',
+            description:
+              'For text anchors (or quote): the quoted text, up to 512 bytes.',
+          },
+          prefix: {
+            type: 'string',
+            description:
+              'For quote anchors: text immediately before the selection to disambiguate it, up to 128 bytes.',
+          },
+          suffix: {
+            type: 'string',
+            description:
+              'For quote anchors: text immediately after the selection to disambiguate it, up to 128 bytes.',
+          },
+          x: {
+            type: 'number',
+            description:
+              'For pin anchors: horizontal coordinate from 0 (left) to 1 (right) of the stage.',
+          },
+          y: {
+            type: 'number',
+            description:
+              'For pin anchors: vertical coordinate from 0 (top) to 1 (bottom) of the stage.',
+          },
+          rect: {
+            type: 'object',
+            description:
+              'A box on the artifact in unit coordinates (0 to 1), with real area and no overhang.',
+            properties: {
+              x: { type: 'number', description: 'Left edge from 0 to 1.' },
+              y: { type: 'number', description: 'Top edge from 0 to 1.' },
+              w: { type: 'number', description: 'Width greater than 0.' },
+              h: { type: 'number', description: 'Height greater than 0.' },
+            },
+            required: ['x', 'y', 'w', 'h'],
+            additionalProperties: false,
+          },
+          t: {
+            type: ['number', 'string'],
+            description:
+              'For time anchors: time offset in seconds (0 to 86400) or as a timecode string like "1:23" or "1:02:03".',
+          },
+          t_end: {
+            type: ['number', 'string'],
+            description:
+              'For time anchors: optional end of span in seconds or timecode string, strictly after t.',
+          },
+          page: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 10000,
+            description: 'For page anchors: 1-based page number (1 to 10000).',
+          },
+        },
+        required: ['kind'],
+        additionalProperties: false,
       },
     },
     required: ['relic_id', 'body'],
@@ -1602,14 +1748,38 @@ async function callReadComments(
       '`relic_id` is required and must be a string'
     );
   }
+  const rawResolve = args['resolve_anchors'];
+  if (rawResolve !== undefined && typeof rawResolve !== 'boolean') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`resolve_anchors` must be a boolean or omitted'
+    );
+  }
+  const resolveAnchors = rawResolve === true;
 
   try {
-    const result = await readComments(relicId, deps);
+    const result = await readComments(relicId, deps, {
+      resolve_anchors: resolveAnchors,
+    });
+    const content: Array<
+      | { type: 'text'; text: string }
+      | { type: 'image'; data: string; mimeType: string }
+    > = [{ type: 'text', text: commentTranscript(result) }];
+
+    if (result.content_blocks) {
+      for (const block of result.content_blocks) {
+        if (block.type === 'image') {
+          content.push(block);
+        }
+      }
+    }
+
     return {
       jsonrpc: '2.0',
       id,
       result: {
-        content: [{ type: 'text', text: commentTranscript(result) }],
+        content,
         structuredContent: result,
         isError: false,
       },
@@ -1651,10 +1821,27 @@ async function callComment(
       '`display_name` must be a string or omitted'
     );
   }
+  const rawAnchor = args['anchor'];
+  if (
+    rawAnchor !== undefined &&
+    rawAnchor !== null &&
+    (typeof rawAnchor !== 'object' || Array.isArray(rawAnchor))
+  ) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`anchor` must be an object or omitted'
+    );
+  }
 
   try {
     const result = await postComment(
-      { relic_id: relicId, body, display_name: displayName },
+      {
+        relic_id: relicId,
+        body,
+        display_name: displayName,
+        anchor: rawAnchor as CommentAnchorInput | null | undefined,
+      },
       deps
     );
     return {
@@ -1683,16 +1870,69 @@ async function callComment(
 /**
  * The one line that says what a comment is attached to.
  *
- * A quote is printed verbatim, because the reader selected those exact words
- * and an agent's next move is usually to find them. A pin has no words, so it
- * gets its position rounded to whole percent: more precision than that is
- * noise a person cannot act on.
+ * Quotes are printed with context when present, pins describe their
+ * stage-relative point, regions give plain-language positions and percentages,
+ * time anchors give timecodes and spans, pages give page numbers, and
+ * unsupported anchors state the declared kind. A comment without an anchor
+ * is described as being about the whole relic.
  */
 function markLine(anchor: CommentRecord['anchor']): string {
-  if (anchor === null) return '';
-  if (anchor.kind === 'text') return `on "${anchor.quote}"\n`;
-  const percent = (value: number): number => Math.round(value * 100);
-  return `at ${percent(anchor.x)}% across, ${percent(anchor.y)}% down\n`;
+  return `${describeAnchor(anchor)}\n`;
+}
+function resolutionLine(resolved: CommentRecord['resolved']): string {
+  if (!resolved) return '';
+
+  switch (resolved.kind) {
+    case 'quote':
+    case 'text':
+      if (resolved.status === 'resolved') {
+        return (
+          `Quotation:\n>>> ${resolved.exact} <<<\n\n` +
+          `Source context (line ${resolved.line}):\n` +
+          `...${resolved.context_before}>>> ${resolved.exact} <<<${resolved.context_after}...\n\n`
+        );
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'region':
+      if (resolved.status === 'resolved') {
+        const downscaleNotice = resolved.downscaled
+          ? ` Downscaled from ${resolved.original_width}x${resolved.original_height} to bound payload size.`
+          : '';
+        return (
+          `[Resolution: Image region crop (${resolved.crop_box_pixels.w}x${resolved.crop_box_pixels.h}px) ` +
+          `and annotated context view attached below as image blocks.${downscaleNotice}]\n`
+        );
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'time':
+      if (resolved.status === 'resolved') {
+        const downscaleNotice = resolved.downscaled
+          ? ' Downscaled to bound payload size.'
+          : '';
+        return `[Resolution: ${
+          resolved.explanation ??
+          `Video frame(s) at ${formatTimecode(resolved.t)} attached below as image blocks.`
+        }${downscaleNotice}]\n`;
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'page':
+      if (resolved.exact) {
+        return (
+          `[Resolution note: ${resolved.explanation}]\n` +
+          `Quotation on page ${resolved.page}:\n>>> ${resolved.exact} <<<\n`
+        );
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'pin':
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'unsupported':
+      return `[Resolution note: ${resolved.explanation}]\n`;
+  }
 }
 
 /**
@@ -1726,7 +1966,8 @@ function commentTranscript(result: {
     // transcript that printed the remark and withheld the line it points at
     // would be the same defect this fixed, one layer up.
     const mark = markLine(comment.anchor);
-    return `${comment.created_at} ${who}:\n${mark}${comment.body}`;
+    const resolution = resolutionLine(comment.resolved);
+    return `${comment.created_at} ${who}:\n${mark}${resolution}${comment.body}`;
   });
 
   const header =

@@ -5,7 +5,6 @@ import {
   buildStageWrap,
   buildThread,
   MARK_PIN_HINT,
-  MARK_SANDBOX_NOTE,
   markTargetLabel,
   PENDING_MARK_ID,
 } from '../src/main.ts';
@@ -26,7 +25,7 @@ const STUB_LAID_OUT_HEIGHT = 28;
  * sequence of events leaves behind, which is exactly where the reported bug
  * lived: a selection nobody could see had already chosen it.
  */
-class Node {
+export class Node {
   readonly tagName: string;
   className = '';
   textContent = '';
@@ -144,9 +143,10 @@ class Node {
   }
 
   querySelectorAll(selector: string): Node[] {
+    const parts = selector.split(',').map((part) => part.trim());
     return descendants(this)
       .slice(1)
-      .filter((candidate) => matches(candidate, selector));
+      .filter((candidate) => parts.some((part) => matches(candidate, part)));
   }
 
   querySelector(selector: string): Node | null {
@@ -171,6 +171,12 @@ class Node {
     const held = this.listeners.get(type) ?? [];
     held.push(handler);
     this.listeners.set(type, held);
+  }
+
+  removeEventListener(type: string, handler: (event: unknown) => void): void {
+    const held = this.listeners.get(type) ?? [];
+    const at = held.indexOf(handler);
+    if (at >= 0) held.splice(at, 1);
   }
 
   /**
@@ -229,20 +235,20 @@ function descendants(node: Node): Node[] {
   return [node, ...node.children.flatMap(descendants)];
 }
 
-function withClass(node: Node, name: string): Node[] {
+export function withClass(node: Node, name: string): Node[] {
   return descendants(node).filter((candidate) =>
     candidate.classes().includes(name)
   );
 }
 
 /** Asserts the control exists exactly once before the test acts on it. */
-function only(node: Node, name: string): Node {
+export function only(node: Node, name: string): Node {
   const found = withClass(node, name);
   expect(found).toHaveLength(1);
   return found[0] as Node;
 }
 
-function textOf(node: Node): string {
+export function textOf(node: Node): string {
   return [node.textContent, ...node.children.map(textOf)].join(' ').trim();
 }
 
@@ -252,14 +258,16 @@ interface Scripted {
   ranges: number;
   text: string;
   within: Node | undefined;
+  prefix?: string;
+  suffix?: string;
   /** Where the selection sits in the viewport, so the clamp can be reached. */
   top: number;
 }
 
 let scripted: Scripted;
-let documentNode: Node;
+export let documentNode: Node;
 
-function installDom(): void {
+export function installDom(): void {
   documentNode = new Node('#document');
   scripted = {
     collapsed: true,
@@ -318,6 +326,8 @@ function installDom(): void {
       toString: () => scripted.text,
       getRangeAt: () => ({
         commonAncestorContainer: scripted.within,
+        prefix: scripted.prefix,
+        suffix: scripted.suffix,
         getBoundingClientRect: () => ({
           left: 120,
           top: scripted.top,
@@ -331,8 +341,7 @@ function installDom(): void {
   };
 }
 
-function clearDom(): void {
-  delete (globalThis as { document?: unknown }).document;
+export function clearDom(): void {
   delete (globalThis as { window?: unknown }).window;
   delete (globalThis as { Element?: unknown }).Element;
   delete (globalThis as { HTMLElement?: unknown }).HTMLElement;
@@ -369,7 +378,7 @@ function view(overrides: Partial<ReadyView> = {}): ReadyView {
 }
 
 /** A mounted relic, with the handles a test needs to act on it. */
-interface Mounted {
+export interface Mounted {
   readonly thread: Node;
   readonly stage: Node;
   /** A rendered element inside the stage, to select in or click on. */
@@ -378,6 +387,8 @@ interface Mounted {
   chip(): string;
   /** The plaintext of the posted comment, anchor included. */
   post(body: string): Promise<{ anchor?: unknown }>;
+  /** Repaints the stage to simulate repaints between user actions. */
+  readonly repaint: () => void;
 }
 
 /**
@@ -400,8 +411,7 @@ interface Seed {
   readonly body: string;
   readonly anchor: CommentAnchor;
 }
-
-async function mount(
+export async function mount(
   overrides: Partial<ReadyView> = {},
   reader: 'verified' | 'anonymous' = 'verified',
   seeds: readonly Seed[] = []
@@ -511,6 +521,7 @@ async function mount(
     stage,
     content,
     chip: () => textOf(only(thread, 'compose-target')),
+    repaint: () => handle.attach(stage as unknown as HTMLElement),
     post: async (body: string) => {
       const box = only(thread, 'compose-textarea');
       box.value = body;
@@ -526,7 +537,7 @@ async function mount(
 }
 
 /** Puts a live, settled selection over the rendered content. */
-function select(mounted: Mounted, text: string): void {
+export function select(mounted: Mounted, text: string): void {
   scripted.collapsed = false;
   scripted.ranges = 1;
   scripted.text = text;
@@ -603,15 +614,23 @@ describe('aiming a comment at a quote', () => {
   });
 
   test('pressing the bubble is what takes it', async () => {
-    const mounted = await mount();
+    const mounted = await mount({
+      content: new TextEncoder().encode(
+        '# notes\n\nfirst: the second paragraph\n\nsecond: the second paragraph\n'
+      ),
+    });
+    scripted.prefix = 'second: ';
+    scripted.suffix = '\n';
     select(mounted, 'the second paragraph');
     only(mounted.stage, 'mark-bubble').dispatch('click');
 
     expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
     const posted = await mounted.post('about that paragraph');
     expect(posted.anchor).toEqual({
-      kind: 'text',
-      quote: 'the second paragraph',
+      kind: 'quote',
+      exact: 'the second paragraph',
+      prefix: 'second: ',
+      suffix: '\n',
     });
   });
 
@@ -920,25 +939,43 @@ describe('a relic that renders in a sandboxed frame', () => {
     content: new TextEncoder().encode('<p>hello</p>'),
   };
 
-  test('offers no controls it cannot honour', async () => {
-    // The frame is a different origin with `allow-same-origin` withheld, so
-    // this page cannot read a selection inside it and a click inside it never
-    // arrives out here. A tool that looked armed and then did nothing would
-    // be worse than saying so.
+  test('offers controls it can honour on a framed stage', async () => {
+    // The frame is a different origin with allow-same-origin withheld. Text selection
+    // on the parent window over the frame cannot read into the frame, so no parent
+    // mark-bubble appears. But pointing mode is wired across postMessage, so the
+    // mark-mode toggle is offered and can be armed.
     const mounted = await mount(framed);
     expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
-    expect(withClass(mounted.thread, 'mark-mode')).toHaveLength(0);
+    expect(withClass(mounted.thread, 'mark-mode')).toHaveLength(1);
+
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    expect(only(mounted.thread, 'mark-mode').getAttribute('aria-pressed')).toBe(
+      'true'
+    );
+    expect(mounted.stage.classes()).toContain('is-pinning');
+    expect(textOf(mounted.stage)).toContain(MARK_PIN_HINT);
   });
 
-  test('says why, and claims only the selection', async () => {
+  test('accepts framed selection and region messages as comment targets', async () => {
     const mounted = await mount(framed);
-    expect(textOf(mounted.thread)).toContain(MARK_SANDBOX_NOTE);
-    // A pin is painted by this page into its own overlay, so the note must
-    // not tell the reader that marking is impossible here.
-    expect(MARK_SANDBOX_NOTE).toContain('cannot be selected');
-    expect(MARK_SANDBOX_NOTE).not.toContain('whole relic');
-  });
+    expect(mounted.chip()).toContain('Commenting on the whole document');
 
+    // Selection inside the frame forwards to parent
+    mounted.stage.dispatch('relic:frame-selection', {
+      detail: { type: 'relic:frame-selection', exact: 'framed text' },
+    });
+    expect(mounted.chip()).toContain('Commenting on "framed text"');
+
+    // Arming and dragging a region inside the frame forwards to parent
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.stage.dispatch('relic:frame-region', {
+      detail: {
+        type: 'relic:frame-region',
+        rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 },
+      },
+    });
+    expect(mounted.chip()).toContain('Commenting on a region');
+  });
   test('still announces what a comment would be about', async () => {
     const mounted = await mount(framed);
     expect(mounted.chip()).toContain('Commenting on the whole document');

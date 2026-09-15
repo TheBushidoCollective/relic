@@ -14,8 +14,8 @@ import {
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
 
 describe('the taxonomy', () => {
-  test('has exactly eight values', () => {
-    expect(RENDERER_CLASSES).toHaveLength(8);
+  test('has exactly nine values', () => {
+    expect(RENDERER_CLASSES).toHaveLength(9);
   });
 
   test('cuts on the wedge boundary, so the second clause is unambiguous', () => {
@@ -25,6 +25,7 @@ describe('the taxonomy', () => {
       'image',
       'jsx',
       'markdown',
+      'pdf',
     ]);
     const downloadOnly = RENDERER_CLASSES.filter((c) => !isRenderable(c));
     expect([...downloadOnly].sort()).toEqual(['archive', 'binary', 'media']);
@@ -70,9 +71,11 @@ describe('magic bytes beat the extension', () => {
     );
   });
 
-  test('a PDF is binary, since the first release does not render it', () => {
+  test('%PDF- bytes classify as pdf from magic, ahead of any extension', () => {
     const pdf = utf8('%PDF-1.7\n');
-    expect(deriveRendererClass(pdf, 'report.pdf')).toBe('binary');
+    expect(deriveRendererClass(pdf, 'report.txt')).toBe('pdf');
+    expect(deriveRendererClass(pdf, 'report.pdf')).toBe('pdf');
+    expect(sniffContentClass(pdf)).toBe('pdf');
   });
 });
 
@@ -94,6 +97,7 @@ describe('the extension fallback', () => {
     ['song.flac', 'media'],
     ['bundle.zip', 'archive'],
     ['diagram.svg', 'image'],
+    ['document.pdf', 'pdf'],
   ];
 
   for (const [filename, expected] of cases) {
@@ -210,6 +214,10 @@ describe('privilegeTier', () => {
       }
     }
   });
+  test('image and pdf carry tier 2', () => {
+    expect(privilegeTier('image')).toBe(2);
+    expect(privilegeTier('pdf')).toBe(2);
+  });
 
   test('markdown and code share a tier, so neither downgrades the other', () => {
     expect(privilegeTier('markdown')).toBe(privilegeTier('code'));
@@ -232,6 +240,15 @@ describe('declared versus sniffed disagreement', () => {
 
   test('html against binary resolves to binary', () => {
     expect(leastPrivileged('html', 'binary')).toBe('binary');
+  });
+  test('html against pdf resolves to pdf, never html', () => {
+    expect(leastPrivileged('html', 'pdf')).toBe('pdf');
+    expect(leastPrivileged('pdf', 'html')).toBe('pdf');
+  });
+
+  test('pdf against binary resolves to binary', () => {
+    expect(leastPrivileged('pdf', 'binary')).toBe('binary');
+    expect(leastPrivileged('binary', 'pdf')).toBe('binary');
   });
 
   test('agreement is a no-op', () => {

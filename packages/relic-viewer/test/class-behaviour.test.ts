@@ -25,11 +25,12 @@ const RENDER_ROUTES: readonly RenderRoute[] = [
   'image',
   'sandboxed-html',
   'sandboxed-jsx',
+  'pdf',
 ];
 
 describe('routeForClass and CLASS_BEHAVIOUR agreement', () => {
-  test('all eight renderer classes agree between viewer routing and class behaviour in both directions', () => {
-    expect(RENDERER_CLASSES.length).toBe(8);
+  test('all nine renderer classes agree between viewer routing and class behaviour in both directions', () => {
+    expect(RENDERER_CLASSES.length).toBe(9);
 
     for (const cls of RENDERER_CLASSES) {
       const behaviour = CLASS_BEHAVIOUR[cls];

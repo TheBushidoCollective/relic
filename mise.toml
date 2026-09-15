@@ -8,7 +8,14 @@ task_run_auto_install = true
 use_file_shell_for_executable_tasks = true
 
 [tools]
-bun = "latest"
+# Pinned, not "latest". Bun is the bundler as well as the runtime here, and
+# its output is load-bearing: whether the PDF renderer lands in its own chunk
+# or inside the app shell is the bundler's choice, and the shell is what every
+# reader downloads. On "latest" this repo built one way here and another way
+# in CI, which is how a 430 KB renderer got into the shell on the runner while
+# every local build split it out correctly. biome is already pinned for the
+# same reason and its output only affects review.
+bun = "1.3.14"
 biome = "2.2.2"
 node = "lts"
 markdownlint-cli2 = "latest"

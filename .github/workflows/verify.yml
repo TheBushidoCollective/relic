@@ -43,6 +43,16 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
 
+      # The anchor resolution tests crop a known colour out of a known
+      # coordinate to prove the region geometry is not transposed, and they
+      # need a real encoder to build that fixture and to perform the crop.
+      # ffmpeg is optional at runtime, and the code path that degrades
+      # without it is covered by a test that deliberately does not use it, so
+      # installing it here buys the pixel-exact coverage rather than hiding
+      # the fallback.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 

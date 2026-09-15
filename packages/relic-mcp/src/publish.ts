@@ -59,6 +59,24 @@ export type ClientCode =
   | 'local_comment_body_empty'
   | 'local_comment_body_too_long'
   | 'local_comment_name_too_long'
+  | 'local_comment_anchor_invalid'
+  | 'local_comment_anchor_unsupported'
+  | 'local_comment_anchor_kind_unknown'
+  | 'local_comment_anchor_quote_empty'
+  | 'local_comment_anchor_quote_too_long'
+  | 'local_comment_anchor_context_invalid'
+  | 'local_comment_anchor_context_too_long'
+  | 'local_comment_anchor_pin_invalid'
+  | 'local_comment_anchor_rect_invalid'
+  | 'local_comment_anchor_rect_out_of_bounds'
+  | 'local_comment_anchor_rect_zero_area'
+  | 'local_comment_anchor_rect_overhang'
+  | 'local_comment_anchor_time_missing'
+  | 'local_comment_anchor_time_invalid'
+  | 'local_comment_anchor_time_out_of_range'
+  | 'local_comment_anchor_time_span_invalid'
+  | 'local_comment_anchor_page_missing'
+  | 'local_comment_anchor_page_out_of_range'
   | 'app_response_unusable';
 
 export class PublishError extends Error {
@@ -157,6 +175,8 @@ export interface PublishDeps {
   readonly identifySource?: (path: string) => Promise<SourceIdentity>;
   /** Retries on a colliding ID, which format.md 1.4 obliges the client to do. */
   readonly maxCollisionRetries?: number;
+  /** Path to ffmpeg binary, or null to simulate ffmpeg being absent. */
+  readonly ffmpegPath?: string | null;
 }
 
 export interface RepublishToolCall {
@@ -641,6 +661,12 @@ const CLASS_FALLBACK: Readonly<Record<RendererClass, string>> = {
   code: 'text/plain',
   html: 'text/html',
   jsx: 'text/jsx',
+  // Declared precisely rather than as octet-stream, unlike the other binary
+  // formats below it. The viewer routes a pdf to a renderer, and the sniffed
+  // and declared classes are reconciled by taking the least privileged of the
+  // two, so an octet-stream fallback here would demote a real PDF to a
+  // download whenever the publishing client could not read an extension.
+  pdf: 'application/pdf',
   image: 'application/octet-stream',
   media: 'application/octet-stream',
   archive: 'application/octet-stream',

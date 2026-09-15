@@ -34,6 +34,16 @@ const SHELL_ASSETS = [
   '/manifest.webmanifest',
 ];
 
+/**
+ * Lazy chunks (such as the PDF renderer and worker) are deliberately omitted
+ * from SHELL_ASSETS.
+ *
+ * Adding them here would force every visitor to download ~1.6MB of PDF code
+ * on first visit during service worker install, defeating the lazy chunk
+ * split for readers of markdown, code, image, and media relics. A recipient
+ * opening a PDF relic fetches the renderer on demand.
+ */
+
 export function isCacheable(url: URL, sameOrigin: boolean): boolean {
   if (!sameOrigin) return false; // storage lives elsewhere; never cache it
   if (url.pathname.startsWith('/api/')) return false;

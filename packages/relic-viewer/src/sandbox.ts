@@ -1,7 +1,7 @@
 /**
  * The usercontent origin's page.
  *
- * This runs on a **different registrable domain** from the service. That
+ * This runs on a different registrable domain from the service. That
  * separation is the control, not a detail: the service origin holds the
  * fragment, and untrusted HTML must never execute anywhere that can reach it.
  * Google's own pattern is separate isolated origins, and they treat XSS inside
@@ -30,8 +30,29 @@
 // also settles the instance question hooks depend on: the `React` global
 // the component resolves and the `createRoot` that mounts it are the same
 // module by construction.
+import type { AnchorRect } from '@relic/format';
+import {
+  COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES,
+  COMMENT_ANCHOR_QUOTE_LIMIT_BYTES,
+} from '@relic/format';
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
+import { rectFromCorners } from './anchoring.ts';
+import {
+  type FrameMarkPayload,
+  type FramePointMessage,
+  type FrameRegionMessage,
+  type FrameSelectionMessage,
+  isArmPointingMessage,
+  isClearMarkMessage,
+  isClearMarksMessage,
+  isPaintMarkMessage,
+  isPaintMarksMessage,
+  isRevealMarkMessage,
+  type RevealMarkMessage,
+  takeHeadUtf8,
+  takeTailUtf8,
+} from './annotate-frame.ts';
 import {
   applyMarks,
   captureTree,
@@ -72,6 +93,524 @@ export function isRenderJsxMessage(data: unknown): data is RenderJsxMessage {
   );
 }
 
+export interface FrameInteractionHandler {
+  setArmed(armed: boolean): void;
+  onPaintMark(mark: FrameMarkPayload): boolean;
+  onPaintMarks(marks: readonly FrameMarkPayload[]): boolean;
+  onClearMark(id: string): void;
+  onClearMarks(): void;
+  onRevealMark(msg: RevealMarkMessage): void;
+  onPairMark(id: string, active: boolean): void;
+}
+
+export interface FrameInteraction extends FrameInteractionHandler {
+  isArmed(): boolean;
+}
+
+/**
+ * Constant stylesheet injected into the frame for comment marks and pointing.
+ * Isolated from service-origin styles, so it provides its own visual tokens.
+ */
+export const FRAME_MARK_CSS = `
+.relic-text-mark {
+  background: rgba(180, 140, 60, 0.22);
+  border-bottom: 2px solid rgba(180, 140, 60, 0.8);
+  color: inherit;
+  cursor: pointer;
+  padding: 0.1em 0;
+}
+.relic-text-mark.is-pending {
+  background: rgba(180, 140, 60, 0.14);
+  border-bottom: 2px dashed rgba(180, 140, 60, 0.8);
+}
+.relic-text-mark.is-paired {
+  background: rgba(180, 140, 60, 0.42);
+  outline: 2px solid rgba(180, 140, 60, 0.8);
+}
+.relic-region-mark {
+  position: absolute;
+  box-sizing: border-box;
+  background: rgba(180, 140, 60, 0.18);
+  border: 2px solid rgba(180, 140, 60, 0.8);
+  border-radius: 3px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.relic-region-mark.is-pending {
+  background: rgba(180, 140, 60, 0.10);
+  border: 2px dashed rgba(180, 140, 60, 0.8);
+}
+.relic-region-mark.is-paired {
+  background: rgba(180, 140, 60, 0.35);
+  box-shadow: 0 0 0 2px rgba(180, 140, 60, 0.8);
+}
+.relic-pointing-active, .relic-pointing-active * {
+  cursor: crosshair !important;
+}
+`;
+
+export function ensureFrameStyles(doc: Document): void {
+  if (doc.getElementById('relic-frame-styles')) return;
+  const style = doc.createElement('style');
+  style.id = 'relic-frame-styles';
+  style.textContent = FRAME_MARK_CSS;
+  doc.head?.appendChild(style);
+}
+
+/**
+ * Wrap an occurrence of a text quote in the frame DOM with a mark element.
+ *
+ * Uses `document.createElement('mark')` and DOM text node splitting.
+ * Never uses `innerHTML`, ensuring author markup or hostile quote text
+ * cannot inject executable HTML.
+ */
+export function wrapFrameQuote(
+  root: HTMLElement,
+  exact: string,
+  prefix?: string,
+  suffix?: string,
+  id = ''
+): boolean {
+  if (exact.length === 0) return false;
+  const doc = root.ownerDocument;
+  if (!doc) return false;
+  ensureFrameStyles(doc);
+
+  const textNodes: Text[] = [];
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = (node as Text).parentElement;
+      if (
+        parent?.closest(
+          'mark.relic-text-mark, script, style, #relic-frame-overlay'
+        )
+      ) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  let curr = walker.nextNode();
+  while (curr !== null) {
+    textNodes.push(curr as Text);
+    curr = walker.nextNode();
+  }
+  if (textNodes.length === 0) return false;
+
+  type Candidate = {
+    node: Text;
+    index: number;
+    score: number;
+  };
+  const candidates: Candidate[] = [];
+
+  for (const node of textNodes) {
+    let startPos = 0;
+    while (startPos < node.data.length) {
+      const index = node.data.indexOf(exact, startPos);
+      if (index === -1) break;
+      let score = 0;
+      if (prefix && prefix.length > 0) {
+        const preceding = node.data.slice(0, index);
+        if (preceding.endsWith(prefix) || prefix.endsWith(preceding)) {
+          score += Math.min(preceding.length, prefix.length);
+        }
+      }
+      if (suffix && suffix.length > 0) {
+        const following = node.data.slice(index + exact.length);
+        if (following.startsWith(suffix) || suffix.startsWith(following)) {
+          score += Math.min(following.length, suffix.length);
+        }
+      }
+      candidates.push({ node, index, score });
+      startPos = index + 1;
+    }
+  }
+
+  if (candidates.length === 0) {
+    let fullText = '';
+    const spans: { node: Text; start: number; end: number }[] = [];
+    for (const node of textNodes) {
+      const start = fullText.length;
+      fullText += node.data;
+      spans.push({ node, start, end: fullText.length });
+    }
+
+    const multiCandidates: { start: number; end: number; score: number }[] = [];
+    let startPos = 0;
+    while (startPos < fullText.length) {
+      const idx = fullText.indexOf(exact, startPos);
+      if (idx === -1) break;
+      let score = 0;
+      if (prefix && prefix.length > 0) {
+        const preceding = fullText.slice(Math.max(0, idx - prefix.length), idx);
+        if (preceding === prefix) score += prefix.length;
+      }
+      if (suffix && suffix.length > 0) {
+        const following = fullText.slice(
+          idx + exact.length,
+          idx + exact.length + suffix.length
+        );
+        if (following === suffix) score += suffix.length;
+      }
+      multiCandidates.push({ start: idx, end: idx + exact.length, score });
+      startPos = idx + 1;
+    }
+
+    if (multiCandidates.length === 0) return false;
+
+    multiCandidates.sort((a, b) => b.score - a.score);
+    const chosen = multiCandidates[0];
+    if (!chosen) return false;
+    for (const span of spans) {
+      if (span.end <= chosen.start || span.start >= chosen.end) continue;
+      const nodeStart = Math.max(0, chosen.start - span.start);
+      const nodeEnd = Math.min(span.node.data.length, chosen.end - span.start);
+      const matchLen = nodeEnd - nodeStart;
+      if (matchLen <= 0) continue;
+
+      let target = span.node;
+      if (nodeStart > 0) {
+        target = target.splitText(nodeStart);
+      }
+      if (target.data.length > matchLen) {
+        target.splitText(matchLen);
+      }
+
+      const mark = doc.createElement('mark');
+      mark.className = `relic-text-mark${id === 'pending:target' ? ' is-pending' : ''}`;
+      mark.dataset.commentId = id;
+      target.parentNode?.insertBefore(mark, target);
+      mark.appendChild(target);
+      mark.addEventListener('click', (e) => {
+        e.stopPropagation();
+        doc.defaultView?.parent?.postMessage(
+          { type: 'relic:frame-mark-click', id },
+          '*'
+        );
+      });
+    }
+    return true;
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0];
+  if (!best) return false;
+  let target = best.node;
+  if (best.index > 0) {
+    target = target.splitText(best.index);
+  }
+  if (target.data.length > exact.length) {
+    target.splitText(exact.length);
+  }
+
+  const mark = doc.createElement('mark');
+  mark.className = `relic-text-mark${id === 'pending:target' ? ' is-pending' : ''}`;
+  mark.dataset.commentId = id;
+  target.parentNode?.insertBefore(mark, target);
+  mark.appendChild(target);
+  mark.addEventListener('click', (e) => {
+    e.stopPropagation();
+    doc.defaultView?.parent?.postMessage(
+      { type: 'relic:frame-mark-click', id },
+      '*'
+    );
+  });
+  return true;
+}
+
+export function unwrapFrameQuotes(root: HTMLElement, id?: string): void {
+  const selector =
+    id !== undefined
+      ? `mark.relic-text-mark[data-comment-id="${id}"]`
+      : 'mark.relic-text-mark';
+  for (const mark of Array.from(root.querySelectorAll(selector))) {
+    const parent = mark.parentNode;
+    if (parent === null) continue;
+    while (mark.firstChild !== null) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    parent.removeChild(mark);
+    parent.normalize();
+  }
+}
+
+export function paintFrameRegion(
+  root: HTMLElement,
+  rect: AnchorRect,
+  id: string
+): HTMLElement | undefined {
+  const doc = root.ownerDocument;
+  if (!doc || !doc.body) return undefined;
+  ensureFrameStyles(doc);
+
+  const docWidth = Math.max(
+    doc.documentElement.scrollWidth,
+    doc.body.scrollWidth
+  );
+  const docHeight = Math.max(
+    doc.documentElement.scrollHeight,
+    doc.body.scrollHeight
+  );
+  if (docWidth <= 0 || docHeight <= 0) return undefined;
+
+  let overlay = doc.getElementById('relic-frame-overlay');
+  if (!overlay) {
+    overlay = doc.createElement('div');
+    overlay.id = 'relic-frame-overlay';
+    overlay.style.cssText =
+      'position: absolute; left: 0; top: 0; pointer-events: none; z-index: 99999;';
+    doc.body.appendChild(overlay);
+  }
+  overlay.style.width = `${docWidth}px`;
+  overlay.style.height = `${docHeight}px`;
+
+  for (const old of Array.from(
+    overlay.querySelectorAll(`[data-comment-id="${id}"]`)
+  )) {
+    old.remove();
+  }
+
+  const div = doc.createElement('div');
+  div.className = `relic-region-mark${id === 'pending:target' ? ' is-pending' : ''}`;
+  div.dataset.commentId = id;
+  div.style.left = `${rect.x * docWidth}px`;
+  div.style.top = `${rect.y * docHeight}px`;
+  div.style.width = `${rect.w * docWidth}px`;
+  div.style.height = `${rect.h * docHeight}px`;
+
+  div.addEventListener('click', (e) => {
+    e.stopPropagation();
+    doc.defaultView?.parent?.postMessage(
+      { type: 'relic:frame-mark-click', id },
+      '*'
+    );
+  });
+
+  overlay.appendChild(div);
+  return div;
+}
+
+export function clearFrameRegions(root: HTMLElement, id?: string): void {
+  const overlay = root.querySelector('#relic-frame-overlay');
+  if (!overlay) return;
+  if (id !== undefined) {
+    for (const el of Array.from(
+      overlay.querySelectorAll(`[data-comment-id="${id}"]`)
+    )) {
+      el.remove();
+    }
+  } else {
+    overlay.replaceChildren();
+  }
+}
+
+/**
+ * Setup pointer, selection, and mark manipulation listeners inside the frame.
+ */
+export function setupFrameInteraction(
+  doc: Document,
+  win: Window,
+  postOutward: (msg: object) => void
+): FrameInteraction {
+  let armed = false;
+  let startX = 0;
+  let startY = 0;
+  let isDown = false;
+
+  doc.addEventListener('mousedown', (event: MouseEvent) => {
+    if (!armed) return;
+    isDown = true;
+    startX = event.pageX;
+    startY = event.pageY;
+  });
+
+  function handleSelection(): void {
+    const sel = win.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const raw = sel.toString().trim();
+    if (raw.length === 0) return;
+
+    const exact = takeHeadUtf8(raw, COMMENT_ANCHOR_QUOTE_LIMIT_BYTES);
+    if (exact.length === 0) return;
+
+    const range = sel.getRangeAt(0);
+    let prefix = '';
+    let suffix = '';
+    try {
+      if (doc.body) {
+        const preRange = doc.createRange();
+        preRange.selectNodeContents(doc.body);
+        preRange.setEnd(range.startContainer, range.startOffset);
+        prefix = takeTailUtf8(
+          preRange.toString(),
+          COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES
+        );
+
+        const postRange = doc.createRange();
+        postRange.selectNodeContents(doc.body);
+        postRange.setStart(range.endContainer, range.endOffset);
+        suffix = takeHeadUtf8(
+          postRange.toString(),
+          COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES
+        );
+      }
+    } catch {
+      // If range computation throws in an edge-case DOM state, proceed without context
+    }
+
+    const message: FrameSelectionMessage = {
+      type: 'relic:frame-selection',
+      exact,
+      ...(prefix.length > 0 ? { prefix } : {}),
+      ...(suffix.length > 0 ? { suffix } : {}),
+    };
+    postOutward(message);
+  }
+
+  doc.addEventListener('mouseup', (event: MouseEvent) => {
+    if (!armed) {
+      // When pointing is disarmed, reading clicks pass through normally.
+      // Check whether text was selected instead.
+      handleSelection();
+      return;
+    }
+
+    if (!isDown) return;
+    isDown = false;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+
+    const endX = event.pageX;
+    const endY = event.pageY;
+
+    const docWidth = Math.max(
+      doc.documentElement.scrollWidth,
+      doc.body?.scrollWidth ?? 0
+    );
+    const docHeight = Math.max(
+      doc.documentElement.scrollHeight,
+      doc.body?.scrollHeight ?? 0
+    );
+    if (docWidth <= 0 || docHeight <= 0) return;
+
+    // Unit coordinates are measured relative to the scrolling document,
+    // not the visible viewport. If measured against the visible viewport,
+    // a mark placed while scrolled would point at the wrong element after
+    // scrolling elsewhere.
+    const from = {
+      x: Math.max(0, Math.min(1, startX / docWidth)),
+      y: Math.max(0, Math.min(1, startY / docHeight)),
+    };
+    const to = {
+      x: Math.max(0, Math.min(1, endX / docWidth)),
+      y: Math.max(0, Math.min(1, endY / docHeight)),
+    };
+
+    const rect = rectFromCorners(from, to, 0.005);
+    if (rect !== undefined) {
+      const msg: FrameRegionMessage = { type: 'relic:frame-region', rect };
+      postOutward(msg);
+    } else {
+      const msg: FramePointMessage = {
+        type: 'relic:frame-point',
+        x: from.x,
+        y: from.y,
+      };
+      postOutward(msg);
+    }
+  });
+
+  return {
+    setArmed(nextArmed: boolean) {
+      armed = nextArmed;
+      if (doc.documentElement) {
+        doc.documentElement.classList.toggle('relic-pointing-active', armed);
+      }
+    },
+
+    isArmed() {
+      return armed;
+    },
+
+    onPaintMark(mark: FrameMarkPayload): boolean {
+      if (!doc.body) return false;
+      if (mark.kind === 'quote') {
+        unwrapFrameQuotes(doc.body, mark.id);
+        return wrapFrameQuote(
+          doc.body,
+          mark.exact,
+          mark.prefix,
+          mark.suffix,
+          mark.id
+        );
+      }
+      if (mark.kind === 'region') {
+        return paintFrameRegion(doc.body, mark.rect, mark.id) !== undefined;
+      }
+      return false;
+    },
+
+    onPaintMarks(marks: readonly FrameMarkPayload[]): boolean {
+      let allPlaced = true;
+      for (const mark of marks) {
+        const placed = this.onPaintMark(mark);
+        if (!placed) allPlaced = false;
+      }
+      return allPlaced;
+    },
+
+    onClearMark(id: string) {
+      if (!doc.body) return;
+      unwrapFrameQuotes(doc.body, id);
+      clearFrameRegions(doc.body, id);
+    },
+
+    onClearMarks() {
+      if (!doc.body) return;
+      unwrapFrameQuotes(doc.body);
+      clearFrameRegions(doc.body);
+    },
+
+    onRevealMark(msg: RevealMarkMessage) {
+      if (!doc.body) return;
+      if (msg.id) {
+        const target = doc.body.querySelector(`[data-comment-id="${msg.id}"]`);
+        if (target instanceof HTMLElement) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+      if (msg.kind === 'quote' && msg.exact) {
+        const quoteMark = doc.body.querySelector('mark.relic-text-mark');
+        if (quoteMark instanceof HTMLElement) {
+          quoteMark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+      if (msg.kind === 'region' && msg.rect) {
+        const docHeight = Math.max(
+          doc.documentElement.scrollHeight,
+          doc.body.scrollHeight
+        );
+        win.scrollTo({
+          top: msg.rect.y * docHeight,
+          behavior: 'smooth',
+        });
+      }
+    },
+
+    onPairMark(id: string, active: boolean) {
+      if (!doc.body) return;
+      const targets = doc.body.querySelectorAll(`[data-comment-id="${id}"]`);
+      for (const target of Array.from(targets)) {
+        target.classList.toggle('is-paired', active);
+      }
+    },
+  };
+}
+
 /**
  * Build the message handler.
  *
@@ -81,23 +620,17 @@ export function isRenderJsxMessage(data: unknown): data is RenderJsxMessage {
  * the same reason: the guard does not care how a render lands, only that it
  * lands once. `annotate` is injected for the same reason again, and carries a
  * default so every existing call site keeps working.
+ *
+ * `interaction` handles comment mark painting, point/region arming, and reveal
+ * requests once the frame has rendered.
  */
 export function createSandboxHandler(
   write: (html: string) => void,
   writeJsx: (code: string) => void,
-  annotate: (marks: readonly Mark[]) => void = () => {}
+  annotate: (marks: readonly Mark[]) => void = () => {},
+  interaction?: FrameInteractionHandler
 ): (data: unknown) => boolean {
-  // Exactly one render, ever, across both message types. Without this,
-  // anything that can post to this frame could swap the content after the
-  // recipient has already decided to trust what they are looking at, and a
-  // JSX render followed by an HTML render would be exactly that swap.
-  //
-  // A version comparison needs two renders of untrusted content and gets them
-  // from two frames, each keeping this guarantee. Nothing about comparison
-  // relaxes this line, and the next person who wants a second render here
-  // should build a second frame instead.
   let rendered = false;
-  // Annotation is a separate one-shot, for the same reason and no other.
   let annotated = false;
 
   return (data: unknown): boolean => {
@@ -112,20 +645,43 @@ export function createSandboxHandler(
         writeJsx(data.code);
         return true;
       }
-      // Before a render there is nothing to annotate, so an annotate message
-      // arriving first is refused rather than queued.
       return false;
     }
 
-    // A mark carries a child-index path and a kind, and nothing else. That is
-    // what makes a second message type safe here where a second render would
-    // not be: this channel cannot carry content, so it cannot change what the
-    // document says. It only outlines what already stands there.
     if (!annotated && isAnnotateMessage(data)) {
       annotated = true;
       annotate(data.marks);
       return true;
     }
+
+    if (isArmPointingMessage(data)) {
+      interaction?.setArmed(data.armed);
+      return true;
+    }
+
+    if (isPaintMarkMessage(data)) {
+      return interaction?.onPaintMark(data.mark) ?? true;
+    }
+
+    if (isPaintMarksMessage(data)) {
+      return interaction?.onPaintMarks(data.marks) ?? true;
+    }
+
+    if (isClearMarkMessage(data)) {
+      interaction?.onClearMark(data.id);
+      return true;
+    }
+
+    if (isClearMarksMessage(data)) {
+      interaction?.onClearMarks();
+      return true;
+    }
+
+    if (isRevealMarkMessage(data)) {
+      interaction?.onRevealMark(data);
+      return true;
+    }
+
     return false;
   };
 }
@@ -136,20 +692,8 @@ async function mountComponent(code: string): Promise<void> {
   document.body.replaceChildren(root);
 
   try {
-    // The posted code is a module body whose only ambient binding is
-    // `React`, which the transpile emits calls to. Binding the bundled
-    // React as a global means the module needs no import statement of its
-    // own: there is no URL left that it could import from, since the frame
-    // may not reach the network.
-    // Sucrase's classic runtime resolves a bare `React` against the global
-    // object; the cast exists only because no type declares that property.
     const sandboxGlobal = globalThis as { React?: typeof React };
     sandboxGlobal.React = React;
-    // A blob module rather than `document.write`, because the component has
-    // to be imported as a module for its default export to be readable. The
-    // specifier is the blob URL built below, so no static import can name
-    // it, and a same-origin fetch is the one thing an opaque origin cannot
-    // do anyway. The blob never leaves this frame.
     const url = URL.createObjectURL(
       new Blob([code], { type: 'text/javascript' })
     );
@@ -160,9 +704,6 @@ async function mountComponent(code: string): Promise<void> {
     }
     createRoot(root).render(React.createElement(component));
   } catch {
-    // Compilation was checked on the service origin, so landing here means
-    // the module threw while running, or exported nothing mountable. Either
-    // way the honest display is a short failure, not a silent blank frame.
     const failure = document.createElement('div');
     failure.style.cssText =
       'font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;' +
@@ -174,13 +715,6 @@ async function mountComponent(code: string): Promise<void> {
 
 /**
  * Tell the parent what this frame ended up rendering.
- *
- * The message carries tag names, an attribute allowlist, and text, and no
- * markup at all. `'*'` is the only target available, exactly as it is for the
- * ready handshake: an opaque origin has no origin a parent could name. It is
- * safe for the same reason too, since the payload is the structure of the
- * content the parent already holds and is about to summarise, and the key was
- * never here to leak.
  */
 function reportTree(): void {
   window.parent.postMessage(
@@ -189,14 +723,6 @@ function reportTree(): void {
   );
 }
 
-/**
- * Report after the browser has actually laid the render down.
- *
- * The HTML path is done the moment `document.close()` returns, but a React
- * mount commits asynchronously, so capturing immediately would snapshot an
- * empty root. A frame is the natural beat to wait for, with a timeout for the
- * environments that have no frames to give.
- */
 function scheduleReport(): void {
   if (typeof requestAnimationFrame === 'function') {
     requestAnimationFrame(() => requestAnimationFrame(reportTree));
@@ -206,46 +732,55 @@ function scheduleReport(): void {
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  let interaction: FrameInteraction | undefined;
+
+  function initInteraction(): void {
+    interaction = setupFrameInteraction(document, window, (msg) => {
+      window.parent.postMessage(msg, '*');
+    });
+  }
+
   const handle = createSandboxHandler(
     (html) => {
-      // document.write rather than innerHTML, because the point of this origin
-      // is that the content runs as the page it claims to be. It is contained
-      // by the origin boundary and the sandbox attribute, not by stripping it.
       document.open();
       document.write(html);
       document.close();
-      // `document.open()` removes every event listener registered on the
-      // document, on its nodes, and on its window, so the frame went deaf the
-      // instant it rendered. Reporting still worked, because that is a
-      // callback this closure already holds, which is exactly why the loss was
-      // invisible: the parent got a tree, computed a diff, posted marks, and
-      // nothing was listening. Re-register, or annotation can never arrive.
+      initInteraction();
       listen();
       scheduleReport();
     },
     (code) => {
-      void mountComponent(code).then(scheduleReport, scheduleReport);
+      void mountComponent(code).then(() => {
+        initInteraction();
+        scheduleReport();
+      }, scheduleReport);
     },
     (marks) => {
-      // Relic's own constant stylesheet, and the only thing this path adds to
-      // the document. It goes in through `textContent`, and the frame's
-      // policy permits it because `style-src` allows inline styles.
       const style = document.createElement('style');
       style.textContent = HIGHLIGHT_CSS;
       document.head.appendChild(style);
       applyMarks(document.body, marks);
+    },
+    {
+      setArmed: (armed) => interaction?.setArmed(armed),
+      onPaintMark: (mark) => interaction?.onPaintMark(mark) ?? false,
+      onPaintMarks: (marks) => interaction?.onPaintMarks(marks) ?? false,
+      onClearMark: (id) => interaction?.onClearMark(id),
+      onClearMarks: () => interaction?.onClearMarks(),
+      onRevealMark: (msg) => interaction?.onRevealMark(msg),
+      onPairMark: (id, active) => interaction?.onPairMark(id, active),
     }
   );
 
   const onMessage = (event: MessageEvent): void => {
+    if (event.source !== window.parent) return;
     handle(event.data);
   };
+
   function listen(): void {
     window.addEventListener('message', onMessage);
   }
   listen();
 
-  // Tell the parent the frame is listening, so a message posted before this
-  // script ran is not simply lost.
   window.parent.postMessage({ type: 'relic:sandbox-ready' }, '*');
 }

@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES,
+  COMMENT_ANCHOR_MAX_PAGE,
+  COMMENT_ANCHOR_MAX_SECONDS,
+  COMMENT_ANCHOR_QUOTE_LIMIT_BYTES,
   COMMENT_BODY_LIMIT_BYTES,
   COMMENT_DISPLAY_NAME_LIMIT_BYTES,
   COMMENT_NONCE_BYTES,
@@ -366,5 +370,209 @@ describe('strict parsing', () => {
     await expect(
       decryptComment(key, await sealRaw(key, 'not json'))
     ).rejects.toBeInstanceOf(MalformedCommentError);
+  });
+});
+
+describe('the precise anchor kinds', () => {
+  /** Seal arbitrary JSON under a comment key, bypassing `encryptComment`. */
+  async function sealRaw(key: CryptoKey, json: string): Promise<string> {
+    const nonce = crypto.getRandomValues(new Uint8Array(COMMENT_NONCE_BYTES));
+    const sealed = new Uint8Array(
+      await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: nonce.slice().buffer as ArrayBuffer },
+        key,
+        new TextEncoder().encode(json).slice().buffer as ArrayBuffer
+      )
+    );
+    const framed = new Uint8Array(nonce.length + sealed.length);
+    framed.set(nonce, 0);
+    framed.set(sealed, nonce.length);
+    let binary = '';
+    for (const byte of framed) binary += String.fromCharCode(byte);
+    return btoa(binary)
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  }
+
+  async function roundTrip(anchor: unknown): Promise<unknown> {
+    const key = await deriveCommentKey(generateKey());
+    const plaintext = { body: 'a remark', display_name: null, anchor };
+    const sealed = await encryptComment(
+      key,
+      plaintext as Parameters<typeof encryptComment>[1]
+    );
+    return (await decryptComment(key, sealed)).anchor;
+  }
+
+  test('a quote carries the text around it so a repeat resolves', async () => {
+    const anchor = {
+      kind: 'quote' as const,
+      exact: 'not measured',
+      prefix: 'the claim was ',
+      suffix: ' in a browser',
+    };
+    expect(await roundTrip(anchor)).toEqual(anchor);
+  });
+
+  test('a quote without context is still a quote', async () => {
+    const anchor = { kind: 'quote' as const, exact: 'the third paragraph' };
+    // The absent keys stay absent rather than arriving as explicit
+    // undefined, because the envelope is compared as JSON on the wire.
+    expect(await roundTrip(anchor)).toEqual(anchor);
+  });
+
+  test('a region is a box on the content, and a zero-area box is refused', async () => {
+    const anchor = {
+      kind: 'region' as const,
+      rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.25 },
+    };
+    expect(await roundTrip(anchor)).toEqual(anchor);
+
+    await expect(
+      roundTrip({ kind: 'region', rect: { x: 0.1, y: 0.2, w: 0, h: 0.25 } })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+  });
+
+  test('a region that runs past the edge it is measured against is refused', async () => {
+    await expect(
+      roundTrip({ kind: 'region', rect: { x: 0.9, y: 0.1, w: 0.2, h: 0.1 } })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+  });
+
+  test('a time anchor carries a moment, and optionally a box in that frame', async () => {
+    const moment = { kind: 'time' as const, t: 83.5 };
+    expect(await roundTrip(moment)).toEqual(moment);
+
+    const framed = {
+      kind: 'time' as const,
+      t: 12,
+      t_end: 15.5,
+      rect: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 },
+    };
+    expect(await roundTrip(framed)).toEqual(framed);
+  });
+
+  test('a time span that ends at or before it starts is refused', async () => {
+    await expect(
+      roundTrip({ kind: 'time', t: 30, t_end: 30 })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+    await expect(
+      roundTrip({ kind: 'time', t: 30, t_end: 12 })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+  });
+
+  test('a time offset past the ceiling is refused, so a seek target is bounded', async () => {
+    await expect(
+      roundTrip({ kind: 'time', t: COMMENT_ANCHOR_MAX_SECONDS + 1 })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+    await expect(roundTrip({ kind: 'time', t: -1 })).rejects.toBeInstanceOf(
+      MalformedCommentError
+    );
+  });
+
+  test('a page anchor carries a page, and a box or a quote on it', async () => {
+    const bare = { kind: 'page' as const, page: 4 };
+    expect(await roundTrip(bare)).toEqual(bare);
+
+    const boxed = {
+      kind: 'page' as const,
+      page: 4,
+      rect: { x: 0.1, y: 0.6, w: 0.5, h: 0.1 },
+    };
+    expect(await roundTrip(boxed)).toEqual(boxed);
+
+    const quoted = {
+      kind: 'page' as const,
+      page: 12,
+      exact: 'indemnification shall survive termination',
+    };
+    expect(await roundTrip(quoted)).toEqual(quoted);
+  });
+
+  test('a page that is zero, fractional, or past the ceiling is refused', async () => {
+    for (const page of [0, 1.5, -3, COMMENT_ANCHOR_MAX_PAGE + 1]) {
+      await expect(roundTrip({ kind: 'page', page })).rejects.toBeInstanceOf(
+        MalformedCommentError
+      );
+    }
+  });
+
+  test('an unknown field inside a known kind is still refused', async () => {
+    const key = await deriveCommentKey(generateKey());
+    const sealed = await sealRaw(
+      key,
+      JSON.stringify({
+        body: 'hi',
+        display_name: null,
+        anchor: { kind: 'quote', exact: 'x', occurence: 2 },
+      })
+    );
+
+    await expect(decryptComment(key, sealed)).rejects.toBeInstanceOf(
+      MalformedCommentError
+    );
+  });
+
+  test('an unknown kind reads as unsupported, never as an unreadable comment', async () => {
+    const key = await deriveCommentKey(generateKey());
+    const sealed = await sealRaw(
+      key,
+      JSON.stringify({
+        body: 'this bar is wrong',
+        display_name: null,
+        anchor: { kind: 'cell', sheet: 'Q3', ref: 'B14' },
+      })
+    );
+
+    const opened = await decryptComment(key, sealed);
+    // The body survives, which is the whole point: a reader older than the
+    // writer must not tell a person the comment was altered in storage.
+    expect(opened.body).toBe('this bar is wrong');
+    expect(opened.anchor).toEqual({ kind: 'unsupported', declared: 'cell' });
+  });
+
+  test('an unsupported anchor is never written back', async () => {
+    const key = await deriveCommentKey(generateKey());
+    await expect(
+      encryptComment(key, {
+        body: 'hi',
+        display_name: null,
+        anchor: { kind: 'unsupported', declared: 'cell' },
+      })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+  });
+
+  test('the quote and context caps are enforced on the way out, by bytes', async () => {
+    const key = await deriveCommentKey(generateKey());
+    const overQuote = 'x'.repeat(COMMENT_ANCHOR_QUOTE_LIMIT_BYTES + 1);
+    await expect(
+      encryptComment(key, {
+        body: 'hi',
+        display_name: null,
+        anchor: { kind: 'quote', exact: overQuote },
+      })
+    ).rejects.toBeInstanceOf(CommentTooLargeError);
+
+    // Multibyte, so a character count would let this through.
+    const overContext = '\u00e9'.repeat(
+      COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES / 2 + 1
+    );
+    await expect(
+      encryptComment(key, {
+        body: 'hi',
+        display_name: null,
+        anchor: { kind: 'quote', exact: 'ok', prefix: overContext },
+      })
+    ).rejects.toBeInstanceOf(CommentTooLargeError);
+  });
+
+  test('the two frozen kinds still round trip byte for byte', async () => {
+    // The compatibility guarantee the new kinds exist to preserve. If either
+    // of these grows a field, a reader built before it reports tampering.
+    const text = { kind: 'text' as const, quote: 'the claim in the heading' };
+    const pin = { kind: 'pin' as const, x: 0.25, y: 0.8 };
+    expect(await roundTrip(text)).toEqual(text);
+    expect(await roundTrip(pin)).toEqual(pin);
   });
 });
