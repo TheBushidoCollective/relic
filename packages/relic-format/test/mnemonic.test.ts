@@ -5,16 +5,16 @@ import {
   keyToMnemonic,
   MNEMONIC_WORDS,
   mnemonicToKey,
-  wordlist,
   WORDLIST_SIZE,
+  wordlist,
 } from '../src/index.ts';
 
 describe('wordlist properties', () => {
   const words = wordlist();
 
-  test('contains exactly 7776 entries', () => {
+  test('contains exactly 2048 entries', () => {
     expect(words.length).toBe(WORDLIST_SIZE);
-    expect(WORDLIST_SIZE).toBe(7776);
+    expect(WORDLIST_SIZE).toBe(2048);
   });
 
   test('every entry consists strictly of lowercase ASCII a-z', () => {
@@ -28,8 +28,8 @@ describe('wordlist properties', () => {
     expect(unique.size).toBe(WORDLIST_SIZE);
   });
 
-  test('every word is unique in its first four characters', () => {
-    const prefixes = words.map((w) => w.slice(0, 4));
+  test('every word is uniquely identified by its four-character prefix', () => {
+    const prefixes = words.map((w) => (w.length >= 4 ? w.slice(0, 4) : w));
     const uniquePrefixes = new Set(prefixes);
     expect(uniquePrefixes.size).toBe(WORDLIST_SIZE);
   });
@@ -40,17 +40,27 @@ describe('wordlist properties', () => {
       expect(word.length).toBeLessThanOrEqual(8);
     }
   });
+});
 
-  test('no three-letter word is a prefix of any other word in the list', () => {
-    const threeLetterWords = words.filter((w) => w.length === 3);
-    expect(threeLetterWords.length).toBeGreaterThan(0);
+describe('wordlist digest pin', () => {
+  test('matches literal SHA-256 digest constant', async () => {
+    // Changing this list invalidates every mnemonic ever spoken and breaks key
+    // recovery for existing relics. This pin test exists to guarantee that any
+    // modification to the vocabulary is an explicit, deliberate act.
+    const PINNED_DIGEST =
+      '187db04a869dd9bc7be80d21a86497d692c0db6abd3aa8cb6be5d618ff757fae';
 
-    for (const shortWord of threeLetterWords) {
-      const collisions = words.filter(
-        (w) => w !== shortWord && w.startsWith(shortWord)
-      );
-      expect(collisions.length).toBe(0);
-    }
+    const words = wordlist();
+    const joined = words.join('\n');
+    const digestBuffer = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(joined)
+    );
+    const hex = Array.from(new Uint8Array(digestBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    expect(hex).toBe(PINNED_DIGEST);
   });
 });
 
@@ -64,7 +74,7 @@ describe('keyToMnemonic and mnemonicToKey round trips', () => {
     expect(decoded).toEqual(zeroKey);
   });
 
-  test('round-trips 16 0xff bytes (maximum 128-bit key)', () => {
+  test('round-trips 16 all-0xff bytes', () => {
     const maxKey = new Uint8Array(16).fill(0xff);
     const mnemonic = keyToMnemonic(maxKey);
 
@@ -73,7 +83,7 @@ describe('keyToMnemonic and mnemonicToKey round trips', () => {
     expect(decoded).toEqual(maxKey);
   });
 
-  test('round-trips at least 200 random CSPRNG keys with exact byte equality', () => {
+  test('round-trips 250 random 16-byte keys byte-for-byte', () => {
     for (let i = 0; i < 250; i++) {
       const originalKey = crypto.getRandomValues(new Uint8Array(16));
       const mnemonic = keyToMnemonic(originalKey);
@@ -92,7 +102,7 @@ describe('input tolerance and normalization on mnemonicToKey', () => {
   ]);
   const canonicalWords = keyToMnemonic(originalKey);
 
-  test('accepts a single string separated by whitespace, commas, and newlines', () => {
+  test('accepts mixed whitespace, commas, and newlines', () => {
     const mixedDelimiters = `${canonicalWords.slice(0, 3).join('  ')}, \n${canonicalWords.slice(3, 7).join(',\t')},\n\n${canonicalWords.slice(7).join(' ')}`;
     const decoded = mnemonicToKey(mixedDelimiters);
     expect(decoded).toEqual(originalKey);
@@ -100,18 +110,19 @@ describe('input tolerance and normalization on mnemonicToKey', () => {
 
   test('folds uppercase and mixed-case tokens to lowercase', () => {
     const upperWords = canonicalWords.map((w, idx) =>
-      idx % 2 === 0 ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1)
+      idx % 2 === 0 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
     );
     const decoded = mnemonicToKey(upperWords);
     expect(decoded).toEqual(originalKey);
   });
 
-  test('strips surrounding punctuation from tokens', () => {
+  test('ignores surrounding punctuation on individual tokens', () => {
     const punctuated = canonicalWords.map((w, idx) => {
-      if (idx === 0) return `"${w}",`;
-      if (idx === 1) return `(${w})`;
-      if (idx === 2) return `[${w}].`;
-      return `${w};`;
+      if (idx === 0) return `"${w}"`;
+      if (idx === 2) return `(${w})`;
+      if (idx === 5) return `[${w}]`;
+      if (idx === 8) return `<${w}>!`;
+      return w;
     });
     const decoded = mnemonicToKey(punctuated);
     expect(decoded).toEqual(originalKey);
@@ -130,22 +141,8 @@ describe('mnemonicToKey rejection cases', () => {
   const validKey = new Uint8Array(16).fill(0x42);
   const validWords = keyToMnemonic(validKey);
 
-  test('rejects fewer than 10 words (9 words) carrying word count in error', () => {
-    const nineWords = validWords.slice(0, 9);
-    expect(() => mnemonicToKey(nineWords)).toThrow(InvalidMnemonicError);
-
-    try {
-      mnemonicToKey(nineWords);
-    } catch (error) {
-      expect(error).toBeInstanceOf(InvalidMnemonicError);
-      const err = error as InvalidMnemonicError;
-      expect(err.reason).toBe('count');
-      expect(err.wordIndex).toBe(9);
-    }
-  });
-
-  test('rejects more than 10 words (11 words) carrying word count in error', () => {
-    const elevenWords = [...validWords, validWords[0]!];
+  test('rejects fewer than 12 words (11 words) carrying word count in error', () => {
+    const elevenWords = validWords.slice(0, 11);
     expect(() => mnemonicToKey(elevenWords)).toThrow(InvalidMnemonicError);
 
     try {
@@ -155,6 +152,22 @@ describe('mnemonicToKey rejection cases', () => {
       const err = error as InvalidMnemonicError;
       expect(err.reason).toBe('count');
       expect(err.wordIndex).toBe(11);
+    }
+  });
+
+  test('rejects more than 12 words (13 words) carrying word count in error', () => {
+    const firstWord = validWords[0];
+    if (firstWord === undefined) throw new Error('expected word in validWords');
+    const thirteenWords = [...validWords, firstWord];
+    expect(() => mnemonicToKey(thirteenWords)).toThrow(InvalidMnemonicError);
+
+    try {
+      mnemonicToKey(thirteenWords);
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidMnemonicError);
+      const err = error as InvalidMnemonicError;
+      expect(err.reason).toBe('count');
+      expect(err.wordIndex).toBe(13);
     }
   });
 
@@ -190,39 +203,93 @@ describe('mnemonicToKey rejection cases', () => {
     }
   });
 
-  test('rejects a 10-word phrase whose decoded integer exceeds 2^128', () => {
-    const words = wordlist();
-    // Repeating the maximum vocabulary entry guarantees value > 2^128,
-    // since 7776^10 - 1 is roughly 8.08e38 against a 2^128 ceiling of 3.40e38.
-    const maximumWord = words[words.length - 1]!;
-    const overflowingPhrase = new Array(MNEMONIC_WORDS).fill(maximumWord);
+  test('rejects a phrase whose checksum is wrong with reason checksum', () => {
+    // Valid phrase for 16 bytes of 0x42:
+    // "drastic bamboo mountain loyal category cancel animal embark drastic bamboo mountain lunch"
+    // Swapping the first word "drastic" for another valid word "abandon" changes the
+    // entropy without updating the 4-bit checksum stored in the final word, which
+    // causes mnemonicToKey to compute SHA-256 of the altered key and detect a mismatch.
+    const corrupted = [...validWords];
+    corrupted[0] = 'abandon';
 
-    expect(() => mnemonicToKey(overflowingPhrase)).toThrow(
-      InvalidMnemonicError
-    );
+    expect(() => mnemonicToKey(corrupted)).toThrow(InvalidMnemonicError);
 
     try {
-      mnemonicToKey(overflowingPhrase);
+      mnemonicToKey(corrupted);
     } catch (error) {
       expect(error).toBeInstanceOf(InvalidMnemonicError);
       const err = error as InvalidMnemonicError;
-      expect(err.reason).toBe('range');
-      expect(err.message).toContain('exceeds 128-bit key range');
+      expect(err.reason).toBe('checksum');
+      expect(err.message).toBe('invalid mnemonic checksum');
     }
   });
+});
 
-  test('rejects a 10-word phrase constructed right above 2^128 boundary', () => {
-    const words = wordlist();
-    let value = 1n << 128n; // smallest value exceeding 128-bit key space
-    const boundaryWords = new Array<string>(MNEMONIC_WORDS);
+describe('interoperability with standard BIP-39 specification', () => {
+  test('matches standard BIP-39 test vector for 16 zero bytes', () => {
+    // Derivation by hand directly from BIP-39 specification:
+    // 1. Key entropy: 16 zero bytes (128 zero bits).
+    // 2. Checksum: SHA-256 of 16 zero bytes begins with byte 0x37 (binary 00110111).
+    //    Checksum length for 128 bits is 128 / 32 = 4 bits.
+    //    Taking the first 4 bits yields 0011 (decimal 3).
+    // 3. Bitstream: 128 zero bits followed by 4 checksum bits 0011 (132 bits total).
+    // 4. Split into 12 groups of 11 bits:
+    //    - Groups 0 through 10 (words 1 to 11): 11 zero bits each -> index 0 ("abandon").
+    //    - Group 11 (word 12): remaining 7 zero bits of entropy plus 4 checksum bits 0011:
+    //      binary 00000000011 = decimal 3 -> wordlist[3] ("about").
+    // 5. Resulting 12-word mnemonic:
+    //    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    const zeroKey = new Uint8Array(16);
+    const expected = [
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'abandon',
+      'about',
+    ];
 
-    for (let i = MNEMONIC_WORDS - 1; i >= 0; i--) {
-      const rem = Number(value % 7776n);
-      value = value / 7776n;
-      boundaryWords[i] = words[rem]!;
-    }
+    expect(keyToMnemonic(zeroKey)).toEqual(expected);
+    expect(mnemonicToKey(expected)).toEqual(zeroKey);
+  });
 
-    expect(() => mnemonicToKey(boundaryWords)).toThrow(InvalidMnemonicError);
+  test('matches standard BIP-39 test vector for 16 0xff bytes', () => {
+    // Derivation by hand directly from BIP-39 specification:
+    // 1. Key entropy: 16 bytes of 0xff (128 one bits).
+    // 2. Checksum: SHA-256 of 16 0xff bytes begins with byte 0xdc (binary 11011100).
+    //    Taking the first 4 bits yields 1101 (decimal 13).
+    // 3. Bitstream: 128 one bits followed by 4 checksum bits 1101 (132 bits total).
+    // 4. Split into 12 groups of 11 bits:
+    //    - Groups 0 through 10 (words 1 to 11): 11 one bits each -> binary 11111111111 = decimal 2047
+    //      -> wordlist[2047] ("zoo").
+    //    - Group 11 (word 12): remaining 7 one bits of entropy plus 4 checksum bits 1101:
+    //      binary 11111111101 = decimal 2029 -> wordlist[2029] ("wrong").
+    // 5. Resulting 12-word mnemonic:
+    //    11 repetitions of "zoo" followed by "wrong".
+    const maxKey = new Uint8Array(16).fill(0xff);
+    const expected = [
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'zoo',
+      'wrong',
+    ];
+
+    expect(keyToMnemonic(maxKey)).toEqual(expected);
+    expect(mnemonicToKey(expected)).toEqual(maxKey);
   });
 });
 
@@ -243,13 +310,13 @@ describe('keyToMnemonic validation', () => {
 describe('isMnemonicLike fast shape check', () => {
   const validWords = keyToMnemonic(new Uint8Array(16).fill(0x12));
 
-  test('returns true for 10 whitespace-separated alphabetic tokens', () => {
+  test('returns true for 12 whitespace-separated alphabetic tokens', () => {
     expect(isMnemonicLike(validWords.join(' '))).toBe(true);
     expect(isMnemonicLike(validWords.join(',\n'))).toBe(true);
   });
 
-  test('returns false for token counts other than 10', () => {
-    expect(isMnemonicLike(validWords.slice(0, 9).join(' '))).toBe(false);
+  test('returns false for token counts other than 12', () => {
+    expect(isMnemonicLike(validWords.slice(0, 11).join(' '))).toBe(false);
     expect(isMnemonicLike(validWords.concat('extra').join(' '))).toBe(false);
   });
 
