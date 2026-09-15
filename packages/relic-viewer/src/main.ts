@@ -24,8 +24,15 @@ import {
   adapterFor,
   anchorLabel,
   MARK_UNPLACEABLE_NOTE,
+  rectFromCorners,
+  registerAnchorAdapter,
   UNSUPPORTED_ANCHOR_LABEL,
+  unitFromPointer,
 } from './anchoring.ts';
+import { pageAnchorAdapter } from './annotate-page.ts';
+
+registerAnchorAdapter(pageAnchorAdapter);
+
 import {
   type CommentCipher,
   type CommentEntry,
@@ -843,6 +850,41 @@ function renderDownloadView(view: ReadyView): HTMLElement {
   return wrapper;
 }
 
+export function renderPdfView(view: ReadyView): HTMLElement {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'doc doc-pdf';
+
+  const loading = document.createElement('div');
+  loading.className = 'pdf-status-card';
+  const headline = document.createElement('p');
+  headline.className = 'pdf-status-title';
+  headline.textContent = 'Loading PDF document';
+  const detail = document.createElement('p');
+  detail.className = 'thread-note';
+  detail.textContent =
+    'Loading the PDF renderer. It is loaded on demand so other documents do not pay for it.';
+  loading.append(headline, detail);
+  wrapper.appendChild(loading);
+
+  void import('./pdf.ts')
+    .then(({ mountPdf }) => {
+      void mountPdf(wrapper, view.content, view.filename);
+    })
+    .catch(() => {
+      loading.replaceChildren();
+      const errTitle = document.createElement('p');
+      errTitle.className = 'pdf-status-title';
+      errTitle.textContent = 'Could not load PDF renderer';
+      const errDetail = document.createElement('p');
+      errDetail.className = 'thread-note';
+      errDetail.textContent =
+        'The viewer could not load the PDF rendering component. Check your connection and try again.';
+      loading.append(errTitle, errDetail);
+    });
+
+  return wrapper;
+}
+
 const AUDIO_EXTENSIONS: Record<string, true> = {
   mp3: true,
   wav: true,
@@ -985,6 +1027,9 @@ export function buildCurrentStage(
       break;
     case 'sandboxed-jsx':
       main.appendChild(renderSandboxedJsx(view, usercontentOrigin));
+      break;
+    case 'pdf':
+      main.appendChild(renderPdfView(view));
       break;
     default:
       main.appendChild(renderDownloadView(view));
@@ -2389,6 +2434,67 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         afterSelection(offer);
       });
       next.addEventListener('click', place);
+
+      let dragStart: { readonly x: number; readonly y: number } | null = null;
+      let dragPage = 1;
+      let isDragging = false;
+
+      next.addEventListener('pointerdown', (event: PointerEvent) => {
+        if (armed()) return;
+        const target = event.target;
+        if (
+          !(target instanceof HTMLCanvasElement) ||
+          !target.classList.contains('relic-page')
+        ) {
+          return;
+        }
+        const surface = anchorSurfaceFor(next);
+        if (surface === undefined) return;
+        const point = unitFromPointer(surface, event.clientX, event.clientY);
+        if (point === undefined) return;
+        dragStart = point;
+        const pageAttr = target.dataset['pageNumber'];
+        dragPage = pageAttr !== undefined ? Number.parseInt(pageAttr, 10) : 1;
+        isDragging = false;
+      });
+
+      next.addEventListener('pointermove', (event: PointerEvent) => {
+        if (dragStart === null) return;
+        const surface = anchorSurfaceFor(next);
+        if (surface === undefined) return;
+        const current = unitFromPointer(surface, event.clientX, event.clientY);
+        if (current === undefined) return;
+        const rect = rectFromCorners(dragStart, current);
+        if (rect !== undefined) {
+          isDragging = true;
+          anchor = { kind: 'page', page: dragPage, rect };
+          paintChip();
+          deps.repaint();
+        }
+      });
+
+      const finishDrag = (event: PointerEvent): void => {
+        if (dragStart === null) return;
+        const wasDragging = isDragging;
+        const start = dragStart;
+        dragStart = null;
+        isDragging = false;
+        if (!wasDragging) return;
+        const surface = anchorSurfaceFor(next);
+        if (surface === undefined) return;
+        const current = unitFromPointer(surface, event.clientX, event.clientY);
+        const rect =
+          current !== undefined ? rectFromCorners(start, current) : undefined;
+        if (rect !== undefined) {
+          aim({ kind: 'page', page: dragPage, rect });
+        }
+      };
+
+      next.addEventListener('pointerup', finishDrag);
+      next.addEventListener('pointercancel', () => {
+        dragStart = null;
+        isDragging = false;
+      });
     },
   };
 }
@@ -2667,6 +2773,21 @@ export function buildThread(
   };
 
   bindPairing(list);
+  list.addEventListener('click', (event: Event) => {
+    if (!(event.target instanceof Element)) return;
+    const row = event.target.closest<HTMLElement>('[data-comment-id]');
+    if (row === null) return;
+    const commentId = row.dataset['commentId'];
+    if (commentId === undefined || host === undefined) return;
+    const entry = lastEntries.find((e) => e.id === commentId);
+    if (entry === undefined || entry.kind !== 'open' || entry.anchor === null) {
+      return;
+    }
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined) return;
+    const adapter = adapterFor(entry.anchor, surface);
+    adapter?.reveal?.(surface, entry.anchor);
+  });
 
   const policyLink = (): HTMLElement => {
     const link = document.createElement('a');
@@ -2975,6 +3096,9 @@ export function buildThread(
       if (next.dataset.pairBind !== '1') {
         next.dataset.pairBind = '1';
         bindPairing(next);
+        next.addEventListener('relic:page-changed', () => {
+          paintMarks(lastEntries);
+        });
       }
       paintMarks(lastEntries);
       marks.attach(next);

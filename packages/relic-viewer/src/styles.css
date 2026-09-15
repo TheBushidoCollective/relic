@@ -940,6 +940,108 @@ body {
   border-top: 1px solid var(--rule);
 }
 
+/* ---------- PDF stage and marks ---------- */
+
+.stage-pdf {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: auto;
+  padding: 1.5rem 1rem;
+}
+
+.doc-pdf {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  color: var(--ink);
+}
+
+.pdf-toolbar button {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.pdf-page-indicator {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.pdf-page-container {
+  position: relative;
+  display: inline-block;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  background: #ffffff;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+canvas.relic-page {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #ffffff;
+}
+
+.pdf-status-card {
+  max-width: 34rem;
+  margin: 3rem auto;
+  padding: 1.75rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--patina);
+}
+
+.pdf-status-title {
+  font-family: var(--sans);
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+}
+
+.mark-page,
+.mark-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--patina);
+  background: rgba(31, 107, 100, 0.15);
+  border-radius: 2px;
+  pointer-events: auto;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.mark-page.is-active,
+.mark-region.is-active {
+  background: rgba(31, 107, 100, 0.35);
+  border-color: var(--patina-ink);
+  box-shadow: 0 0 0 2px rgba(31, 107, 100, 0.4);
+}
+
+.mark-page.is-pending,
+.mark-region.is-pending {
+  border-style: dashed;
+  background: rgba(31, 107, 100, 0.1);
+  pointer-events: none;
+}
+
 /* ---------- version history ---------- */
 
 .stage-diff {

@@ -67,6 +67,7 @@ export type RenderRoute =
   | 'sandboxed-html'
   | 'sandboxed-jsx'
   | 'media'
+  | 'pdf'
   | 'download';
 
 export interface DeadView {
@@ -720,6 +721,8 @@ export function routeForClass(cls: RendererClass): RenderRoute {
       // Same frame as HTML, different payload: transpiled text posted in
       // rather than markup. Never inline on this origin.
       return 'sandboxed-jsx';
+    case 'pdf':
+      return 'pdf';
     default:
       // Archives and arbitrary binaries are download-only in the
       // first release. The framing keeps range decryption available so this
@@ -737,6 +740,7 @@ function classFromMimetype(mimetype: string, filename: string): RendererClass {
   if (type === 'text/jsx' || type === 'text/tsx') return 'jsx';
   if (type.startsWith('image/')) return 'image';
   if (type.startsWith('video/') || type.startsWith('audio/')) return 'media';
+  if (type === 'application/pdf') return 'pdf';
   if (
     type === 'application/zip' ||
     type === 'application/gzip' ||
@@ -763,6 +767,8 @@ function describe(cls: RendererClass): string {
       return 'a web page';
     case 'jsx':
       return 'a React component';
+    case 'pdf':
+      return 'a PDF document';
     case 'image':
       return 'an image';
     case 'media':

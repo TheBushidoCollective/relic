@@ -53,4 +53,11 @@ describe('cardCopy', () => {
     expect(copy.description).toContain('It plays in your browser');
     expect(copy.description).not.toContain('downloads to your device');
   });
+
+  test('pdf relic description opens in browser and does not download to device', () => {
+    const copy = cardCopy('pdf');
+    expect(copy.title).toBe('A PDF relic');
+    expect(copy.description).toContain('It opens in your browser');
+    expect(copy.description).not.toContain('downloads to your device');
+  });
 });
