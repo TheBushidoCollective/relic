@@ -32,6 +32,7 @@ import {
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
+import { localStorageKeyVault } from './vault.ts';
 
 // The adapter table is installed once, from the one module that knows the
 // complete built-in set. See `anchor-adapters.ts` for why registration is not
@@ -100,7 +101,6 @@ import {
 import {
   type DeadView,
   formatBytes,
-  type KeyVault,
   load,
   loadHistoricalVersion,
   type ReadyView,
@@ -4161,119 +4161,12 @@ function renderDead(dead: DeadView): void {
   document.body.appendChild(main);
 }
 
-const VAULT_PREFIX = 'relic:key:';
-
 /**
- * Keys remembered in this browser's storage for the service origin.
- *
- * Storage can be absent or refuse to write: private browsing, a quota, an
- * embedded webview, or a user who has blocked site data. None of that should
- * cost somebody the relic they are currently looking at, so every operation
- * degrades to doing nothing. The worst case is the behaviour that existed
- * before this: a reload asks for the original link.
- *
- * Entries carry their relic's expiry and are swept on every read, so storage
- * does not accumulate keys to relics that stopped existing days ago.
+ * Re-exported so existing callers and tests keep their import. The vault
+ * itself lives in `vault.ts`, because a dashboard has to enumerate it and
+ * this file is not where storage belongs.
  */
-export function localStorageKeyVault(
-  storage: Storage | undefined = globalThis.localStorage,
-  now: () => number = Date.now
-): KeyVault {
-  const read = (): Storage | undefined => {
-    try {
-      // Touching localStorage throws outright in some embedded contexts,
-      // rather than being absent, so the guard has to be a try and not a null
-      // check.
-      return storage ?? undefined;
-    } catch {
-      return undefined;
-    }
-  };
-
-  const sweep = (store: Storage): void => {
-    const stale: string[] = [];
-    for (let i = 0; i < store.length; i++) {
-      const name = store.key(i);
-      if (name === null || !name.startsWith(VAULT_PREFIX)) continue;
-      try {
-        const entry = JSON.parse(store.getItem(name) ?? '') as {
-          expiresAt?: number | null;
-        };
-        // null is how a never-expires entry is persisted; JSON has no
-        // Infinity. Any other non-number is corruption, and swept.
-        if (
-          (entry.expiresAt !== null && typeof entry.expiresAt !== 'number') ||
-          (typeof entry.expiresAt === 'number' && entry.expiresAt <= now())
-        ) {
-          stale.push(name);
-        }
-      } catch {
-        // Unreadable entry. Not ours to interpret, and not worth keeping.
-        stale.push(name);
-      }
-    }
-    for (const name of stale) store.removeItem(name);
-  };
-
-  return {
-    remember(relicId, fragment, expiresAt) {
-      const store = read();
-      if (store === undefined) return;
-      // NaN stays refused: an unparsable date is corruption, not forever.
-      // Infinity passes, because a relic with no lifetime is worth keeping
-      // the key for until it is deleted.
-      if (Number.isNaN(expiresAt) || expiresAt <= now()) return;
-      try {
-        store.setItem(
-          `${VAULT_PREFIX}${relicId}`,
-          JSON.stringify({
-            fragment,
-            expiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
-          })
-        );
-      } catch {
-        // Quota, or storage disabled mid-session. A remembered key is a
-        // convenience; failing to store one is not worth an error page.
-      }
-    },
-
-    recall(relicId) {
-      const store = read();
-      if (store === undefined) return undefined;
-      try {
-        sweep(store);
-        const raw = store.getItem(`${VAULT_PREFIX}${relicId}`);
-        if (raw === null) return undefined;
-        const entry = JSON.parse(raw) as {
-          fragment?: unknown;
-          expiresAt?: unknown;
-        };
-        if (typeof entry.fragment !== 'string') return undefined;
-        if (typeof entry.expiresAt === 'number' && entry.expiresAt <= now()) {
-          return undefined;
-        }
-        // null means never expires. Anything else that is not a number is
-        // corruption, and recalls nothing.
-        if (entry.expiresAt !== null && typeof entry.expiresAt !== 'number') {
-          return undefined;
-        }
-        return entry.fragment;
-      } catch {
-        return undefined;
-      }
-    },
-
-    forget(relicId) {
-      const store = read();
-      if (store === undefined) return;
-      try {
-        store.removeItem(`${VAULT_PREFIX}${relicId}`);
-      } catch {
-        // Nothing to do, and nothing worth telling the reader about.
-      }
-    },
-  };
-}
+export { localStorageKeyVault };
 
 export function makeBrowserDeps(): ViewerDeps {
   return {
