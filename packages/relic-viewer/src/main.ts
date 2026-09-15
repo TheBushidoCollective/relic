@@ -2268,6 +2268,9 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   let timeMode: HTMLElement | undefined;
   let timeHint: HTMLElement | undefined;
   let spanStart: number | null = null;
+  let quoteAction: HTMLElement | undefined;
+  let keyboardBox: HTMLElement | undefined;
+  let keyboardRect: { x: number; y: number; w: number; h: number } | undefined;
   const chip = document.createElement('div');
   chip.className = 'compose-target';
   // Polite: a target arriving is worth announcing to a reader who cannot see
@@ -2288,10 +2291,18 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   const dismiss = (): void => {
     bubble?.remove();
     bubble = undefined;
+    quoteAction?.remove();
+    quoteAction = undefined;
   };
 
   /** The button's own pressed state is the armed state, so there is one. */
   const armed = (): boolean => mode?.getAttribute('aria-pressed') === 'true';
+
+  const removeKeyboardBox = (): void => {
+    keyboardBox?.remove();
+    keyboardBox = undefined;
+    keyboardRect = undefined;
+  };
 
   const disarmSpan = (): void => {
     spanStart = null;
@@ -2311,12 +2322,20 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     host?.classList.remove('is-pinning');
     hint?.remove();
     hint = undefined;
+    removeKeyboardBox();
     host
       ?.querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
       ?.contentWindow?.postMessage(
         { type: 'relic:arm-pointing', armed: false },
         '*'
       );
+  };
+
+  const cancelAiming = (): void => {
+    dismiss();
+    disarm();
+    disarmSpan();
+    removeKeyboardBox();
   };
 
   const paintChip = (): void => {
@@ -2337,11 +2356,10 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     suppressClick = false;
     drawingBox?.remove();
     drawingBox = undefined;
-    dismiss();
-    disarm();
-    disarmSpan();
+    cancelAiming();
     paintChip();
     deps.repaint();
+    deps.focusBody();
   };
   reset.addEventListener('click', clear);
 
@@ -2350,6 +2368,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     dismiss();
     disarm();
     if (!keepSpanArmed) disarmSpan();
+    removeKeyboardBox();
     paintChip();
     deps.repaint();
     deps.open();
@@ -2364,14 +2383,37 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     said.className = 'mark-hint';
     said.setAttribute('aria-live', 'polite');
     const isImg = surface.querySelector('img.relic-image') !== null;
-    said.textContent = isImg
-      ? 'Click to place a point, or drag to select a region'
-      : MARK_PIN_HINT;
+    said.textContent = isImg ? MARK_REGION_HINT : MARK_PIN_HINT;
     // looking at the document, the sidebar is not on the row at all at narrow
     // width, and a hint that took layout space would shift the line under the
     // cursor between arming and the click that places the point.
     surface.appendChild(said);
     hint = said;
+
+    const s = anchorSurfaceFor(surface);
+    if (isImg && s) {
+      removeKeyboardBox();
+      keyboardRect = { x: 0.35, y: 0.35, w: 0.3, h: 0.3 };
+      const kbox = document.createElement('div');
+      kbox.className = 'comment-region is-drawing is-pending is-keyboard';
+      const pins = surface.querySelector('.comment-pins') || surface;
+      pins.appendChild(kbox);
+      keyboardBox = kbox;
+
+      const box = boxFromUnit(s, keyboardRect);
+      if (box) {
+        kbox.style.left = `${box.left}px`;
+        kbox.style.top = `${box.top}px`;
+        kbox.style.width = `${box.width}px`;
+        kbox.style.height = `${box.height}px`;
+      }
+      if (surface.tabIndex < 0) surface.tabIndex = 0;
+      surface.focus?.();
+    } else {
+      if (surface.tabIndex < 0) surface.tabIndex = 0;
+      surface.focus?.();
+    }
+
     surface
       .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
       ?.contentWindow?.postMessage(
@@ -2437,6 +2479,20 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     const above = rect.top - box.top + surface.scrollTop;
     offered.style.top = `${Math.max(above - offered.offsetHeight - MARK_BUBBLE_GAP, 0)}px`;
     bubble = offered;
+
+    // Keyboard and sidebar affordance
+    const qa = document.createElement('button');
+    qa.type = 'button';
+    qa.className = 'mark-quote-action';
+    qa.textContent = 'Quote selection';
+    const shortQuote =
+      quote.length > 24 ? `${quote.slice(0, 24).trimEnd()}…` : quote;
+    qa.setAttribute('aria-label', `Quote "${shortQuote}"`);
+    qa.addEventListener('click', () => {
+      aim(target);
+    });
+    tools.appendChild(qa);
+    quoteAction = qa;
   };
 
   /** Places a point, but only for a click the reader armed the tool for. */
@@ -2688,14 +2744,98 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   // Bound to the document once, here rather than in `attach`, because a
   // comparison closing rebuilds the stage and attaches again: listeners added
   // there would accumulate one copy per visit.
-  document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    if (spanStart !== null) {
-      disarmSpan();
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      if (spanStart !== null) {
+        disarmSpan();
+        return;
+      }
+      if (
+        armed() ||
+        keyboardBox !== undefined ||
+        bubble !== undefined ||
+        isDragging
+      ) {
+        cancelAiming();
+        return;
+      }
+      if (anchor !== null) {
+        clear();
+      }
       return;
     }
-    clear();
-  });
+
+    if (!armed()) return;
+
+    const surface = host;
+    if (surface === undefined) return;
+    const s = anchorSurfaceFor(surface);
+    const content = s?.content ?? surface;
+    const isImg =
+      content.tagName === 'IMG' || surface.querySelector('img') !== null;
+
+    if (isImg && keyboardRect !== undefined) {
+      let handled = false;
+      const step = 0.05;
+      if (event.shiftKey) {
+        if (event.key === 'ArrowRight') {
+          keyboardRect.w = Math.min(1 - keyboardRect.x, keyboardRect.w + step);
+          handled = true;
+        } else if (event.key === 'ArrowLeft') {
+          keyboardRect.w = Math.max(0.05, keyboardRect.w - step);
+          handled = true;
+        } else if (event.key === 'ArrowDown') {
+          keyboardRect.h = Math.min(1 - keyboardRect.y, keyboardRect.h + step);
+          handled = true;
+        } else if (event.key === 'ArrowUp') {
+          keyboardRect.h = Math.max(0.05, keyboardRect.h - step);
+          handled = true;
+        }
+      } else {
+        if (event.key === 'ArrowRight') {
+          keyboardRect.x = Math.min(1 - keyboardRect.w, keyboardRect.x + step);
+          handled = true;
+        } else if (event.key === 'ArrowLeft') {
+          keyboardRect.x = Math.max(0, keyboardRect.x - step);
+          handled = true;
+        } else if (event.key === 'ArrowDown') {
+          keyboardRect.y = Math.min(1 - keyboardRect.h, keyboardRect.y + step);
+          handled = true;
+        } else if (event.key === 'ArrowUp') {
+          keyboardRect.y = Math.max(0, keyboardRect.y - step);
+          handled = true;
+        }
+      }
+
+      if (handled) {
+        event.preventDefault();
+        if (keyboardBox && s) {
+          const box = boxFromUnit(s, keyboardRect);
+          if (box) {
+            keyboardBox.style.left = `${box.left}px`;
+            keyboardBox.style.top = `${box.top}px`;
+            keyboardBox.style.width = `${box.width}px`;
+            keyboardBox.style.height = `${box.height}px`;
+          }
+        }
+        return;
+      }
+
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        aim({ kind: 'region', rect: { ...keyboardRect } });
+        return;
+      }
+    } else if (!isImg) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        aim({ kind: 'pin', x: 0.5, y: 0.5 });
+        return;
+      }
+    }
+  };
+
+  document.addEventListener('keydown', onKeyDown);
   document.addEventListener('selectionchange', () => {
     const live = window.getSelection();
     if (live === null || live.isCollapsed) dismiss();
@@ -2716,42 +2856,42 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       teardownStage = undefined;
       disarmSpan();
       host = next;
-      // The boundary, read from the DOM rather than from the route, because a
-      // component that will not compile falls back to its own source and that
-      // source renders right here in the page where a mark can reach it.
 
-      // One armed mode handles both point and region: click equals point, drag
-      // equals region. Keeping one control avoids cluttering the toolbar and
-      // needs no explanation: under the crosshair cursor, a tap places a pin
-      // and dragging a box selects a region.
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'mark-mode';
+      if (
+        next.querySelector('.doc-download') !== null ||
+        next.classList?.contains?.('stage-download') ||
+        (next.querySelector('.notice') !== null &&
+          next.querySelector('.doc, img, video, audio, canvas, iframe') ===
+            null)
+      ) {
+        mode = undefined;
+        timeMode = undefined;
+        tools.replaceChildren();
+        return;
+      }
+
+      const isFramed = next.querySelector('iframe.usercontent-frame') !== null;
       const isImg = next.querySelector('img.relic-image') !== null;
-      toggle.textContent = isImg
-        ? 'Point or select region'
-        : 'Point at something';
-      toggle.setAttribute('aria-pressed', 'false');
-      toggle.addEventListener('click', () => {
-        disarmSpan();
-        if (armed()) disarm();
-        else arm();
-      });
-      mode = toggle;
+      const isPdf = next.querySelector('canvas.relic-page') !== null;
       const media = next.querySelector(
         'video.relic-media, audio.relic-media, video, audio'
       ) as HTMLMediaElement | null;
 
-      const isFramed = next.querySelector('iframe.usercontent-frame') !== null;
-      // Framed content is the one surface where the artifact is a document
-      // this origin cannot read into, so the affordance has to name the thing
-      // that does work there rather than withdraw. Both kinds now arrive over
-      // postMessage from the shim, so the point toggle is real and a selection
-      // inside the frame reaches the composer.
       if (isFramed) {
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'mark-mode';
+        toggle.textContent = 'Point at something';
+        toggle.setAttribute('aria-pressed', 'false');
+        toggle.addEventListener('click', () => {
+          if (armed()) disarm();
+          else arm();
+        });
+        mode = toggle;
+
         const framedHint = document.createElement('span');
-        framedHint.className = 'thread-note';
-        framedHint.textContent = 'or select text inside the document';
+        framedHint.className = 'thread-hint';
+        framedHint.textContent = 'Select text inside document to quote';
         tools.replaceChildren(toggle, framedHint);
       } else if (media !== null) {
         const isAudio = media.tagName === 'AUDIO';
@@ -2794,22 +2934,55 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
           }
         });
         timeMode = timeToggle;
-        // No text hint on media. "Select text to quote" describes nothing a
-        // reader can do to a video or an audio track, and an affordance that
-        // names an impossible act is the defect the annotation work already
-        // decided to treat as a correctness problem rather than a rough edge.
-        tools.replaceChildren(timeToggle, toggle);
+        mode = undefined;
+        // Audio gets only time mode; video gets time mode. No text hints or broken point controls.
+        tools.replaceChildren(timeToggle);
+      } else if (isImg) {
+        timeMode = undefined;
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'mark-mode mark-region';
+        toggle.textContent = 'Mark a region or point';
+        toggle.setAttribute('aria-pressed', 'false');
+        toggle.addEventListener('click', () => {
+          if (armed()) disarm();
+          else arm();
+        });
+        mode = toggle;
+        // Images carry no text to select, so only the region/point control is offered.
+        tools.replaceChildren(toggle);
+      } else if (isPdf) {
+        timeMode = undefined;
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'mark-mode mark-page';
+        toggle.textContent = 'Mark on page';
+        toggle.setAttribute('aria-pressed', 'false');
+        toggle.addEventListener('click', () => {
+          if (armed()) disarm();
+          else arm();
+        });
+        mode = toggle;
+        const pdfHint = document.createElement('span');
+        pdfHint.className = 'thread-hint';
+        pdfHint.textContent = 'Drag a box on the page to mark an area';
+        tools.replaceChildren(toggle, pdfHint);
       } else {
         timeMode = undefined;
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'mark-mode mark-pin';
+        toggle.textContent = 'Point at something';
+        toggle.setAttribute('aria-pressed', 'false');
+        toggle.addEventListener('click', () => {
+          if (armed()) disarm();
+          else arm();
+        });
+        mode = toggle;
+
         const textHint = document.createElement('span');
-        textHint.className = 'thread-note';
-        // A rendered page is a canvas, so there is no text in it to select.
-        // Naming selection here would be an affordance for an act the reader
-        // cannot perform, which is the defect this row exists to avoid.
-        textHint.textContent =
-          next.querySelector('canvas.relic-page') !== null
-            ? 'or drag a box on the page'
-            : 'or select text to quote';
+        textHint.className = 'thread-hint';
+        textHint.textContent = 'Select text in document to quote';
         tools.replaceChildren(toggle, textHint);
       }
 
