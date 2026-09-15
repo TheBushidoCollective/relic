@@ -48,6 +48,11 @@ import {
   PublishError,
   postJson,
 } from './publish.ts';
+import {
+  type ContentBlock,
+  type ResolvedAnchor,
+  resolveAnchors,
+} from './resolve-anchor.ts';
 import { loadPublishState, type PublishState } from './state.ts';
 
 /** One comment as an agent reads it. */
@@ -78,6 +83,11 @@ export interface CommentRecord {
   readonly readable: boolean;
   /** Null exactly when `readable` is true. */
   readonly unreadable_reason: string | null;
+  /**
+   * Resolved content for this comment's anchor when anchor resolution is
+   * requested. Null when freeform or when resolution was not requested.
+   */
+  readonly resolved?: ResolvedAnchor | null;
 }
 
 export interface ReadCommentsResult {
@@ -90,6 +100,7 @@ export interface ReadCommentsResult {
    */
   readonly unreadable_count: number;
   readonly comments: readonly CommentRecord[];
+  readonly content_blocks?: readonly ContentBlock[];
 }
 
 export interface CommentResult {
@@ -97,6 +108,9 @@ export interface CommentResult {
   readonly comment_id: string;
   readonly author: string;
   readonly created_at: string;
+}
+export interface ReadCommentsOptions {
+  readonly resolve_anchors?: boolean;
 }
 
 export type CommentAnchorInput =
@@ -135,7 +149,8 @@ export interface CommentInput {
 
 export async function readComments(
   relicId: string,
-  deps: PublishDeps
+  deps: PublishDeps,
+  options?: ReadCommentsOptions
 ): Promise<ReadCommentsResult> {
   const state = await localState(relicId);
 
@@ -220,6 +235,16 @@ export async function readComments(
         }`,
       });
     }
+  }
+  if (options?.resolve_anchors === true) {
+    const resolved = await resolveAnchors(relicId, comments, deps);
+    return {
+      relic_id: relicId,
+      count: comments.length,
+      unreadable_count: unreadable,
+      comments: resolved.comments,
+      content_blocks: resolved.imageBlocks,
+    };
   }
 
   return {

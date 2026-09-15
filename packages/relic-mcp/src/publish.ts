@@ -175,6 +175,8 @@ export interface PublishDeps {
   readonly identifySource?: (path: string) => Promise<SourceIdentity>;
   /** Retries on a colliding ID, which format.md 1.4 obliges the client to do. */
   readonly maxCollisionRetries?: number;
+  /** Path to ffmpeg binary, or null to simulate ffmpeg being absent. */
+  readonly ffmpegPath?: string | null;
 }
 
 export interface RepublishToolCall {

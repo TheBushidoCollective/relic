@@ -19,6 +19,11 @@ import {
 import { nodeFiles } from '../src/files.ts';
 import { type PublishDeps, publish } from '../src/publish.ts';
 import {
+  probeFfmpeg,
+  resetFfmpegCacheForTest,
+  runFfmpeg,
+} from '../src/resolve-anchor.ts';
+import {
   COMMENT_TOOL_NAME,
   handleMessage,
   INSTRUCTIONS,
@@ -40,13 +45,20 @@ let deps: PublishDeps;
 let stored: CommentRow[];
 let posted: Record<string, unknown>[];
 let refuseComments: { status: number; body: Record<string, unknown> } | null;
-
+let uploadedContainers: Map<string, Uint8Array>;
+let mintFetchCount: number;
+let containerDownloadCount: number;
+let refuseMint: { status: number; body: Record<string, unknown> } | null;
 beforeEach(async () => {
   scratch = await mkdtemp(join(tmpdir(), 'relic-comments-'));
   process.env['RELIC_PUBLISH_STATE'] = join(scratch, 'publish-state.json');
   stored = [];
   posted = [];
   refuseComments = null;
+  uploadedContainers = new Map();
+  mintFetchCount = 0;
+  containerDownloadCount = 0;
+  refuseMint = null;
   deps = {
     serviceOrigin: SERVICE,
     relicOrigin: SERVICE,
@@ -65,7 +77,53 @@ function commentFetch(): typeof globalThis.fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : String(input));
     if (url.hostname === 'storage.invalid' && init?.method === 'PUT') {
+      if (init?.body) {
+        const bodyBytes =
+          init.body instanceof Uint8Array
+            ? init.body
+            : new Uint8Array(Buffer.from(init.body as ArrayBuffer));
+        const id = url.pathname.replace(/^\/upload\//, '');
+        uploadedContainers.set(id, bodyBytes);
+        uploadedContainers.set(url.pathname, bodyBytes);
+      }
       return new Response(null, { status: 200 });
+    }
+
+    if (
+      url.hostname === 'storage.invalid' &&
+      (!init?.method || init?.method === 'GET')
+    ) {
+      containerDownloadCount++;
+      const id = url.pathname.replace(/^\/download\//, '');
+      const bytes =
+        uploadedContainers.get(id) ??
+        uploadedContainers.get(url.pathname) ??
+        uploadedContainers.get('first') ??
+        uploadedContainers.get('/upload/first') ??
+        new Uint8Array(0);
+      return new Response(Buffer.from(bytes), {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+    }
+
+    if (url.pathname.match(/\/api\/relics\/[^/]+\/mint$/)) {
+      mintFetchCount++;
+      if (refuseMint !== null) {
+        return Response.json(refuseMint.body, { status: refuseMint.status });
+      }
+      const match = url.pathname.match(/\/api\/relics\/([^/]+)\/mint$/);
+      const relicId = match?.[1] ?? 'first';
+      const bytes =
+        uploadedContainers.get(relicId) ??
+        uploadedContainers.get('first') ??
+        uploadedContainers.get('/upload/first') ??
+        new Uint8Array(0);
+      return Response.json({
+        url: `https://storage.invalid/download/${relicId}`,
+        object_length: bytes.length,
+        version: 1,
+      });
     }
     if (url.pathname === '/api/challenge') {
       return Response.json({
@@ -75,9 +133,18 @@ function commentFetch(): typeof globalThis.fetch {
       });
     }
     if (url.pathname === '/api/grant') {
+      let relicId = 'first';
+      if (init?.body) {
+        try {
+          const parsed = JSON.parse(String(init.body)) as { relic_id?: string };
+          if (parsed.relic_id) relicId = parsed.relic_id;
+        } catch {
+          // Default to 'first' if body is not JSON
+        }
+      }
       return Response.json({
         publish_token: 'publish-token-held-only-in-local-state',
-        upload_url: 'https://storage.invalid/upload/first',
+        upload_url: `https://storage.invalid/upload/${relicId}`,
         relic_expires_at: null,
         report_url: `${SERVICE}/abuse`,
         disclosure_url: `${SERVICE}/disclosure`,
@@ -1062,5 +1129,600 @@ describe('timecode parsing and formatting helpers', () => {
 
 afterEach(async () => {
   delete process.env['RELIC_PUBLISH_STATE'];
+  delete process.env['RELIC_FFMPEG_PATH'];
+  resetFfmpegCacheForTest();
   await rm(scratch, { recursive: true, force: true });
+});
+
+describe('comment anchor resolution against decrypted relic content', () => {
+  async function makeSyntheticPng(
+    width: number,
+    height: number,
+    box?: { x: number; y: number; w: number; h: number; color: string }
+  ): Promise<Uint8Array> {
+    const ffmpegPath = await probeFfmpeg(deps);
+    if (!ffmpegPath)
+      throw new Error('ffmpeg is required to build synthetic image fixtures');
+    const filter = box
+      ? `drawbox=x=${box.x}:y=${box.y}:w=${box.w}:h=${box.h}:color=${box.color}:t=fill`
+      : 'null';
+    return await runFfmpeg(
+      ffmpegPath,
+      [
+        '-f',
+        'lavfi',
+        '-i',
+        `color=c=black:s=${width}x${height}`,
+        '-vf',
+        filter,
+        '-frames:v',
+        '1',
+        '-f',
+        'image2',
+        '-c:v',
+        'png',
+        'pipe:1',
+      ],
+      new Uint8Array(0)
+    );
+  }
+
+  async function makeSyntheticMp4(durationSeconds = 2): Promise<Uint8Array> {
+    const ffmpegPath = await probeFfmpeg(deps);
+    if (!ffmpegPath)
+      throw new Error('ffmpeg is required to build synthetic video fixtures');
+    return await runFfmpeg(
+      ffmpegPath,
+      [
+        '-f',
+        'lavfi',
+        '-i',
+        `testsrc=duration=${durationSeconds}:size=160x120:rate=1`,
+        '-c:v',
+        'libx264',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        'frag_keyframe+empty_moov',
+        '-f',
+        'mp4',
+        'pipe:1',
+      ],
+      new Uint8Array(0)
+    );
+  }
+
+  test('synthetic image region crop extracts the exact colored square pixels', async () => {
+    const ffmpegPath = await probeFfmpeg(deps);
+    expect(ffmpegPath).toBeDefined();
+    if (!ffmpegPath) throw new Error('ffmpeg is required for this test');
+
+    // 100x100 black image with a pure red filled square at x=60, y=10, w=30, h=30
+    const pngBytes = await makeSyntheticPng(100, 100, {
+      x: 60,
+      y: 10,
+      w: 30,
+      h: 30,
+      color: 'red',
+    });
+    const imagePath = join(scratch, 'target-test.png');
+    await writeFile(imagePath, pngBytes);
+    const published = await publish(
+      { path: imagePath, filename: 'target-test.png' },
+      deps
+    );
+
+    // Region covers the red box exactly: x=0.6, y=0.1, w=0.3, h=0.3
+    const postResult = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: published.relic_id,
+      body: 'this box should be red',
+      anchor: {
+        kind: 'region',
+        rect: { x: 0.6, y: 0.1, w: 0.3, h: 0.3 },
+      },
+    });
+    expect(postResult['isError']).toBe(false);
+
+    const readResult = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: published.relic_id,
+      resolve_anchors: true,
+    });
+    expect(readResult['isError']).toBe(false);
+
+    const content = readResult['content'] as Array<{
+      type: string;
+      text?: string;
+      data?: string;
+      mimeType?: string;
+    }>;
+    const imageBlocks = content.filter((b) => b.type === 'image');
+    expect(imageBlocks).toHaveLength(2);
+
+    // First image block is the crop: decode it to raw rgb24 pixels
+    const cropBlock = imageBlocks[0];
+    expect(cropBlock?.data).toBeDefined();
+    const cropBytes = new Uint8Array(
+      Buffer.from(cropBlock?.data ?? '', 'base64')
+    );
+    const rawRgb = await runFfmpeg(
+      ffmpegPath,
+      ['-i', 'pipe:0', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'],
+      cropBytes
+    );
+
+    expect(rawRgb.length).toBeGreaterThan(0);
+    let redCount = 0;
+    for (let i = 0; i < rawRgb.length; i += 3) {
+      const r = rawRgb[i] ?? 0;
+      const g = rawRgb[i + 1] ?? 0;
+      const b = rawRgb[i + 2] ?? 0;
+      if (r > 200 && g < 30 && b < 30) {
+        redCount++;
+      }
+    }
+    const totalPixels = rawRgb.length / 3;
+    expect(redCount).toBe(totalPixels);
+
+    const structured = readResult['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+    expect(comments[0]?.['resolved']).toEqual({
+      kind: 'region',
+      status: 'resolved',
+      original_width: 100,
+      original_height: 100,
+      downscaled: false,
+      crop_box_pixels: {
+        x: 60,
+        y: 10,
+        w: 30,
+        h: 30,
+      },
+    });
+  });
+
+  test('returns the right blocks per anchor kind', async () => {
+    const ffmpegPath = await probeFfmpeg(deps);
+    expect(ffmpegPath).toBeDefined();
+
+    // 1. Region on image: returns two image blocks (crop and annotated context)
+    const imageBytes = await makeSyntheticPng(200, 200);
+    const imgPath = join(scratch, 'sample.png');
+    await writeFile(imgPath, imageBytes);
+    const imgRelic = await publish(
+      { path: imgPath, filename: 'sample.png' },
+      deps
+    );
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: imgRelic.relic_id,
+      body: 'look at the corner',
+      anchor: { kind: 'region', rect: { x: 0.1, y: 0.1, w: 0.4, h: 0.4 } },
+    });
+
+    const imgRead = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: imgRelic.relic_id,
+      resolve_anchors: true,
+    });
+    const imgContent = imgRead['content'] as Array<{
+      type: string;
+      text?: string;
+      data?: string;
+    }>;
+    const imgImages = imgContent.filter((b) => b.type === 'image');
+    expect(imgImages).toHaveLength(2);
+
+    // 2. Time span on video: returns two frames (start frame and end frame)
+    const videoBytes = await makeSyntheticMp4(3);
+    const videoPath = join(scratch, 'sample.mp4');
+    await writeFile(videoPath, videoBytes);
+    const videoRelic = await publish(
+      { path: videoPath, filename: 'sample.mp4' },
+      deps
+    );
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: videoRelic.relic_id,
+      body: 'this span is jarring',
+      anchor: { kind: 'time', t: 0, t_end: 1 },
+    });
+
+    const videoRead = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: videoRelic.relic_id,
+      resolve_anchors: true,
+    });
+    const videoContent = videoRead['content'] as Array<{
+      type: string;
+      text?: string;
+      data?: string;
+    }>;
+    const videoImages = videoContent.filter((b) => b.type === 'image');
+    expect(videoImages).toHaveLength(2);
+
+    // 3. Pin on any relic: returns text only with the honest stage-relative explanation
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: imgRelic.relic_id,
+      body: 'general pin mark',
+      anchor: { kind: 'pin', x: 0.25, y: 0.75 },
+    });
+
+    const pinRead = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: imgRelic.relic_id,
+      resolve_anchors: true,
+    });
+    const pinStructured = pinRead['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    const pinComments = pinStructured['comments'] as Array<
+      Record<string, unknown>
+    >;
+    const pinComment = pinComments.find(
+      (c) => (c['anchor'] as { kind?: string })?.kind === 'pin'
+    );
+    expect(pinComment?.['resolved']).toMatchObject({
+      kind: 'pin',
+      status: 'unresolvable',
+      x: 0.25,
+      y: 0.75,
+    });
+    const pinText =
+      (pinRead['content'] as Array<{ type: string; text?: string }>)[0]?.text ??
+      '';
+    expect(pinText).toContain('Pins are placed relative to the viewer stage');
+
+    // 4. Quote on text document: returns text only with quotation and line context
+    const docText =
+      '# System Overview\n\nAll components must have exact tolerances.\n\nEnd of spec.\n';
+    const docPath = join(scratch, 'spec.md');
+    await writeFile(docPath, docText);
+    const docRelic = await publish(
+      { path: docPath, filename: 'spec.md' },
+      deps
+    );
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: docRelic.relic_id,
+      body: 'tighten this rule',
+      anchor: {
+        kind: 'quote',
+        exact: 'exact tolerances',
+        prefix: 'must have ',
+        suffix: '.\n\nEnd',
+      },
+    });
+
+    const docRead = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: docRelic.relic_id,
+      resolve_anchors: true,
+    });
+    const docContent = docRead['content'] as Array<{
+      type: string;
+      text?: string;
+    }>;
+    const docImages = docContent.filter((b) => b.type === 'image');
+    expect(docImages).toHaveLength(0);
+    const docTranscript = docContent[0]?.text ?? '';
+    expect(docTranscript).toContain('Quotation:\n>>> exact tolerances <<<');
+    expect(docTranscript).toContain('Source context (line 3):');
+
+    // 5. Time on audio: returns text only noting that audio has no visual frames
+    const audioPath = join(scratch, 'narration.mp3');
+    await writeFile(
+      audioPath,
+      new Uint8Array([0xff, 0xfb, 0x90, 0x44, 0x00, 0x00])
+    );
+    const audioRelic = await publish(
+      { path: audioPath, filename: 'narration.mp3' },
+      deps
+    );
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: audioRelic.relic_id,
+      body: 'audio pop here',
+      anchor: { kind: 'time', t: 45 },
+    });
+
+    const audioRead = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: audioRelic.relic_id,
+      resolve_anchors: true,
+    });
+    const audioContent = audioRead['content'] as Array<{
+      type: string;
+      text?: string;
+    }>;
+    const audioImages = audioContent.filter((b) => b.type === 'image');
+    expect(audioImages).toHaveLength(0);
+    const audioTranscript = audioContent[0]?.text ?? '';
+    expect(audioTranscript).toContain(
+      'Audio relics have no visual frames to display'
+    );
+
+    // 6. Page on PDF: returns page number and quote with honest notice about server-side PDF rendering
+    const pdfPath = join(scratch, 'brief.pdf');
+    await writeFile(pdfPath, '%PDF-1.4\n%trailer\n');
+    const pdfRelic = await publish(
+      { path: pdfPath, filename: 'brief.pdf' },
+      deps
+    );
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: pdfRelic.relic_id,
+      body: 'check header on page 4',
+      anchor: { kind: 'page', page: 4, exact: 'Revenue Summary' },
+    });
+
+    const pdfRead = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: pdfRelic.relic_id,
+      resolve_anchors: true,
+    });
+    const pdfContent = pdfRead['content'] as Array<{
+      type: string;
+      text?: string;
+    }>;
+    const pdfImages = pdfContent.filter((b) => b.type === 'image');
+    expect(pdfImages).toHaveLength(0);
+    const pdfTranscript = pdfContent[0]?.text ?? '';
+    expect(pdfTranscript).toContain(
+      'server-side PDF page rendering is omitted'
+    );
+    expect(pdfTranscript).toContain(
+      'Quotation on page 4:\n>>> Revenue Summary <<<'
+    );
+  });
+
+  test('unresolvable anchor returns description with honest explanation and no image block', async () => {
+    const docPath = join(scratch, 'v1.md');
+    await writeFile(docPath, '# Heading\n\nShort initial text.\n');
+    const relic = await publish({ path: docPath, filename: 'v1.md' }, deps);
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      body: 'this paragraph is missing',
+      anchor: {
+        kind: 'text',
+        quote: 'paragraph that does not exist in the file',
+      },
+    });
+
+    const readResult = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      resolve_anchors: true,
+    });
+    expect(readResult['isError']).toBe(false);
+
+    const content = readResult['content'] as Array<{
+      type: string;
+      text?: string;
+    }>;
+    const imageBlocks = content.filter((b) => b.type === 'image');
+    expect(imageBlocks).toHaveLength(0);
+
+    const transcript = content[0]?.text ?? '';
+    expect(transcript).toContain(
+      'on "paragraph that does not exist in the file"'
+    );
+    expect(transcript).toContain(
+      'The quoted text was not found in the current relic content'
+    );
+  });
+
+  test('ffmpeg being absent degrades to text and does not throw', async () => {
+    const pngBytes = await makeSyntheticPng(100, 100);
+    const imagePath = join(scratch, 'fallback.png');
+    await writeFile(imagePath, pngBytes);
+    const relic = await publish(
+      { path: imagePath, filename: 'fallback.png' },
+      deps
+    );
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      body: 'inspect this edge',
+      anchor: { kind: 'region', rect: { x: 0.2, y: 0.2, w: 0.5, h: 0.5 } },
+    });
+
+    // Simulate ffmpeg being unavailable
+    const depsWithoutFfmpeg: PublishDeps = {
+      ...deps,
+      ffmpegPath: null,
+    };
+
+    const response = await handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'tools/call',
+        params: {
+          name: READ_COMMENTS_TOOL_NAME,
+          arguments: { relic_id: relic.relic_id, resolve_anchors: true },
+        },
+      },
+      depsWithoutFfmpeg
+    );
+
+    expect(response?.result).toBeDefined();
+    const result = response?.result as Record<string, unknown>;
+    expect(result['isError']).toBe(false);
+
+    const content = result['content'] as Array<{ type: string; text?: string }>;
+    const imageBlocks = content.filter((b) => b.type === 'image');
+    expect(imageBlocks).toHaveLength(0);
+
+    const transcript = content[0]?.text ?? '';
+    expect(transcript).toContain('ffmpeg is not available on this machine');
+  });
+
+  test('N comments on one relic cause exactly one fetch', async () => {
+    const docPath = join(scratch, 'shared.md');
+    await writeFile(
+      docPath,
+      '# Shared doc\n\nFirst line.\nSecond line.\nThird line.\n'
+    );
+    const relic = await publish({ path: docPath, filename: 'shared.md' }, deps);
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      body: 'comment one',
+      anchor: { kind: 'text', quote: 'First line.' },
+    });
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      body: 'comment two',
+      anchor: { kind: 'text', quote: 'Second line.' },
+    });
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      body: 'comment three',
+      anchor: { kind: 'text', quote: 'Third line.' },
+    });
+
+    expect(mintFetchCount).toBe(0);
+    expect(containerDownloadCount).toBe(0);
+
+    const readResult = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      resolve_anchors: true,
+    });
+    expect(readResult['isError']).toBe(false);
+
+    // Exactly one mint and one container download occurred for all three comments
+    expect(mintFetchCount).toBe(1);
+    expect(containerDownloadCount).toBe(1);
+
+    const structured = readResult['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+    expect(comments).toHaveLength(3);
+    expect(comments[0]?.['resolved']).toMatchObject({
+      status: 'resolved',
+      exact: 'First line.',
+    });
+    expect(comments[1]?.['resolved']).toMatchObject({
+      status: 'resolved',
+      exact: 'Second line.',
+    });
+    expect(comments[2]?.['resolved']).toMatchObject({
+      status: 'resolved',
+      exact: 'Third line.',
+    });
+  });
+
+  test('cost gate: with resolution off, no fetch happens', async () => {
+    const docPath = join(scratch, 'gated.md');
+    await writeFile(docPath, '# Gated\n\nContent here.\n');
+    const relic = await publish({ path: docPath, filename: 'gated.md' }, deps);
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      body: 'comment on gated content',
+      anchor: { kind: 'text', quote: 'Content here.' },
+    });
+
+    // Read without resolve_anchors (default: false)
+    const readDefault = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relic.relic_id,
+    });
+    expect(readDefault['isError']).toBe(false);
+    expect(mintFetchCount).toBe(0);
+    expect(containerDownloadCount).toBe(0);
+
+    // Read with explicit resolve_anchors: false
+    const readExplicitFalse = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      resolve_anchors: false,
+    });
+    expect(readExplicitFalse['isError']).toBe(false);
+    expect(mintFetchCount).toBe(0);
+    expect(containerDownloadCount).toBe(0);
+
+    const structured = readDefault['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+    expect(comments[0]?.['resolved']).toBeUndefined();
+  });
+
+  test('downscales large image regions exceeding byte cap and reports notice in text', async () => {
+    const ffmpegPath = await probeFfmpeg(deps);
+    expect(ffmpegPath).toBeDefined();
+
+    // Create 1600x1200 image (width exceeds MAX_IMAGE_DIMENSION of 1200)
+    const largePng = await makeSyntheticPng(1600, 1200, {
+      x: 100,
+      y: 100,
+      w: 400,
+      h: 300,
+      color: 'blue',
+    });
+    const largePath = join(scratch, 'large.png');
+    await writeFile(largePath, largePng);
+    const relic = await publish(
+      { path: largePath, filename: 'large.png' },
+      deps
+    );
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      body: 'large image inspection',
+      anchor: { kind: 'region', rect: { x: 0.1, y: 0.1, w: 0.5, h: 0.5 } },
+    });
+
+    const readResult = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relic.relic_id,
+      resolve_anchors: true,
+    });
+    expect(readResult['isError']).toBe(false);
+
+    const structured = readResult['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+    const resolved = comments[0]?.['resolved'] as Record<string, unknown>;
+    expect(resolved['downscaled']).toBe(true);
+    expect(resolved['original_width']).toBe(1600);
+    expect(resolved['original_height']).toBe(1200);
+
+    const content = readResult['content'] as Array<{
+      type: string;
+      text?: string;
+      data?: string;
+    }>;
+    const transcript = content[0]?.text ?? '';
+    expect(transcript).toContain('Downscaled from 1600x1200');
+  });
+
+  test('dead or expired relic returns unresolvable notice without throwing', async () => {
+    const relicId = await publishFixture();
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'comment on dying relic',
+      anchor: { kind: 'text', quote: 'under review' },
+    });
+
+    // Simulate 410 Gone on mint
+    refuseMint = { status: 410, body: { code: 'relic_expired' } };
+
+    const readResult = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relicId,
+      resolve_anchors: true,
+    });
+    expect(readResult['isError']).toBe(false);
+
+    const content = readResult['content'] as Array<{
+      type: string;
+      text?: string;
+    }>;
+    const imageBlocks = content.filter((b) => b.type === 'image');
+    expect(imageBlocks).toHaveLength(0);
+
+    const transcript = content[0]?.text ?? '';
+    expect(transcript).toContain('expired');
+  });
 });
