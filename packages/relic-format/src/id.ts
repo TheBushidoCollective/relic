@@ -44,6 +44,11 @@ export const RESERVED_SEGMENTS: readonly string[] = [
   // Folds to `1nsta11` under lookup normalization, so the table is doing real
   // work here even though length already excludes it.
   'install',
+  // Folds to `dashb0ard` under lookup normalization. Adding both `dashboard`
+  // and `dashb0ard` ensures the path cannot collide with relic IDs and that
+  // routers matching raw URL segments reserve both spellings.
+  'dashboard',
+  'dashb0ard',
 ];
 
 const RESERVED_NORMALIZED = new Set(

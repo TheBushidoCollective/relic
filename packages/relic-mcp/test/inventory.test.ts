@@ -17,7 +17,9 @@ import {
   encryptRelic,
   generateKey,
   generateRelicId,
+  parseFragment,
 } from '@relic/format';
+import { MNEMONIC_WORDS, mnemonicToKey } from '@relic/format/mnemonic';
 import { createApp, type RelicApp } from '@relic/server/src/app.ts';
 import { MemoryStorage } from '@relic/server/src/storage.ts';
 import { MemoryStore } from '@relic/server/src/store.ts';
@@ -26,8 +28,11 @@ import { type FileReader, type PublishDeps, publish } from '../src/publish.ts';
 import { republish } from '../src/republish.ts';
 import {
   handleMessage,
+  KEY_PHRASE_DISCLOSURE,
   LIST_TOOL_NAME,
+  REPUBLISH_TOOL_NAME,
   SHOW_TOOL_NAME,
+  TOOL_NAME,
 } from '../src/server.ts';
 import { publishStatePath } from '../src/state.ts';
 
@@ -686,6 +691,79 @@ describe('relic_show reads back what a link holds', () => {
     expect(text).toContain('relic_republish');
     expect(text).toContain('every version it has ever held');
     expect(text).toContain('# brief');
+    expect(text).toContain('key phrase:');
+    expect(text).toContain(KEY_PHRASE_DISCLOSURE);
+  });
+
+  test('relic_show carries key_phrase and disclosure while relic_list does not', async () => {
+    const relicId = await publishFile('memo.md', '# memo\n');
+
+    const showResult = await callTool(SHOW_TOOL_NAME, {
+      relic_id: relicId,
+    });
+    const showStructured = showResult['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    expect(typeof showStructured['key_phrase']).toBe('string');
+    const showPhraseWords = (showStructured['key_phrase'] as string).split(' ');
+    expect(showPhraseWords.length).toBe(MNEMONIC_WORDS);
+
+    const shareUrl = showStructured['share_url'] as string;
+    const fragment = shareUrl.split('#')[1] as string;
+    const decodedKey = parseFragment(fragment).key;
+    expect(mnemonicToKey(showPhraseWords)).toEqual(decodedKey);
+    const listResult = await callTool(LIST_TOOL_NAME, {});
+    const listStructured = listResult['structuredContent'] as {
+      relics: Record<string, unknown>[];
+    };
+    expect(listStructured.relics.length).toBeGreaterThanOrEqual(1);
+    for (const row of listStructured.relics) {
+      expect(row['key_phrase']).toBeUndefined();
+    }
+    const listText = JSON.stringify(listResult['content']);
+    expect(listText).not.toContain(KEY_PHRASE_DISCLOSURE);
+  });
+
+  test('publish and republish results carry key_phrase that round-trips to fragment key and carries disclosure', async () => {
+    disk.set('/work/doc.md', new TextEncoder().encode('# doc\n'));
+    const pubResult = await callTool(TOOL_NAME, {
+      path: '/work/doc.md',
+    });
+    const pubStructured = pubResult['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    expect(pubResult['isError']).toBe(false);
+    expect(typeof pubStructured['key_phrase']).toBe('string');
+    const pubWords = (pubStructured['key_phrase'] as string).split(' ');
+    expect(pubWords.length).toBe(MNEMONIC_WORDS);
+    const pubUrl = pubStructured['url'] as string;
+    const pubFragment = pubUrl.split('#')[1] as string;
+    const pubKey = parseFragment(pubFragment).key;
+    expect(mnemonicToKey(pubWords)).toEqual(pubKey);
+
+    const pubText = JSON.stringify(pubResult['content']);
+    expect(pubText).toContain(pubStructured['key_phrase'] as string);
+    expect(pubText).toContain(KEY_PHRASE_DISCLOSURE);
+
+    disk.set('/work/doc.md', new TextEncoder().encode('# doc v2\n'));
+    const repubResult = await callTool(REPUBLISH_TOOL_NAME, {
+      relic_id: pubStructured['relic_id'],
+      path: '/work/doc.md',
+    });
+    const repubStructured = repubResult['structuredContent'] as Record<
+      string,
+      unknown
+    >;
+    expect(typeof repubStructured['key_phrase']).toBe('string');
+    const repubWords = (repubStructured['key_phrase'] as string).split(' ');
+    expect(repubWords.length).toBe(MNEMONIC_WORDS);
+    expect(mnemonicToKey(repubWords)).toEqual(pubKey);
+
+    const repubText = JSON.stringify(repubResult['content']);
+    expect(repubText).toContain(repubStructured['key_phrase'] as string);
+    expect(repubText).toContain(KEY_PHRASE_DISCLOSURE);
   });
 });
 
