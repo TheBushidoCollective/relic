@@ -661,6 +661,12 @@ const CLASS_FALLBACK: Readonly<Record<RendererClass, string>> = {
   code: 'text/plain',
   html: 'text/html',
   jsx: 'text/jsx',
+  // Declared precisely rather than as octet-stream, unlike the other binary
+  // formats below it. The viewer routes a pdf to a renderer, and the sniffed
+  // and declared classes are reconciled by taking the least privileged of the
+  // two, so an octet-stream fallback here would demote a real PDF to a
+  // download whenever the publishing client could not read an extension.
+  pdf: 'application/pdf',
   image: 'application/octet-stream',
   media: 'application/octet-stream',
   archive: 'application/octet-stream',
