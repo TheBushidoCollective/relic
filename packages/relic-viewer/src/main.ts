@@ -2404,8 +2404,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       keyboardRect = { x: 0.35, y: 0.35, w: 0.3, h: 0.3 };
       const kbox = document.createElement('div');
       kbox.className = 'comment-region is-drawing is-pending is-keyboard';
-      const pins = surface.querySelector('.comment-pins') || surface;
-      pins.appendChild(kbox);
+      surface.appendChild(kbox);
       keyboardBox = kbox;
 
       const box = boxFromUnit(s, keyboardRect);
@@ -2588,12 +2587,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     if (drawingBox === undefined) {
       drawingBox = document.createElement('div');
       drawingBox.className = 'comment-region is-drawing is-pending';
-      const pins = host.querySelector('.comment-pins');
-      if (pins instanceof HTMLElement) {
-        pins.appendChild(drawingBox);
-      } else {
-        host.appendChild(drawingBox);
-      }
+      host.appendChild(drawingBox);
     }
 
     const current = unitFromPointer(surface, event.clientX, event.clientY);
@@ -2693,12 +2687,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     if (drawingBox === undefined) {
       drawingBox = document.createElement('div');
       drawingBox.className = 'comment-region is-drawing is-pending';
-      const pins = host.querySelector('.comment-pins');
-      if (pins instanceof HTMLElement) {
-        pins.appendChild(drawingBox);
-      } else {
-        host.appendChild(drawingBox);
-      }
+      host.appendChild(drawingBox);
     }
 
     const current = unitFromPointer(surface, touch.clientX, touch.clientY);
@@ -2857,13 +2846,15 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     target: () => anchor,
     clear,
     attach: (next) => {
-      // Both belonged to the stage that is being replaced.
-      dismiss();
-      disarm();
-      teardownStage?.();
-      teardownStage = undefined;
-      disarmSpan();
-      host = next;
+      const stageChanged = host !== next;
+      if (stageChanged) {
+        dismiss();
+        disarm();
+        teardownStage?.();
+        teardownStage = undefined;
+        disarmSpan();
+        host = next;
+      }
 
       if (
         next.querySelector('.doc-download') !== null ||
@@ -3069,7 +3060,25 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
 
       // Repaint on resize and on image load so unit-coordinate regions update
       // whenever the content box dimensions change.
+      const updateKeyboardBox = (): void => {
+        if (keyboardBox !== undefined && keyboardRect !== undefined) {
+          const s = anchorSurfaceFor(host ?? next);
+          if (s) {
+            const box = boxFromUnit(s, keyboardRect);
+            if (box) {
+              keyboardBox.style.left = `${box.left}px`;
+              keyboardBox.style.top = `${box.top}px`;
+              keyboardBox.style.width = `${box.width}px`;
+              keyboardBox.style.height = `${box.height}px`;
+            }
+          }
+        }
+      };
+
+      // Repaint on resize and on image load so unit-coordinate regions update
+      // whenever the content box dimensions change.
       const onResize = (): void => {
+        updateKeyboardBox();
         deps.repaint();
       };
       window.addEventListener('resize', onResize);
@@ -3077,6 +3086,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       let ro: ResizeObserver | undefined;
       if (typeof ResizeObserver !== 'undefined') {
         ro = new ResizeObserver(() => {
+          updateKeyboardBox();
           deps.repaint();
         });
         ro.observe(next);
@@ -3090,6 +3100,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       let onImgLoad: (() => void) | undefined;
       if (isImageElement(img) && 'complete' in img && !img.complete) {
         onImgLoad = (): void => {
+          updateKeyboardBox();
           deps.repaint();
         };
         img.addEventListener('load', onImgLoad);

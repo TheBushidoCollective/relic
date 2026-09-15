@@ -387,6 +387,8 @@ export interface Mounted {
   chip(): string;
   /** The plaintext of the posted comment, anchor included. */
   post(body: string): Promise<{ anchor?: unknown }>;
+  /** Repaints the stage to simulate repaints between user actions. */
+  readonly repaint: () => void;
 }
 
 /**
@@ -519,6 +521,7 @@ export async function mount(
     stage,
     content,
     chip: () => textOf(only(thread, 'compose-target')),
+    repaint: () => handle.attach(stage as unknown as HTMLElement),
     post: async (body: string) => {
       const box = only(thread, 'compose-textarea');
       box.value = body;

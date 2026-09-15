@@ -13,6 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { MARK_REGION_HINT } from '../src/main.ts';
 import {
   clearDom,
   documentNode,
@@ -22,10 +23,7 @@ import {
   select,
   textOf,
   withClass,
-  type Mounted,
-  Node,
 } from './annotate.test.ts';
-import { MARK_PIN_HINT, MARK_REGION_HINT } from '../src/main.ts';
 
 describe('authoring discoverability and honesty per artifact class', () => {
   beforeEach(installDom);
@@ -40,7 +38,10 @@ describe('authoring discoverability and honesty per artifact class', () => {
 
     const hints = withClass(mounted.thread, 'thread-hint');
     expect(hints).toHaveLength(1);
-    expect(textOf(hints[0]!)).toBe('Select text in document to quote');
+    const firstHint = hints[0];
+    expect(firstHint ? textOf(firstHint) : '').toBe(
+      'Select text in document to quote'
+    );
 
     const pinBtn = only(mounted.thread, 'mark-mode');
     expect(textOf(pinBtn)).toBe('Point at something');
@@ -108,7 +109,10 @@ describe('authoring discoverability and honesty per artifact class', () => {
 
     const hints = withClass(mounted.thread, 'thread-hint');
     expect(hints).toHaveLength(1);
-    expect(textOf(hints[0]!)).toBe('Select text inside document to quote');
+    const firstHint = hints[0];
+    expect(firstHint ? textOf(firstHint) : '').toBe(
+      'Select text inside document to quote'
+    );
 
     expect(withClass(mounted.thread, 'mark-time')).toHaveLength(0);
   });
@@ -188,6 +192,50 @@ describe('keyboard reachability and mark activation', () => {
     expect(mounted.stage.classes()).not.toContain('is-pinning');
     expect(withClass(mounted.stage, 'is-keyboard')).toHaveLength(0);
     expect(mounted.chip()).not.toContain('Commenting on the whole document');
+  });
+
+  test('keyboard region aiming survives a repaint between arming and the keypress', async () => {
+    const mounted = await mount({
+      filename: 'diagram.png',
+      declaredMimetype: 'image/png',
+      route: 'image',
+    });
+
+    const img = only(mounted.stage, 'relic-image');
+    img.rect = {
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      width: 800,
+      height: 600,
+    };
+
+    // Arm region mode
+    const modeBtn = only(mounted.thread, 'mark-mode');
+    modeBtn.dispatch('click');
+
+    expect(withClass(mounted.stage, 'is-keyboard')).toHaveLength(1);
+
+    // Repaint happens between arming and the keypress
+    mounted.repaint();
+    // Keyboard box must survive and remain attached
+    expect(withClass(mounted.stage, 'is-keyboard')).toHaveLength(1);
+
+    // Press ArrowRight, ArrowDown, Shift+ArrowRight
+    documentNode.dispatch('keydown', { key: 'ArrowRight' });
+    documentNode.dispatch('keydown', { key: 'ArrowDown' });
+    documentNode.dispatch('keydown', { key: 'ArrowRight', shiftKey: true });
+
+    // Press Enter to commit region target
+    documentNode.dispatch('keydown', { key: 'Enter' });
+
+    expect(mounted.stage.classes()).not.toContain('is-pinning');
+    expect(withClass(mounted.stage, 'is-keyboard')).toHaveLength(0);
+    expect(mounted.chip()).not.toContain('Commenting on the whole document');
+    expect(
+      withClass(mounted.stage, 'is-pending').length
+    ).toBeGreaterThanOrEqual(1);
   });
 });
 
