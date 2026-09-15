@@ -1775,6 +1775,17 @@ function renderComparison(
       return;
     }
 
+    // The heading was written before the fetch, when nothing knew whether a
+    // comparison was possible. Now it does, so it is corrected rather than
+    // left claiming to compare above a page showing one version.
+    const comparable =
+      diffModeForRoutes(current.route, historical.view.route) !== undefined;
+    scaffold.headline.textContent = versionHistoryCopy(
+      current.version,
+      selectedVersion,
+      comparable
+    ).headline;
+
     scaffold.result.replaceChildren(
       renderLoadedVersion(
         current,

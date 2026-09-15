@@ -89,12 +89,24 @@ export interface VersionHistoryCopy {
   readonly detail: string;
 }
 
+/**
+ * The panel's heading and standing note.
+ *
+ * `comparable` decides the verb, and it has to: the heading is written before
+ * the version is fetched, so it used to say "Comparing version 1 with version
+ * 2" above a page that then explained no comparison was possible and showed
+ * version 1 alone. The detail line is true either way, because retained
+ * history is retained history whether or not it can be diffed.
+ */
 export function versionHistoryCopy(
   currentVersion: number,
-  historicalVersion: number
+  historicalVersion: number,
+  comparable = true
 ): VersionHistoryCopy {
   return {
-    headline: `Comparing version ${historicalVersion} with version ${currentVersion}`,
+    headline: comparable
+      ? `Comparing version ${historicalVersion} with version ${currentVersion}`
+      : `Version ${historicalVersion} of ${currentVersion}`,
     detail:
       `Version ${currentVersion} is current. Version ${historicalVersion} is ` +
       'retained history and may contain content removed from the current artifact.',
