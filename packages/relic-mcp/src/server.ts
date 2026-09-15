@@ -24,6 +24,7 @@ import {
   type CommentAnchorInput,
   type CommentRecord,
   describeAnchor,
+  formatTimecode,
   postComment,
   readComments,
 } from './comments.ts';
@@ -721,6 +722,11 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
     'Each comment can be a remark on the relic as a whole or an exact mark: ' +
     'a text quote with surrounding context, a stage pin, an artifact region, ' +
     'a timestamp or span in audio or video, or a page in a document. ' +
+    'Pass `resolve_anchors: true` to fetch and decrypt the relic content and ' +
+    'resolve anchors against the actual content (source context runs for quotes, ' +
+    'crops and annotated views for image regions, and extracted video frames). ' +
+    'This defaults to false because content resolution spends a signed download ' +
+    'URL mint and download quota. ' +
     COMMENT_MACHINE_BOUNDARY +
     ' Takes the relic id, never the share URL: the URL carries the key in ' +
     'its fragment. A comment that will not decrypt is returned marked ' +
@@ -732,6 +738,14 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
       relic_id: {
         type: 'string',
         description: 'The 26-character relic id the original publish returned.',
+      },
+      resolve_anchors: {
+        type: 'boolean',
+        description:
+          'Whether to fetch and decrypt the relic to resolve anchors against the actual content ' +
+          '(e.g. text quotes with surrounding source context, image region crops and annotated views, video frames). ' +
+          'Defaults to false because resolving content mints a signed download URL and fetches the ciphertext, ' +
+          'which consumes download quota and bandwidth.',
       },
     },
     required: ['relic_id'],
@@ -812,6 +826,11 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             },
             readable: { type: 'boolean' },
             unreadable_reason: { type: ['string', 'null'] },
+            resolved: {
+              type: ['object', 'null'],
+              description:
+                'The resolved content and status for this anchor, when resolve_anchors is enabled.',
+            },
           },
           required: [
             'comment_id',
@@ -1729,14 +1748,38 @@ async function callReadComments(
       '`relic_id` is required and must be a string'
     );
   }
+  const rawResolve = args['resolve_anchors'];
+  if (rawResolve !== undefined && typeof rawResolve !== 'boolean') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`resolve_anchors` must be a boolean or omitted'
+    );
+  }
+  const resolveAnchors = rawResolve === true;
 
   try {
-    const result = await readComments(relicId, deps);
+    const result = await readComments(relicId, deps, {
+      resolve_anchors: resolveAnchors,
+    });
+    const content: Array<
+      | { type: 'text'; text: string }
+      | { type: 'image'; data: string; mimeType: string }
+    > = [{ type: 'text', text: commentTranscript(result) }];
+
+    if (result.content_blocks) {
+      for (const block of result.content_blocks) {
+        if (block.type === 'image') {
+          content.push(block);
+        }
+      }
+    }
+
     return {
       jsonrpc: '2.0',
       id,
       result: {
-        content: [{ type: 'text', text: commentTranscript(result) }],
+        content,
         structuredContent: result,
         isError: false,
       },
@@ -1836,6 +1879,61 @@ async function callComment(
 function markLine(anchor: CommentRecord['anchor']): string {
   return `${describeAnchor(anchor)}\n`;
 }
+function resolutionLine(resolved: CommentRecord['resolved']): string {
+  if (!resolved) return '';
+
+  switch (resolved.kind) {
+    case 'quote':
+    case 'text':
+      if (resolved.status === 'resolved') {
+        return (
+          `Quotation:\n>>> ${resolved.exact} <<<\n\n` +
+          `Source context (line ${resolved.line}):\n` +
+          `...${resolved.context_before}>>> ${resolved.exact} <<<${resolved.context_after}...\n\n`
+        );
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'region':
+      if (resolved.status === 'resolved') {
+        const downscaleNotice = resolved.downscaled
+          ? ` Downscaled from ${resolved.original_width}x${resolved.original_height} to bound payload size.`
+          : '';
+        return (
+          `[Resolution: Image region crop (${resolved.crop_box_pixels.w}x${resolved.crop_box_pixels.h}px) ` +
+          `and annotated context view attached below as image blocks.${downscaleNotice}]\n`
+        );
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'time':
+      if (resolved.status === 'resolved') {
+        const downscaleNotice = resolved.downscaled
+          ? ' Downscaled to bound payload size.'
+          : '';
+        return `[Resolution: ${
+          resolved.explanation ??
+          `Video frame(s) at ${formatTimecode(resolved.t)} attached below as image blocks.`
+        }${downscaleNotice}]\n`;
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'page':
+      if (resolved.exact) {
+        return (
+          `[Resolution note: ${resolved.explanation}]\n` +
+          `Quotation on page ${resolved.page}:\n>>> ${resolved.exact} <<<\n`
+        );
+      }
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'pin':
+      return `[Resolution note: ${resolved.explanation}]\n`;
+
+    case 'unsupported':
+      return `[Resolution note: ${resolved.explanation}]\n`;
+  }
+}
 
 /**
  * The comments as a person would read them, because a JSON array of rows is
@@ -1868,7 +1966,8 @@ function commentTranscript(result: {
     // transcript that printed the remark and withheld the line it points at
     // would be the same defect this fixed, one layer up.
     const mark = markLine(comment.anchor);
-    return `${comment.created_at} ${who}:\n${mark}${comment.body}`;
+    const resolution = resolutionLine(comment.resolved);
+    return `${comment.created_at} ${who}:\n${mark}${resolution}${comment.body}`;
   });
 
   const header =
