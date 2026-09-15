@@ -182,12 +182,12 @@ tarball, so the version can never disagree with itself.
 ### Claude Code, server only
 
 ```bash
-claude mcp add relic \
-  --env RELIC_SERVICE_ORIGIN=https://relik.link \
-  -- npx -y relic-mcp@latest
+claude mcp add relic -- npx -y relic-mcp@latest
 ```
 
-No clone and no build step. `npx` fetches on first use and caches.
+No clone and no build step. `npx` fetches on first use and caches. It
+publishes to the hosted service at `https://relik.link`; to publish to your
+own, see [Publishing to your own service](#publishing-to-your-own-service).
 
 Then ask your agent to publish something: *"publish ./report.md as a relic."*
 
@@ -201,19 +201,41 @@ this. The key names differ; the shape does not.
   "mcpServers": {
     "relic": {
       "command": "npx",
-      "args": ["-y", "relic-mcp@latest"],
-      "env": {
-        "RELIC_SERVICE_ORIGIN": "https://relik.link"
-      }
+      "args": ["-y", "relic-mcp@latest"]
     }
   }
 }
 ```
 
+### Publishing to your own service
+
+Everything above publishes to the hosted service. Point the client at a
+deployment of your own with `RELIC_SERVICE_ORIGIN`:
+
+```bash
+claude mcp add relic \
+  --env RELIC_SERVICE_ORIGIN=https://relic.your-domain.example \
+  -- npx -y relic-mcp@latest
+```
+
+The variable is validated, not merely read: it has to be `https`, or a
+loopback host for development, because the grant that authorizes an upload
+travels over it even though the plaintext never does.
+
+**A self-hosted deployment serves this instruction itself.** Its own
+`/install` page carries the variable and the hosted one does not, from a
+single constant, so the two cannot drift into a page that tells a reader to
+configure the host they are already on.
+
+Leaving it unset publishes to the hosted service, which is why
+`relic_publish` returns the URL it created and `relic_describe_client` names
+the origin it is pointed at. If you self-host and forget the variable, the
+destination is visible in the answer rather than buried in a config file.
+
 ### Over HTTP instead of stdio
 
 ```bash
-RELIC_MCP_HTTP=1 RELIC_SERVICE_ORIGIN=https://... npx -y relic-mcp@latest
+RELIC_MCP_HTTP=1 npx -y relic-mcp@latest
 # -> http://127.0.0.1:7333/mcp
 ```
 
@@ -227,7 +249,7 @@ browser callers, and an origin outside it is refused to defeat DNS rebinding.
 
 | Variable | Meaning |
 |---|---|
-| `RELIC_SERVICE_ORIGIN` | The Relic service to publish to. Required in practice. |
+| `RELIC_SERVICE_ORIGIN` | The Relic service to publish to. Unset means the hosted service, `https://relik.link`. |
 | `RELIC_ORIGIN` | Origin used to build the shareable URL. Defaults to the service origin. |
 | `RELIC_CLIENT_NAME` | Reported to the service as the publishing client. |
 | `RELIC_MCP_HTTP` | `1` to serve Streamable HTTP instead of stdio. |

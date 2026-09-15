@@ -17,6 +17,7 @@
 import {
   encryptedSize,
   InvalidRelicIdError,
+  isHostedService,
   isRendererClass,
   isStorableTitle,
   MAX_HEADER_BYTES,
@@ -1809,6 +1810,11 @@ async function shell(
  */
 export function landingPage(config: RelicConfig): Response {
   const origin = escapeHtml(new URL(config.serviceOrigin).origin);
+  // The hosted service does not ask a reader to configure which host they are
+  // already using. A self-hosted deployment has to, because its client would
+  // otherwise resolve the hosted default and publish to the wrong place, so
+  // the same page carries the variable there and omits it here.
+  const hosted = isHostedService(config.serviceOrigin);
   const body = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1948,9 +1954,13 @@ export function landingPage(config: RelicConfig): Response {
 
   <h2>Claude Code</h2>
   <p>One command. <code>npx</code> fetches the server on first use and caches it.</p>
-  <pre><code>claude mcp add relic \\
+  <pre><code>claude mcp add relic ${
+    hosted
+      ? ''
+      : `\\
   --env RELIC_SERVICE_ORIGIN=${origin} \\
-  -- npx -y relic-mcp@latest</code></pre>
+  `
+  }-- npx -y relic-mcp@latest</code></pre>
 
   <h2>Claude Code, as a plugin</h2>
   <p>The npm package is the plugin, so the version can never disagree with
@@ -1966,18 +1976,17 @@ claude plugin install relic@relic</code></pre>
   "mcpServers": {
     "relic": {
       "command": "npx",
-      "args": ["-y", "relic-mcp@latest"],
+      "args": ["-y", "relic-mcp@latest"]${
+        hosted
+          ? ''
+          : `,
       "env": {
         "RELIC_SERVICE_ORIGIN": "${origin}"
+      }`
       }
     }
   }
 }</code></pre>
-
-  <h2>Why the origin is required</h2>
-  <p>The server ships with no default origin. An unset value fails at startup
-  and names the variable, instead of surfacing later as a DNS error on your
-  first publish.</p>
 
   <h2>What leaves your machine</h2>
   <div class="note">

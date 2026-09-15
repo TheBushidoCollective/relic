@@ -4,9 +4,7 @@ Publish a file as an encrypted relic and get back a shareable link. The
 encryption key is generated on your machine and is never sent to the service.
 
 ```bash
-claude mcp add relic \
-  --env RELIC_SERVICE_ORIGIN=https://relik.link \
-  -- npx -y relic-mcp@latest
+claude mcp add relic -- npx -y relic-mcp@latest
 ```
 
 Then: *"publish ./report.md as a relic."*
@@ -18,8 +16,7 @@ For any client that takes a JSON config:
   "mcpServers": {
     "relic": {
       "command": "npx",
-      "args": ["-y", "relic-mcp@latest"],
-      "env": { "RELIC_SERVICE_ORIGIN": "https://relik.link" }
+      "args": ["-y", "relic-mcp@latest"]
     }
   }
 }
@@ -166,7 +163,7 @@ binding the tarball to a specific commit and workflow.
 
 | Variable | Meaning |
 |---|---|
-| `RELIC_SERVICE_ORIGIN` | The Relic service to publish to. |
+| `RELIC_SERVICE_ORIGIN` | The Relic service to publish to. Unset means the hosted service, `https://relik.link`. Set it to publish to your own. |
 | `RELIC_ORIGIN` | Origin used to build the shareable URL. Defaults to the above. |
 | `RELIC_CLIENT_NAME` | Reported to the service as the publishing client. |
 | `RELIC_PUBLISH_STATE` | Where the publish state file lives. Defaults to `$XDG_CONFIG_HOME/relic-mcp/publish-state.json`, or `~/.config/relic-mcp/publish-state.json`. |
