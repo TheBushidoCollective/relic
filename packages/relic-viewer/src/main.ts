@@ -2265,8 +2265,10 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     const said = document.createElement('p');
     said.className = 'mark-hint';
     said.setAttribute('aria-live', 'polite');
-    said.textContent = MARK_PIN_HINT;
-    // On the stage rather than in the sidebar, and out of flow. The reader is
+    const isImg = surface.querySelector('img.relic-image') !== null;
+    said.textContent = isImg
+      ? 'Click to place a point, or drag to select a region'
+      : MARK_PIN_HINT;
     // looking at the document, the sidebar is not on the row at all at narrow
     // width, and a hint that took layout space would shift the line under the
     // cursor between arming and the click that places the point.
@@ -2469,6 +2471,111 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       aim({ kind: 'region', rect });
     }
   };
+  const onTouchStart = (event: TouchEvent): void => {
+    if (!armed()) return;
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch || !(event.target instanceof Element)) return;
+    if (
+      event.target.closest(
+        '.comment-pin, .comment-region, .mark-bubble, .thread'
+      )
+    ) {
+      return;
+    }
+    if (host === undefined) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined || !isImageElement(surface.content)) return;
+
+    const start = unitFromPointer(surface, touch.clientX, touch.clientY);
+    if (start === undefined) return;
+
+    dragOrigin = {
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      unit: start,
+    };
+    isDragging = false;
+    suppressClick = false;
+  };
+
+  const onTouchMove = (event: TouchEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    if (event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const surface = anchorSurfaceFor(host);
+    if (surface === undefined) return;
+
+    const dx = touch.clientX - dragOrigin.clientX;
+    const dy = touch.clientY - dragOrigin.clientY;
+    if (!isDragging && Math.hypot(dx, dy) >= 6) {
+      isDragging = true;
+      suppressClick = true;
+    }
+    if (!isDragging) return;
+
+    // Prevent touch scrolling while actively dragging a region on the image:
+    event.preventDefault();
+
+    if (drawingBox === undefined) {
+      drawingBox = document.createElement('div');
+      drawingBox.className = 'comment-region is-drawing is-pending';
+      const pins = host.querySelector('.comment-pins');
+      if (pins instanceof HTMLElement) {
+        pins.appendChild(drawingBox);
+      } else {
+        host.appendChild(drawingBox);
+      }
+    }
+
+    const current = unitFromPointer(surface, touch.clientX, touch.clientY);
+    if (current === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const rect = rectFromCorners(dragOrigin.unit, current);
+    if (rect === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    const box = boxFromUnit(surface, rect);
+    if (box === undefined) {
+      drawingBox.style.display = 'none';
+      return;
+    }
+
+    drawingBox.style.display = 'block';
+    drawingBox.style.left = `${box.left}px`;
+    drawingBox.style.top = `${box.top}px`;
+    drawingBox.style.width = `${box.width}px`;
+    drawingBox.style.height = `${box.height}px`;
+  };
+
+  const onTouchEnd = (event: TouchEvent): void => {
+    if (dragOrigin === undefined || host === undefined) return;
+    const wasDragging = isDragging;
+    const start = dragOrigin.unit;
+    dragOrigin = undefined;
+    isDragging = false;
+    drawingBox?.remove();
+    drawingBox = undefined;
+
+    if (wasDragging) {
+      suppressClick = true;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const surface = anchorSurfaceFor(host);
+      if (surface === undefined) return;
+      const current = unitFromPointer(surface, touch.clientX, touch.clientY);
+      if (current === undefined) return;
+      const rect = rectFromCorners(start, current);
+      if (rect === undefined) return;
+      aim({ kind: 'region', rect });
+    }
+  };
 
   // Bound to the document once, here rather than in `attach`, because a
   // comparison closing rebuilds the stage and attaches again: listeners added
@@ -2513,7 +2620,10 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       const toggle = document.createElement('button');
       toggle.type = 'button';
       toggle.className = 'mark-mode';
-      toggle.textContent = 'Point at something';
+      const isImg = next.querySelector('img.relic-image') !== null;
+      toggle.textContent = isImg
+        ? 'Point or select region'
+        : 'Point at something';
       toggle.setAttribute('aria-pressed', 'false');
       toggle.addEventListener('click', () => {
         if (armed()) disarm();
@@ -2557,6 +2667,18 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         window.removeEventListener('resize', onResize);
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
+        next.removeEventListener?.(
+          'touchstart',
+          onTouchStart as unknown as EventListener
+        );
+        next.removeEventListener?.(
+          'touchmove',
+          onTouchMove as unknown as EventListener
+        );
+        next.removeEventListener?.(
+          'touchend',
+          onTouchEnd as unknown as EventListener
+        );
         ro?.disconnect();
         if (onImgLoad && img && typeof img.removeEventListener === 'function') {
           img.removeEventListener('load', onImgLoad);
@@ -2577,6 +2699,24 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         next.addEventListener('mousedown', onMouseDown);
         next.addEventListener('mousemove', onMouseMove);
         next.addEventListener('mouseup', onMouseUp);
+        next.addEventListener(
+          'touchstart',
+          onTouchStart as unknown as EventListener,
+          {
+            passive: true,
+          }
+        );
+        next.addEventListener(
+          'touchmove',
+          onTouchMove as unknown as EventListener,
+          {
+            passive: false,
+          }
+        );
+        next.addEventListener(
+          'touchend',
+          onTouchEnd as unknown as EventListener
+        );
       }
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
