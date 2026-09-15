@@ -64,19 +64,105 @@ export const COMMENT_BODY_LIMIT_BYTES = 4096;
 export const COMMENT_DISPLAY_NAME_LIMIT_BYTES = 64;
 
 /**
+ * A rectangle in unit coordinates of whatever space the anchor carrying it
+ * names. `x` and `y` are the top-left corner, `w` and `h` the extent, all in
+ * 0 to 1. A zero-area rectangle is refused: a box nobody can see is a point
+ * wearing a box's shape, and `pin` already exists for a point.
+ */
+export interface AnchorRect {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
+/**
  * Where a comment sits on the relic, encrypted with the body so the
  * operator cannot read the mark either.
  *
- * `text` is a quote to re-find in the document. `pin` is a point on the
- * stage in unit coordinates, 0 at the top-left and 1 at the bottom-right.
  * Missing on a comment that is just a remark about the relic as a whole.
+ *
+ * **`text` and `pin` are frozen.** They are the two kinds that shipped, they
+ * are already stored under keys this package cannot enumerate, and a reader
+ * built before this paragraph parses exactly them and refuses any field it
+ * has not seen. Extending either in place would turn every comment written
+ * by a current writer into `MalformedComment` in that reader, which surfaces
+ * to a person as "altered in storage". That is a lie about tampering told by
+ * a version gap, so precision arrives as new kinds instead and the frozen
+ * two are never widened.
+ *
+ * - `text` is a quote to re-find in the document. First exact occurrence,
+ *   which is why `quote` exists beside it.
+ * - `pin` is a point on the stage in unit coordinates.
+ * - `quote` is a quote plus the text immediately around it, so a phrase that
+ *   appears more than once resolves to the occurrence the reader selected
+ *   rather than the first one in the document.
+ * - `region` is a box on the artifact's own content box, not the stage's.
+ *   The distinction is the whole point: a stage-relative box drifts when the
+ *   same image is letterboxed differently at another viewport width, so a
+ *   mark placed on a face on a wide screen lands beside it on a phone.
+ * - `time` is a moment, or a span, in a media relic, with an optional box
+ *   inside that frame.
+ * - `page` is one page of a paged document, with an optional box or quote on
+ *   it.
+ * - `unsupported` is never written. It is what this parser returns for a
+ *   `kind` it does not know, so a reader can say a mark exists and it cannot
+ *   show it, which is true, instead of reporting the comment as unreadable,
+ *   which is not.
  */
 export type CommentAnchor =
   | { readonly kind: 'text'; readonly quote: string }
-  | { readonly kind: 'pin'; readonly x: number; readonly y: number };
+  | { readonly kind: 'pin'; readonly x: number; readonly y: number }
+  | {
+      readonly kind: 'quote';
+      readonly exact: string;
+      readonly prefix?: string;
+      readonly suffix?: string;
+    }
+  | { readonly kind: 'region'; readonly rect: AnchorRect }
+  | {
+      readonly kind: 'time';
+      readonly t: number;
+      readonly t_end?: number;
+      readonly rect?: AnchorRect;
+    }
+  | {
+      readonly kind: 'page';
+      readonly page: number;
+      readonly rect?: AnchorRect;
+      readonly exact?: string;
+    }
+  | { readonly kind: 'unsupported'; readonly declared: string };
 
 /** Longest quote stored on a text mark. A selection is not a document. */
 export const COMMENT_ANCHOR_QUOTE_LIMIT_BYTES = 512;
+
+/**
+ * Longest run of surrounding text stored beside a quote, each side.
+ *
+ * Context exists to disambiguate an occurrence, not to reproduce the passage.
+ * A run this long already separates every repeat of a phrase a reader could
+ * plausibly have selected, and anything longer is the document leaking into
+ * the mark.
+ */
+export const COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES = 128;
+
+/**
+ * Highest page number a `page` anchor may carry.
+ *
+ * A bound exists so a hostile value cannot be handed to a renderer as a page
+ * to seek to, and it is far above any document a reader is annotating.
+ */
+export const COMMENT_ANCHOR_MAX_PAGE = 10_000;
+
+/**
+ * Longest media offset a `time` anchor may carry, in seconds.
+ *
+ * Twenty-four hours. The same reasoning as the page ceiling: the value is
+ * handed to a player as a seek target, so it is bounded here rather than
+ * trusted there.
+ */
+export const COMMENT_ANCHOR_MAX_SECONDS = 86_400;
 
 /**
  * What a comment carries.
@@ -154,15 +240,8 @@ export async function encryptComment(
       );
     }
   }
-  if (plaintext.anchor != null && plaintext.anchor.kind === 'text') {
-    const quoteBytes = new TextEncoder().encode(plaintext.anchor.quote).length;
-    if (quoteBytes > COMMENT_ANCHOR_QUOTE_LIMIT_BYTES) {
-      throw new CommentTooLargeError(
-        'anchor',
-        quoteBytes,
-        COMMENT_ANCHOR_QUOTE_LIMIT_BYTES
-      );
-    }
+  if (plaintext.anchor != null) {
+    assertWritableAnchor(plaintext.anchor);
   }
 
   const encoded = new TextEncoder().encode(
@@ -268,54 +347,260 @@ export async function decryptComment(
   };
 }
 
+/**
+ * Read one anchor off a decrypted comment.
+ *
+ * Two different strictnesses, and the difference is deliberate. **An unknown
+ * field inside a known kind is refused**, exactly as the envelope refuses
+ * one, because that is the tampering and typo case and absorbing it would
+ * discard whatever the writer meant. **An unknown `kind` is not refused**: it
+ * comes back as `unsupported`, because the only thing that produces one is a
+ * reader older than the writer, and the honest report is that a mark exists
+ * this page cannot show rather than that the comment is unreadable.
+ */
 function parseAnchor(value: unknown): CommentAnchor | null {
-  if (value === undefined) return null;
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
     throw new MalformedCommentError('comment anchor is not an object');
   }
   const anchor = value as Record<string, unknown>;
   const kind = anchor['kind'];
+  if (typeof kind !== 'string' || kind.length === 0) {
+    throw new MalformedCommentError('comment anchor kind is missing');
+  }
+
   if (kind === 'text') {
-    const quote = anchor['quote'];
-    if (typeof quote !== 'string' || quote.length === 0) {
-      throw new MalformedCommentError('text anchor quote is missing');
-    }
-    const extra = Object.keys(anchor).filter(
-      (key) => key !== 'kind' && key !== 'quote'
-    );
-    if (extra.length > 0) {
-      throw new MalformedCommentError(
-        `text anchor carries unknown field(s): ${extra.join(', ')}`
-      );
-    }
+    const quote = requireQuote(anchor, 'quote', 'text');
+    refuseExtra(anchor, ['kind', 'quote'], 'text');
     return { kind: 'text', quote };
   }
+
   if (kind === 'pin') {
-    const x = anchor['x'];
-    const y = anchor['y'];
-    if (
-      typeof x !== 'number' ||
-      typeof y !== 'number' ||
-      !Number.isFinite(x) ||
-      !Number.isFinite(y) ||
-      x < 0 ||
-      x > 1 ||
-      y < 0 ||
-      y > 1
-    ) {
-      throw new MalformedCommentError('pin anchor is out of unit range');
-    }
-    const extra = Object.keys(anchor).filter(
-      (key) => key !== 'kind' && key !== 'x' && key !== 'y'
-    );
-    if (extra.length > 0) {
-      throw new MalformedCommentError(
-        `pin anchor carries unknown field(s): ${extra.join(', ')}`
-      );
-    }
+    const x = requireUnit(anchor['x'], 'pin x');
+    const y = requireUnit(anchor['y'], 'pin y');
+    refuseExtra(anchor, ['kind', 'x', 'y'], 'pin');
     return { kind: 'pin', x, y };
   }
-  throw new MalformedCommentError('comment anchor kind is not text or pin');
+
+  if (kind === 'quote') {
+    const exact = requireQuote(anchor, 'exact', 'quote');
+    const prefix = optionalContext(anchor['prefix'], 'quote prefix');
+    const suffix = optionalContext(anchor['suffix'], 'quote suffix');
+    refuseExtra(anchor, ['kind', 'exact', 'prefix', 'suffix'], 'quote');
+    return {
+      kind: 'quote',
+      exact,
+      ...(prefix === undefined ? {} : { prefix }),
+      ...(suffix === undefined ? {} : { suffix }),
+    };
+  }
+
+  if (kind === 'region') {
+    const rect = requireRect(anchor['rect'], 'region');
+    refuseExtra(anchor, ['kind', 'rect'], 'region');
+    return { kind: 'region', rect };
+  }
+
+  if (kind === 'time') {
+    const t = requireSeconds(anchor['t'], 'time t');
+    const end = anchor['t_end'];
+    const tEnd =
+      end === undefined ? undefined : requireSeconds(end, 'time t_end');
+    if (tEnd !== undefined && tEnd <= t) {
+      throw new MalformedCommentError(
+        'time anchor t_end is not after t, so the span is empty or reversed'
+      );
+    }
+    const box = anchor['rect'];
+    const rect = box === undefined ? undefined : requireRect(box, 'time');
+    refuseExtra(anchor, ['kind', 't', 't_end', 'rect'], 'time');
+    return {
+      kind: 'time',
+      t,
+      ...(tEnd === undefined ? {} : { t_end: tEnd }),
+      ...(rect === undefined ? {} : { rect }),
+    };
+  }
+
+  if (kind === 'page') {
+    const page = anchor['page'];
+    if (
+      typeof page !== 'number' ||
+      !Number.isInteger(page) ||
+      page < 1 ||
+      page > COMMENT_ANCHOR_MAX_PAGE
+    ) {
+      throw new MalformedCommentError(
+        `page anchor page is not an integer in 1 to ${COMMENT_ANCHOR_MAX_PAGE}`
+      );
+    }
+    const box = anchor['rect'];
+    const rect = box === undefined ? undefined : requireRect(box, 'page');
+    const quoted = anchor['exact'];
+    const exact =
+      quoted === undefined ? undefined : requireQuote(anchor, 'exact', 'page');
+    refuseExtra(anchor, ['kind', 'page', 'rect', 'exact'], 'page');
+    return {
+      kind: 'page',
+      page,
+      ...(rect === undefined ? {} : { rect }),
+      ...(exact === undefined ? {} : { exact }),
+    };
+  }
+
+  // The forward-tolerant branch. A `kind` this build has never heard of is a
+  // writer newer than this reader, which is a version gap and not a defect in
+  // the comment, so it keeps its body and loses only the ability to be shown
+  // in place.
+  return { kind: 'unsupported', declared: kind };
+}
+
+/**
+ * Refuse an anchor that must never be written, and enforce the caps.
+ *
+ * `unsupported` is the one kind a writer may never seal: it exists to
+ * describe a gap a reader found, and writing it would store a comment
+ * pointing at nothing, permanently, under a key nobody can rewrite.
+ */
+function assertWritableAnchor(anchor: CommentAnchor): void {
+  if (anchor.kind === 'unsupported') {
+    throw new MalformedCommentError(
+      'an unsupported anchor describes a reader gap and is never written'
+    );
+  }
+  if (anchor.kind === 'text') capQuote(anchor.quote);
+  if (anchor.kind === 'quote') {
+    capQuote(anchor.exact);
+    capContext(anchor.prefix);
+    capContext(anchor.suffix);
+  }
+  if (anchor.kind === 'page' && anchor.exact !== undefined) {
+    capQuote(anchor.exact);
+  }
+  // Every other field is a bounded number, and the bound is checked on the
+  // way back in by `parseAnchor`. Round-tripping a value this side accepted
+  // and that side refuses would be the real defect, so the writer runs the
+  // same predicates rather than a second, looser copy of them.
+  parseAnchor(JSON.parse(JSON.stringify(anchor)) as unknown);
+}
+
+function capQuote(quote: string): void {
+  const bytes = new TextEncoder().encode(quote).length;
+  if (bytes > COMMENT_ANCHOR_QUOTE_LIMIT_BYTES) {
+    throw new CommentTooLargeError(
+      'anchor',
+      bytes,
+      COMMENT_ANCHOR_QUOTE_LIMIT_BYTES
+    );
+  }
+}
+
+function capContext(context: string | undefined): void {
+  if (context === undefined) return;
+  const bytes = new TextEncoder().encode(context).length;
+  if (bytes > COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES) {
+    throw new CommentTooLargeError(
+      'anchor',
+      bytes,
+      COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES
+    );
+  }
+}
+
+function requireQuote(
+  anchor: Record<string, unknown>,
+  field: string,
+  kind: string
+): string {
+  const quote = anchor[field];
+  if (typeof quote !== 'string' || quote.length === 0) {
+    throw new MalformedCommentError(`${kind} anchor ${field} is missing`);
+  }
+  const bytes = new TextEncoder().encode(quote).length;
+  if (bytes > COMMENT_ANCHOR_QUOTE_LIMIT_BYTES) {
+    throw new MalformedCommentError(
+      `${kind} anchor ${field} is ${bytes} bytes, over the ` +
+        `${COMMENT_ANCHOR_QUOTE_LIMIT_BYTES}-byte cap`
+    );
+  }
+  return quote;
+}
+
+function optionalContext(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new MalformedCommentError(`${label} is present and is not a string`);
+  }
+  const bytes = new TextEncoder().encode(value).length;
+  if (bytes > COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES) {
+    throw new MalformedCommentError(
+      `${label} is ${bytes} bytes, over the ` +
+        `${COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES}-byte cap`
+    );
+  }
+  return value;
+}
+
+function requireUnit(value: unknown, label: string): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 1
+  ) {
+    throw new MalformedCommentError(`${label} is out of unit range`);
+  }
+  return value;
+}
+
+function requireSeconds(value: unknown, label: string): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > COMMENT_ANCHOR_MAX_SECONDS
+  ) {
+    throw new MalformedCommentError(
+      `${label} is not a finite offset in 0 to ${COMMENT_ANCHOR_MAX_SECONDS} seconds`
+    );
+  }
+  return value;
+}
+
+function requireRect(value: unknown, kind: string): AnchorRect {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new MalformedCommentError(`${kind} anchor rect is not an object`);
+  }
+  const rect = value as Record<string, unknown>;
+  const x = requireUnit(rect['x'], `${kind} rect x`);
+  const y = requireUnit(rect['y'], `${kind} rect y`);
+  const w = requireUnit(rect['w'], `${kind} rect w`);
+  const h = requireUnit(rect['h'], `${kind} rect h`);
+  if (w === 0 || h === 0) {
+    throw new MalformedCommentError(
+      `${kind} anchor rect has no area, so it marks nothing`
+    );
+  }
+  if (x + w > 1 || y + h > 1) {
+    throw new MalformedCommentError(
+      `${kind} anchor rect runs past the edge of what it is measured against`
+    );
+  }
+  refuseExtra(rect, ['x', 'y', 'w', 'h'], `${kind} rect`);
+  return { x, y, w, h };
+}
+
+function refuseExtra(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  kind: string
+): void {
+  const extra = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (extra.length > 0) {
+    throw new MalformedCommentError(
+      `${kind} anchor carries unknown field(s): ${extra.join(', ')}`
+    );
+  }
 }
 
 /** Unpadded base64url (RFC 4648 section 5), the same encoding the key uses. */
