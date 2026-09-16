@@ -13,8 +13,12 @@ import {
   type AnchorAdapter,
   type AnchorSurface,
   boxFromUnit,
-  contentOffset,
 } from './anchoring.ts';
+import {
+  clusterMarkers,
+  markerFor,
+  type TimelineMarker,
+} from './media-timeline.ts';
 
 /**
  * Formats a duration in seconds into a human-readable timecode string.
@@ -186,26 +190,48 @@ function registerMetadataRepaint(
   }
 }
 
+interface TrackMarkerEntry {
+  readonly commentId: string;
+  readonly anchor: Extract<CommentAnchor, { kind: 'time' }>;
+}
+
+interface TrackMarkerState {
+  lastOverlay: HTMLElement;
+  entries: TrackMarkerEntry[];
+}
+
+const trackStates = new WeakMap<HTMLElement, TrackMarkerState>();
+let activeMarkerTooltip: HTMLElement | null = null;
+
 /**
- * Finds or creates the timeline marker track inside the overlay, positioned
- * right below the media content box.
+ * Finds or creates the timeline marker track inside the player or overlay.
+ *
+ * When a custom media player is present, markers land directly on the player's
+ * scrubber track. When running in isolation or test stubs, a fallback track
+ * is created in the overlay.
  */
 export function getOrCreateTimeTrack(
   surface: AnchorSurface,
   overlay: HTMLElement
 ): HTMLElement {
+  const player =
+    surface.content.closest?.('.custom-media-player') ??
+    surface.content.parentElement?.closest?.('.custom-media-player') ??
+    surface.host.querySelector?.('.custom-media-player');
+
+  const playerTrack = (player?.querySelector?.('.time-track') ??
+    surface.content.parentElement?.querySelector?.('.time-track') ??
+    surface.host.querySelector?.('.time-track')) as HTMLElement | null;
+
+  if (playerTrack !== null) {
+    return playerTrack;
+  }
+
   let track = overlay.querySelector('.time-track') as HTMLElement | null;
   if (track === null) {
     track = document.createElement('div');
     track.className = 'time-track';
     overlay.appendChild(track);
-  }
-
-  const box = contentOffset(surface);
-  if (box.width > 0) {
-    track.style.left = `${box.left}px`;
-    track.style.top = `${box.top + box.height + 4}px`;
-    track.style.width = `${box.width}px`;
   }
   return track;
 }
@@ -251,52 +277,214 @@ export function paintTimeMark(
   }
 
   const track = getOrCreateTimeTrack(surface, overlay);
-  const startFrac = markerPosition(anchor.t, duration);
 
-  const marker = document.createElement('button');
-  marker.type = 'button';
-  marker.dataset.commentId = commentId;
-  marker.style.left = `${startFrac * 100}%`;
-
-  if (anchor.t_end !== undefined) {
-    const endFrac = markerPosition(anchor.t_end, duration);
-    marker.className = 'time-marker time-marker-span';
-    marker.style.width = `${Math.max(0, endFrac - startFrac) * 100}%`;
-    marker.title = `${formatTimecode(anchor.t)} to ${formatTimecode(anchor.t_end)}`;
-  } else {
-    marker.className = 'time-marker';
-    marker.title = formatTimecode(anchor.t);
+  let state = trackStates.get(track);
+  if (state === undefined || state.lastOverlay !== overlay) {
+    state = { lastOverlay: overlay, entries: [] };
+    trackStates.set(track, state);
+    activeMarkerTooltip?.remove();
+    activeMarkerTooltip = null;
+    track.replaceChildren();
   }
 
-  marker.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    revealTimeMark(surface, anchor);
-    const doc =
-      surface.host.ownerDocument ??
-      (typeof document !== 'undefined' ? document : null);
-    const row =
-      doc !== null &&
-      typeof doc === 'object' &&
-      'querySelector' in doc &&
-      typeof doc.querySelector === 'function'
-        ? (doc.querySelector(
-            `.thread [data-comment-id="${commentId}"]`
-          ) as HTMLElement | null)
-        : null;
-    if (typeof HTMLElement !== 'undefined' && row instanceof HTMLElement) {
-      row.scrollIntoView({ block: 'nearest' });
-    } else if (
-      row !== null &&
-      typeof row === 'object' &&
-      'scrollIntoView' in row &&
-      typeof row.scrollIntoView === 'function'
-    ) {
-      row.scrollIntoView({ block: 'nearest' });
-    }
-  });
+  const existingIdx = state.entries.findIndex((e) => e.commentId === commentId);
+  if (existingIdx >= 0) {
+    state.entries[existingIdx] = { commentId, anchor };
+  } else {
+    state.entries.push({ commentId, anchor });
+  }
 
-  track.appendChild(marker);
+  // Convert entries to TimelineMarkers
+  const markers: TimelineMarker[] = [];
+  for (const entry of state.entries) {
+    const m = markerFor(entry.commentId, entry.anchor, duration);
+    if (m !== undefined) markers.push(m);
+  }
+
+  let trackWidth = 640;
+  if (typeof track.getBoundingClientRect === 'function') {
+    const r = track.getBoundingClientRect();
+    if (r && r.width > 0) trackWidth = r.width;
+  }
+
+  const clusters = clusterMarkers(markers, trackWidth);
+  track.replaceChildren();
+
+  for (const cluster of clusters) {
+    if (cluster.members.length === 1) {
+      const member = cluster.members[0];
+      if (member === undefined) continue;
+      const isSpan = member.width > 0;
+      const markerBtn = document.createElement('button');
+      markerBtn.type = 'button';
+      markerBtn.className = isSpan
+        ? 'time-marker time-marker-span'
+        : 'time-marker';
+      markerBtn.dataset.commentId = member.commentId;
+      markerBtn.style.left = `${Number((member.start * 100).toFixed(4))}%`;
+      if (isSpan) {
+        markerBtn.style.width = `${Number((member.width * 100).toFixed(4))}%`;
+        markerBtn.title = `${formatTimecode(member.t)} to ${formatTimecode(member.t_end ?? member.t)}`;
+      } else {
+        markerBtn.title = formatTimecode(member.t);
+      }
+
+      markerBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const originalAnchor = state?.entries.find(
+          (e) => e.commentId === member.commentId
+        )?.anchor ?? { kind: 'time', t: member.t };
+        revealTimeMark(surface, originalAnchor);
+        const doc =
+          surface.host.ownerDocument ??
+          (typeof document !== 'undefined' ? document : null);
+        const row = doc?.querySelector(
+          `.thread [data-comment-id="${member.commentId}"]`
+        ) as HTMLElement | null;
+        row?.scrollIntoView?.({ block: 'nearest' });
+      });
+
+      markerBtn.addEventListener('mouseenter', () => {
+        activeMarkerTooltip?.remove();
+        activeMarkerTooltip = null;
+        const doc =
+          surface.host.ownerDocument ??
+          (typeof document !== 'undefined' ? document : null);
+        const row = doc?.querySelector(
+          `.thread [data-comment-id="${member.commentId}"]`
+        );
+        const author =
+          row?.querySelector('.comment-author')?.textContent ?? 'Comment';
+        const body = row?.querySelector('.comment-body')?.textContent ?? '';
+        const timecode = isSpan
+          ? `${formatTimecode(member.t)} – ${formatTimecode(member.t_end ?? member.t)}`
+          : formatTimecode(member.t);
+
+        const tip = document.createElement('div');
+        tip.className = 'timeline-marker-tooltip';
+
+        const header = document.createElement('div');
+        header.className = 'marker-tooltip-header';
+        const authorEl = document.createElement('span');
+        authorEl.className = 'marker-tooltip-author';
+        authorEl.textContent = author;
+        const timeEl = document.createElement('span');
+        timeEl.className = 'marker-tooltip-time';
+        timeEl.textContent = timecode;
+        header.append(authorEl, timeEl);
+        tip.appendChild(header);
+
+        if (body.length > 0) {
+          const snippet = document.createElement('div');
+          snippet.className = 'marker-tooltip-snippet';
+          snippet.textContent =
+            body.length > 70 ? `${body.slice(0, 67)}…` : body;
+          tip.appendChild(snippet);
+        }
+
+        tip.style.left = `${member.start * 100}%`;
+        track.appendChild(tip);
+        activeMarkerTooltip = tip;
+      });
+
+      markerBtn.addEventListener('mouseleave', () => {
+        activeMarkerTooltip?.remove();
+        activeMarkerTooltip = null;
+      });
+
+      track.appendChild(markerBtn);
+    } else {
+      // Cluster of multiple markers
+      const firstMember = cluster.members[0];
+      if (firstMember === undefined) continue;
+      const clusterBtn = document.createElement('button');
+      clusterBtn.type = 'button';
+      clusterBtn.className = 'time-marker time-marker-cluster';
+      clusterBtn.dataset.commentId = firstMember.commentId;
+      clusterBtn.dataset.clusterCount = String(cluster.members.length);
+      clusterBtn.style.left = `${Number((cluster.start * 100).toFixed(4))}%`;
+      if (cluster.width > 0) {
+        clusterBtn.style.width = `${Number((cluster.width * 100).toFixed(4))}%`;
+      } else {
+        clusterBtn.classList.add('is-moment-cluster');
+      }
+      clusterBtn.textContent = String(cluster.members.length);
+      clusterBtn.title = `${cluster.members.length} comments around ${formatTimecode(firstMember.t)}`;
+
+      // Member spans for querySelector data-comment-id matching
+      for (const m of cluster.members) {
+        const child = document.createElement('span');
+        child.dataset.commentId = m.commentId;
+        child.hidden = true;
+        child.style.display = 'none';
+        clusterBtn.appendChild(child);
+      }
+
+      clusterBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const originalAnchor = state?.entries.find(
+          (e) => e.commentId === firstMember.commentId
+        )?.anchor ?? { kind: 'time', t: firstMember.t };
+        revealTimeMark(surface, originalAnchor);
+        const doc =
+          surface.host.ownerDocument ??
+          (typeof document !== 'undefined' ? document : null);
+        const row = doc?.querySelector(
+          `.thread [data-comment-id="${firstMember.commentId}"]`
+        ) as HTMLElement | null;
+        row?.scrollIntoView?.({ block: 'nearest' });
+      });
+
+      clusterBtn.addEventListener('mouseenter', () => {
+        activeMarkerTooltip?.remove();
+        activeMarkerTooltip = null;
+        const doc =
+          surface.host.ownerDocument ??
+          (typeof document !== 'undefined' ? document : null);
+
+        const tip = document.createElement('div');
+        tip.className = 'timeline-marker-tooltip';
+
+        const header = document.createElement('div');
+        header.className = 'marker-tooltip-header';
+        const countEl = document.createElement('span');
+        countEl.className = 'marker-tooltip-author';
+        countEl.textContent = `${cluster.members.length} comments`;
+        const timeEl = document.createElement('span');
+        timeEl.className = 'marker-tooltip-time';
+        timeEl.textContent = formatTimecode(firstMember.t);
+        header.append(countEl, timeEl);
+        tip.appendChild(header);
+
+        for (const m of cluster.members.slice(0, 3)) {
+          const row = doc?.querySelector(
+            `.thread [data-comment-id="${m.commentId}"]`
+          );
+          const author =
+            row?.querySelector('.comment-author')?.textContent ?? 'Comment';
+          const body = row?.querySelector('.comment-body')?.textContent ?? '';
+          const item = document.createElement('div');
+          item.className = 'marker-tooltip-snippet';
+          item.textContent = `${author}: ${body.length > 40 ? `${body.slice(0, 37)}…` : body}`;
+          tip.appendChild(item);
+        }
+
+        tip.style.left = `${cluster.start * 100}%`;
+        track.appendChild(tip);
+        activeMarkerTooltip = tip;
+      });
+
+      clusterBtn.addEventListener('mouseleave', () => {
+        activeMarkerTooltip?.remove();
+        activeMarkerTooltip = null;
+      });
+
+      track.appendChild(clusterBtn);
+    }
+  }
+
   // If a bounding box on the frame was specified, paint the frame box and wire
   // its visibility to whether the current playhead position is in range.
   if (anchor.rect !== undefined) {
