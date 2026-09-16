@@ -270,7 +270,22 @@ body {
   flex: 1;
 }
 
+/*
+ * One line of text, and not a thing to shrink.
+ *
+ * `overflow: hidden` is here for the horizontal ellipsis, and it has a second
+ * effect that is easy to miss: it removes this item's automatic minimum size,
+ * so a flex column with too little room crushes the filename to any height at
+ * all and then clips the glyphs with that same rule. Measured on a bar pinned
+ * to `--bar-height` with a version control present: the line needs 22.33px
+ * and rendered at 11.83px, with the top and bottom of every letter shaved.
+ *
+ * Refusing to shrink puts the pressure back where it belongs. The bar's
+ * height is a minimum, so it grows to fit a two-line identity zone rather
+ * than cropping the name of the thing on screen.
+ */
 .filename {
+  flex: 0 0 auto;
   font-size: 0.9rem;
   font-weight: 500;
   white-space: nowrap;
