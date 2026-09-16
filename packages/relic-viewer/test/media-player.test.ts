@@ -454,7 +454,7 @@ describe('custom media player and comment timeline', () => {
     });
     expect(video.paused).toBe(false);
 
-    // Seek right via ArrowRight key on scrubber (+5s)
+    // Fine seek (+0.1s) via plain ArrowRight key on scrubber
     video.currentTime = 10;
     scrubber.dispatchEvent({
       type: 'keydown',
@@ -463,9 +463,9 @@ describe('custom media player and comment timeline', () => {
       altKey: false,
       preventDefault: () => {},
     });
-    expect(video.currentTime).toBe(15);
+    expect(video.currentTime).toBeCloseTo(10.1, 5);
 
-    // Seek left via ArrowLeft key on scrubber (-5s)
+    // Seek left via ArrowLeft key on scrubber (-0.1s)
     scrubber.dispatchEvent({
       type: 'keydown',
       key: 'ArrowLeft',
@@ -473,9 +473,9 @@ describe('custom media player and comment timeline', () => {
       altKey: false,
       preventDefault: () => {},
     });
-    expect(video.currentTime).toBe(10);
+    expect(video.currentTime).toBeCloseTo(10, 5);
 
-    // Coarse seek (+10s) with shiftKey
+    // Coarse seek (+1s) with shiftKey
     scrubber.dispatchEvent({
       type: 'keydown',
       key: 'ArrowRight',
@@ -483,7 +483,23 @@ describe('custom media player and comment timeline', () => {
       altKey: false,
       preventDefault: () => {},
     });
-    expect(video.currentTime).toBe(20);
+    expect(video.currentTime).toBeCloseTo(11, 5);
+
+    // Large jump (+5s) with PageUp
+    scrubber.dispatchEvent({
+      type: 'keydown',
+      key: 'PageUp',
+      preventDefault: () => {},
+    });
+    expect(video.currentTime).toBe(16);
+
+    // Large jump (-5s) with PageDown
+    scrubber.dispatchEvent({
+      type: 'keydown',
+      key: 'PageDown',
+      preventDefault: () => {},
+    });
+    expect(video.currentTime).toBeCloseTo(11, 5);
 
     // Jump to End and Home
     scrubber.dispatchEvent({
@@ -714,6 +730,74 @@ describe('custom media player and comment timeline', () => {
       chrome.querySelector('.media-scrubber'),
       'scrubber'
     );
+    test('drag recomputes geometry when the rail shifts mid-gesture', () => {
+      const video = new MediaTestNode('video');
+      const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+        isAudio: false,
+      });
+      const chrome = player.chrome as unknown as TestNode;
+      const scrubber = requireNode(
+        chrome.querySelector('.media-scrubber'),
+        'scrubber'
+      );
+
+      let aimedAnchor: CommentAnchor | null = null;
+      chrome.addEventListener('relic:time-aim', (event: unknown) => {
+        aimedAnchor = (event as { detail: { anchor: CommentAnchor } }).detail
+          .anchor;
+      });
+
+      // Rail at left=0, width=640 (the test default).
+      // Press down at 12%: startSeconds = 76.8
+      scrubber.dispatchEvent({
+        type: 'pointerdown',
+        clientX: 76.8,
+        bubbles: true,
+        preventDefault: () => {},
+      });
+
+      // Mid-gesture, the rail shifts left by 176px (a sidebar opening).
+      const rail = requireNode(
+        chrome.querySelector('.media-track-rail'),
+        'rail'
+      );
+      rail.rect = {
+        left: -176,
+        top: 0,
+        right: 464,
+        bottom: 24,
+        width: 640,
+        height: 24,
+      };
+
+      // Reader moves to what WOULD be 36% of the post-shift rail: 176 + 0.36 * 640
+      (
+        window as unknown as { dispatchEvent: (e: unknown) => void }
+      ).dispatchEvent({
+        type: 'pointermove',
+        clientX: 176 + 0.36 * 640,
+        bubbles: true,
+      });
+
+      (
+        window as unknown as { dispatchEvent: (e: unknown) => void }
+      ).dispatchEvent({
+        type: 'pointerup',
+        clientX: 176 + 0.36 * 640,
+        bubbles: true,
+      });
+
+      // The final end must be 36% of the live rail, not inflated by the shift.
+      const expectedSpan = spanFromDrag(76.8, 40);
+      const expectedAnchor: CommentAnchor = {
+        kind: 'time',
+        t: expectedSpan.t,
+        ...(expectedSpan.t_end !== undefined
+          ? { t_end: expectedSpan.t_end }
+          : {}),
+      };
+      expect(aimedAnchor as CommentAnchor | null).toEqual(expectedAnchor);
+    });
 
     let focusedElement: unknown = null;
     scrubber.focus = () => {

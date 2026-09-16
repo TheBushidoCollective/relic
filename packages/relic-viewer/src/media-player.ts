@@ -17,6 +17,7 @@
 import type { CommentAnchor } from '@relic/format';
 import { formatTimecode } from './annotate-time.ts';
 import {
+  COARSE_STEP_SECONDS,
   fractionToTime,
   pointerFraction,
   STEP_SECONDS,
@@ -422,9 +423,19 @@ export function createMediaPlayer(
     }
   };
 
-  const seekRelative = (seconds: number): void => {
-    const duration = getDuration();
-    const next = Math.max(0, Math.min(duration, media.currentTime + seconds));
+  const seekRelative = (
+    seconds: number,
+    duration: number,
+    coarse = false
+  ): void => {
+    const magnitude = Math.abs(seconds);
+    const step = coarse
+      ? Math.sign(seconds) * Math.max(magnitude, COARSE_STEP_SECONDS)
+      : seconds;
+    const next = Math.max(
+      0,
+      Math.min(Math.max(duration, 0), media.currentTime + step)
+    );
     media.currentTime = next;
     updateTimeDisplay();
   };
@@ -513,6 +524,9 @@ export function createMediaPlayer(
 
     const onWindowMove = (e: PointerEvent): void => {
       if (dragState === null) return;
+      // Re-read the rail on every move: opening the thread sidebar shifts
+      // the rail mid-gesture, so a rect captured at pointerdown is stale by
+      // the time the reader lets go.
       const g = getTrackGeometry(rail);
       const f = pointerFraction(e.clientX, g.left, g.width);
       const currentSeconds = fractionToTime(f, duration);
@@ -535,7 +549,7 @@ export function createMediaPlayer(
       }
     };
 
-    const onWindowUp = (): void => {
+    const onWindowUp = (e: PointerEvent): void => {
       if (typeof window !== 'undefined') {
         window.removeEventListener('pointermove', onWindowMove);
         window.removeEventListener('pointerup', onWindowUp);
@@ -547,10 +561,13 @@ export function createMediaPlayer(
         dragState.hasMoved &&
         Math.abs(dragState.currentSeconds - dragState.startSeconds) >= 0.2
       ) {
-        const span = spanFromDrag(
-          dragState.startSeconds,
-          dragState.currentSeconds
-        );
+        // Final end computed from the live rail rect, not the pointerdown
+        // one, so the sidebar shift cannot inflate it after the reader
+        // has already let go.
+        const g = getTrackGeometry(rail);
+        const f = pointerFraction(e.clientX, g.left, g.width);
+        const finalSeconds = fractionToTime(f, duration);
+        const span = spanFromDrag(dragState.startSeconds, finalSeconds);
         setPendingAnchor(span);
         dispatchTimeAim(
           {
@@ -758,18 +775,27 @@ export function createMediaPlayer(
   // --------------------------------------------------------------------------
   scrubber.addEventListener('keydown', (event: KeyboardEvent) => {
     const duration = getDuration();
+    const isCoarse = event.shiftKey;
 
     switch (event.key) {
       case 'ArrowLeft': {
         event.preventDefault();
-        const step = event.shiftKey ? 10 : event.altKey ? 1 : 5;
-        seekRelative(-step);
+        seekRelative(-STEP_SECONDS, duration, isCoarse);
         break;
       }
       case 'ArrowRight': {
         event.preventDefault();
-        const step = event.shiftKey ? 10 : event.altKey ? 1 : 5;
-        seekRelative(step);
+        seekRelative(STEP_SECONDS, duration, isCoarse);
+        break;
+      }
+      case 'PageUp': {
+        event.preventDefault();
+        seekRelative(5, duration, true);
+        break;
+      }
+      case 'PageDown': {
+        event.preventDefault();
+        seekRelative(-5, duration, true);
         break;
       }
       case 'Home': {
