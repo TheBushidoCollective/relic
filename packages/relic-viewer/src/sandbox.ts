@@ -54,6 +54,11 @@ import {
   takeTailUtf8,
 } from './annotate-frame.ts';
 import {
+  type FrameScrollMessage,
+  isSetScrollMessage,
+  type SetScrollMessage,
+} from './frame-scroll.ts';
+import {
   applyMarks,
   captureTree,
   HIGHLIGHT_CSS,
@@ -90,42 +95,6 @@ export function isRenderJsxMessage(data: unknown): data is RenderJsxMessage {
     'code' in data &&
     data.type === 'relic:render-jsx' &&
     typeof data.code === 'string'
-  );
-}
-
-export interface SetScrollMessage {
-  readonly type: 'relic:set-scroll';
-  readonly fraction: number;
-}
-
-export function isSetScrollMessage(data: unknown): data is SetScrollMessage {
-  return (
-    typeof data === 'object' &&
-    data !== null &&
-    'type' in data &&
-    'fraction' in data &&
-    data.type === 'relic:set-scroll' &&
-    typeof data.fraction === 'number' &&
-    Number.isFinite(data.fraction)
-  );
-}
-
-export interface FrameScrollMessage {
-  readonly type: 'relic:frame-scroll';
-  readonly fraction: number;
-}
-
-export function isFrameScrollMessage(
-  data: unknown
-): data is FrameScrollMessage {
-  return (
-    typeof data === 'object' &&
-    data !== null &&
-    'type' in data &&
-    'fraction' in data &&
-    data.type === 'relic:frame-scroll' &&
-    typeof data.fraction === 'number' &&
-    Number.isFinite(data.fraction)
   );
 }
 
@@ -515,7 +484,14 @@ export function setupFrameInteraction(
     postOutward({ type: 'relic:frame-scroll', fraction });
   };
 
-  win.addEventListener('scroll', handleScroll, { passive: true });
+  // Guarded because this function is called with a stub window in the frame
+  // interaction tests, which predate scroll syncing and supply only the
+  // members they exercise. An unguarded call threw there and took two tests
+  // with it, which is the signal that the stub is the contract this function
+  // has always had.
+  if (typeof win.addEventListener === 'function') {
+    win.addEventListener('scroll', handleScroll, { passive: true });
+  }
 
   doc.addEventListener('mousedown', (event: MouseEvent) => {
     if (!armed) return;

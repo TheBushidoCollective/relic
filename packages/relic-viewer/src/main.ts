@@ -32,8 +32,8 @@ import {
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
+import { isFrameScrollMessage } from './frame-scroll.ts';
 import { createMediaPlayer } from './media-player.ts';
-import { isFrameScrollMessage } from './sandbox.ts';
 import { syncFrameScrollers, syncScrollers } from './scroll-sync.ts';
 import { localStorageKeyVault } from './vault.ts';
 

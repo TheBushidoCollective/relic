@@ -9,13 +9,15 @@
 
 import { describe, expect, test } from 'bun:test';
 import { diffModeForRoute } from '../src/diff.ts';
+import {
+  isFrameScrollMessage,
+  isSetScrollMessage,
+} from '../src/frame-scroll.ts';
 import { renderCodeComparison, renderRenderedComparison } from '../src/main.ts';
 import {
   applyDocumentScrollFraction,
   createSandboxHandler,
   documentScrollFraction,
-  isFrameScrollMessage,
-  isSetScrollMessage,
   setupFrameInteraction,
 } from '../src/sandbox.ts';
 import {

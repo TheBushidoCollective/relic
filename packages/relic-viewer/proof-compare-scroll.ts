@@ -30,7 +30,11 @@ const scratch = await mkdtemp(join(tmpdir(), 'relic-proof-scroll-'));
 process.env['RELIC_PUBLISH_STATE'] = join(scratch, 'state.json');
 
 const store = new MemoryStore();
-const storage = new MemoryStorage();
+// Object URLs must resolve from a BROWSER, not only from the publishing
+// client's patched fetch: as written the viewer asked https://storage.invalid
+// for the ciphertext and got ERR_NAME_NOT_RESOLVED, so the page rendered
+// nothing at all. Issue them on the service origin and serve them below.
+const storage = new MemoryStorage(serviceOrigin);
 
 function routedFetch(): typeof globalThis.fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -62,7 +66,24 @@ const app = createApp({
 // Start listeners first so publish can connect to challenge endpoint
 Bun.serve({
   port: SERVICE_PORT,
-  fetch: app.fetch,
+  fetch: async (request) => {
+    const url = new URL(request.url);
+    const key = url.pathname.replace(/^\/(?:upload|o)\//, '');
+    if (url.pathname.startsWith('/upload/') && request.method === 'PUT') {
+      storage.put(key, new Uint8Array(await request.arrayBuffer()));
+      return new Response(null, { status: 200 });
+    }
+    if (url.pathname.startsWith('/o/')) {
+      const bytes = await storage.read(key);
+      return bytes === undefined
+        ? new Response(null, { status: 404 })
+        : new Response(bytes as unknown as BodyInit, {
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+          });
+    }
+    return app.fetch(request);
+  },
 });
 
 Bun.serve({
