@@ -113,6 +113,7 @@ import {
   type MintResponse,
   openRelicWithKey,
   type ReadyView,
+  type RenderRoute,
   type ViewerDeps,
 } from './viewer.ts';
 
@@ -131,12 +132,39 @@ const SERVICE_ORIGIN =
 const WORDMARK = 'relik.link';
 
 /**
- * The marker beside the actions, in one place.
+ * What the marker beside the actions says, per route.
  *
  * It is the visible label, the accessible name, and the stem of the tooltip,
- * and it was three separate strings until two of them disagreed.
+ * and it was three separate strings until two of them disagreed. It was then
+ * one string for every relic, which is how a five-second mp4 came to tell its
+ * recipient it runs the author's code. Nothing an author wrote executes for a
+ * video, an image, a markdown file or a PDF: the browser decodes it, and
+ * `sandbox.html` is never reached.
+ *
+ * The route is the key rather than the renderer class, because the route is
+ * what executes. `spec/format.md` 3.6 lets a declared class and a sniffed
+ * class disagree, and the viewer has already resolved that to the least
+ * privileged of the two by the time this is read, so this states the decision
+ * rather than the claim the envelope made.
+ *
+ * Each line names the mechanism, then what the reader is owed about author
+ * code, so the sentences stay parallel and the one route that really does run
+ * code reads as the exception it is.
  */
-const MARKER_LABEL = 'Runs author code, isolated';
+const MARKER_LABELS: Record<RenderRoute, string> = {
+  markdown: 'Rendered as text, no author code',
+  code: 'Rendered as text, no author code',
+  image: 'Shown as an image, no author code',
+  media: 'Plays in your browser, no author code',
+  pdf: 'Rendered as a document, no author code',
+  'sandboxed-html': 'Runs author code, isolated',
+  'sandboxed-jsx': 'Runs author code, isolated',
+  download: 'Downloads to your device, no author code',
+};
+
+export function markerLabelFor(route: RenderRoute): string {
+  return MARKER_LABELS[route];
+}
 
 const ICONS = {
   copy: 'M5 2h7a1 1 0 0 1 1 1v8h-1V3H5V2zM3 4h7a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm0 1v8h7V5H3z',
@@ -527,11 +555,14 @@ export function buildBar(
   // wants the name to contain the visible text and these had drifted: the
   // label read "Runs author code" while the name read "the author's code",
   // which is exactly the mismatch that breaks speech control.
-  marker.setAttribute('aria-label', MARKER_LABEL);
-  marker.title = `${MARKER_LABEL}. What Relic knows.`;
+  // Keyed on the route the viewer resolved, so the sentence describes what
+  // this relic does rather than what the riskiest relic would.
+  const markerLabel = markerLabelFor(view.route);
+  marker.setAttribute('aria-label', markerLabel);
+  marker.title = `${markerLabel}. What Relic knows.`;
   marker.appendChild(icon(ICONS.source));
   const markerText = document.createElement('span');
-  markerText.textContent = MARKER_LABEL;
+  markerText.textContent = markerLabel;
   marker.appendChild(markerText);
   actions.appendChild(marker);
 
