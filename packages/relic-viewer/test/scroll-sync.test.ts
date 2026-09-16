@@ -83,9 +83,15 @@ class FrameScrollerStub implements FrameScroller {
 
   emitScroll(fraction: number): void {
     this.fraction = fraction;
-    const event = new CustomEvent('relic:frame-scroll', {
+    // A plain object rather than `new CustomEvent`. Bun's test runtime has no
+    // DOM: this passed locally only because another test file registers DOM
+    // globals and the runner happened to load it first, and it failed in CI
+    // with "CustomEvent is not defined". The listener reads `type` and
+    // `detail` and nothing else, so the shape is the whole contract.
+    const event = {
+      type: 'relic:frame-scroll',
       detail: { fraction },
-    });
+    } as unknown as Event;
     for (const listener of [...this.listeners]) listener(event);
   }
 
