@@ -2543,7 +2543,8 @@ export function commentRow(
     const unversioned = document.createElement('span');
     unversioned.className = 'comment-badge comment-badge-unversioned';
     unversioned.textContent = 'Version unknown';
-    unversioned.title = 'Predates versioning';
+    // setAttribute rather than the title property, because the badge is read
+    // back through getAttribute in tests and the two were being set twice.
     unversioned.setAttribute('title', 'Predates versioning');
     head.appendChild(unversioned);
   }
