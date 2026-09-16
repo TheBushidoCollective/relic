@@ -240,6 +240,7 @@ body {
   display: flex;
   align-items: stretch;
   gap: 0;
+  flex: none;
   min-height: var(--bar-height);
   background: var(--surface);
   border-bottom: 1px solid var(--rule-strong);
@@ -1058,7 +1059,14 @@ canvas.relic-page {
 /* ---------- version history ---------- */
 
 .stage-diff {
-  padding-top: 1.25rem;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 1.25rem 1.25rem 0;
+  overflow: hidden;
 }
 
 /*
@@ -1072,15 +1080,21 @@ canvas.relic-page {
  * and `.stage-diff`'s padding is the only gutter wanted here.
  */
 .diff-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
   max-width: none;
 }
 
 .diff-toolbar {
+  flex: none;
   display: flex;
   align-items: end;
   justify-content: space-between;
   gap: 2rem;
-  padding: 0 0 1rem;
+  padding: 0 0 0.75rem;
   border-bottom: 1px solid var(--rule-strong);
 }
 
@@ -1180,6 +1194,8 @@ canvas.relic-page {
 .compare-stage {
   --split: 50%;
   position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--rule-strong);
   background: var(--surface);
@@ -1192,6 +1208,7 @@ canvas.relic-page {
 .compare-stage[data-layout='swipe'] .compare-pane {
   grid-area: 1 / 1;
   min-width: 0;
+  height: 100%;
 }
 
 .compare-stage[data-layout='swipe'] .compare-pane-current {
@@ -1205,6 +1222,7 @@ canvas.relic-page {
 
 .compare-stage[data-layout='split'] .compare-pane {
   min-width: 0;
+  height: 100%;
 }
 
 .compare-stage[data-layout='split'] .compare-pane-before {
@@ -1217,7 +1235,9 @@ canvas.relic-page {
 
 .compare-pane {
   overflow: auto;
-  max-height: 72vh;
+  flex: 1 1 0;
+  min-height: 0;
+  height: 100%;
 }
 
 /* Prose panes carry their own reading padding; a frame brings its own page. */
@@ -1228,10 +1248,9 @@ canvas.relic-page {
 .compare-pane .usercontent-frame {
   display: block;
   width: 100%;
-  height: 72vh;
+  height: 100%;
   border: 0;
 }
-
 .compare-divider {
   position: absolute;
   top: 0;
@@ -1326,6 +1345,10 @@ canvas.relic-page {
   margin-top: 1rem;
 }
 
+.diff-rendered-result:empty {
+  display: none;
+}
+
 /* What changed, in rendered terms. Attacker text arrives as text nodes. */
 .diff-change-list {
   margin: 0;
@@ -1383,7 +1406,11 @@ canvas.relic-page {
 }
 
 .diff-result {
-  padding-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 0.75rem;
 }
 
 .diff-loading {
@@ -1403,9 +1430,9 @@ canvas.relic-page {
 .diff-single {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   gap: 1rem;
-  max-width: 46rem;
-  margin: 0 auto;
 }
 
 .diff-single > .notice {
@@ -1424,12 +1451,21 @@ canvas.relic-page {
    second narrower one inside this one. */
 .diff-single > .doc,
 .diff-single > .stage {
+  flex: 1 1 auto;
+  min-height: 0;
   margin: 0;
   max-width: none;
 }
 
-.diff-view {
-  min-width: 0;
+.diff-view,
+.diff-view-markdown,
+.diff-view-rendered,
+.diff-view-code,
+.diff-view-image {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .diff-summary {
@@ -1462,7 +1498,9 @@ canvas.relic-page {
 }
 
 .diff-changes {
-  overflow: hidden;
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
   border: 1px solid var(--rule-strong);
   background: var(--surface);
   font-family: var(--mono);
@@ -1529,11 +1567,16 @@ canvas.relic-page {
   --split: 50%;
   position: relative;
   display: grid;
-  place-items: center;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
-  min-height: 16rem;
   border: 1px solid var(--rule-strong);
   background: var(--surface);
+  place-items: center;
+}
+
+.image-diff-control {
+  flex: none;
 }
 
 .image-diff-canvas img {
@@ -1593,7 +1636,7 @@ canvas.relic-page {
 
 @media (max-width: 44rem) {
   .stage-diff {
-    padding: 1rem 0.65rem 3rem;
+    padding: 1rem 0.65rem 0;
   }
 
   .diff-toolbar {
@@ -1611,6 +1654,7 @@ canvas.relic-page {
      layout stacks and the swipe control keeps working either way. */
   .compare-stage[data-layout='split'] {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .compare-stage[data-layout='split'] .compare-pane-before {
@@ -1628,8 +1672,8 @@ canvas.relic-page {
 
   .compare-pane,
   .compare-pane .usercontent-frame {
-    max-height: 60vh;
-    height: 60vh;
+    max-height: none;
+    height: 100%;
   }
 
   .compare-pane .prose {
@@ -1740,6 +1784,46 @@ canvas.relic-page {
   border-right: 0;
   cursor: pointer;
   transform: translateY(-50%);
+}
+
+.diff-row {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.diff-changes-sidebar .thread-title {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.diff-changes-sidebar .thread-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.diff-changes-body {
+  padding: 0.75rem 0 1.5rem;
+}
+
+.diff-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .thread-tab:focus-visible {

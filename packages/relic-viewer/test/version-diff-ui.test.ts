@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { encodeFragment, generateKey } from '@relic/format';
+import { encodeFragment, encryptRelic, generateKey } from '@relic/format';
 import { MAX_DIFF_BYTES } from '../src/diff.ts';
 import {
   buildBar,
+  buildChangesSidebar,
   buildComparePicker,
   buildComparisonScaffold,
   buildCurrentStage,
@@ -51,6 +52,19 @@ class ElementStub {
     },
     contains: (name: string): boolean => {
       return this.className.split(' ').includes(name);
+    },
+    toggle: (name: string, force?: boolean): boolean => {
+      const exists = this.className.split(' ').includes(name);
+      const next = force !== undefined ? force : !exists;
+      if (next) {
+        if (!exists) this.className = `${this.className} ${name}`.trim();
+      } else {
+        this.className = this.className
+          .split(' ')
+          .filter((c) => c !== name)
+          .join(' ');
+      }
+      return next;
     },
   };
   readonly listeners: Record<string, ((event?: unknown) => void)[]> = {};
@@ -435,6 +449,120 @@ describe('version comparison affordance', () => {
 
     expect(withClass(docBody, 'stage-diff')).toHaveLength(0);
     expect(withClass(docBody, 'stage-code')).toHaveLength(1);
+  });
+
+  test('picking version 2 from the version control renders version 2 on its own with no compare surface', async () => {
+    const key = generateKey();
+    const current = view(
+      'code',
+      3,
+      encoder.encode('current'),
+      3,
+      `https://relik.example/aaaaaaaaaaaaaaaaaaaaaaaaaa#${encodeFragment(key)}`
+    );
+    const v2Bytes = await encryptRelic({
+      key,
+      content: new TextEncoder().encode('version 2 content\n'),
+      filename: 'notes.ts',
+      mimetype: 'text/typescript',
+    });
+
+    renderReady(
+      current,
+      'aaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'https://relik-usercontent.example',
+      dummyDeps((async (input) => {
+        const url = String(input);
+        if (url.endsWith('/mint')) {
+          return Response.json({
+            url: 'https://storage.example/v2',
+            object_length: v2Bytes.length,
+            version: 2,
+            current_version: 3,
+          });
+        }
+        return new Response(v2Bytes as unknown as BodyInit);
+      }) as typeof globalThis.fetch)
+    );
+
+    const docBody = getBody();
+
+    // Select version 2 from the taskbar version control dropdown
+    const v2Option = withClass(docBody, 'version-option').find(
+      (opt) => opt.dataset['version'] === '2'
+    );
+    if (v2Option === undefined) throw new Error('no v2 option in taskbar');
+
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const origReplace = docBody.replaceChildren.bind(docBody);
+    docBody.replaceChildren = (...args) => {
+      origReplace(...args);
+      resolve();
+    };
+
+    v2Option.click();
+    await promise;
+    docBody.replaceChildren = origReplace;
+    // Version 2 renders on its own
+    expect(withClass(docBody, 'stage-diff')).toHaveLength(0);
+    expect(withClass(docBody, 'compare-picker')).toHaveLength(0);
+    expect(withClass(docBody, 'diff-changes-sidebar')).toHaveLength(0);
+    expect(withClass(docBody, 'stage-code')).toHaveLength(1);
+    expect(textOf(docBody)).toContain('Version 2 of 3');
+
+    // Compare toggle is present and discoverable from that state
+    const compareBtn = descendants(docBody).find(
+      (el) => el.tagName === 'BUTTON' && textOf(el).includes('Compare versions')
+    );
+    expect(compareBtn).toBeDefined();
+
+    // Toggling compare on produces the picker plus two panes and changes sidebar
+    compareBtn?.click();
+    expect(withClass(docBody, 'stage-diff')).toHaveLength(1);
+    expect(withClass(docBody, 'compare-picker')).toHaveLength(1);
+    expect(withClass(docBody, 'diff-changes-sidebar')).toHaveLength(1);
+
+    // Toggling compare off returns to version 2 (the single version the reader was on)
+    const viewCurrentBtn = descendants(docBody).find(
+      (el) => el.tagName === 'BUTTON' && textOf(el).includes('View current')
+    );
+    expect(viewCurrentBtn).toBeDefined();
+    viewCurrentBtn?.click();
+
+    expect(withClass(docBody, 'stage-diff')).toHaveLength(0);
+    expect(withClass(docBody, 'compare-picker')).toHaveLength(0);
+    expect(withClass(docBody, 'diff-changes-sidebar')).toHaveLength(0);
+    expect(textOf(docBody)).toContain('Version 2 of 3');
+  });
+
+  test('the changes sidebar is present, collapses, reopens, and reports its count', () => {
+    const sidebarHandle = buildChangesSidebar();
+    const sidebar = sidebarHandle.sidebar as unknown as ElementStub;
+    const tab = sidebarHandle.tab as unknown as ElementStub;
+
+    expect(sidebar.className).toContain('is-open');
+    expect(textOf(sidebar)).toContain('Changes');
+    expect(textOf(tab)).toContain('Changes');
+
+    // Reports count when changes arrive
+    sidebarHandle.setChanges(5, undefined);
+    expect(textOf(sidebar)).toContain('5');
+    expect(textOf(tab)).toContain('5');
+    expect(sidebar.className).toContain('is-open');
+
+    // Collapses when toggle clicked
+    const toggle = withClass(sidebar, 'thread-toggle')[0];
+    if (toggle === undefined) throw new Error('no toggle button');
+    toggle.click();
+    expect(sidebar.className).not.toContain('is-open');
+    expect(toggle.attributes.get('aria-expanded')).toBe('false');
+    expect(tab.attributes.get('aria-expanded')).toBe('false');
+
+    // Reopens when tab clicked
+    tab.click();
+    expect(sidebar.className).toContain('is-open');
+    expect(toggle.attributes.get('aria-expanded')).toBe('true');
+    expect(tab.attributes.get('aria-expanded')).toBe('true');
   });
 
   test('a version that cannot be decrypted shows the refusal notice', async () => {
