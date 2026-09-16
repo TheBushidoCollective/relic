@@ -7,6 +7,7 @@ import {
   buildComparePicker,
   buildComparisonScaffold,
   buildCurrentStage,
+  commentRow,
   comparisonCopy,
   renderCodeComparison,
   renderComparison,
@@ -523,11 +524,14 @@ describe('version comparison affordance', () => {
     expect(withClass(docBody, 'diff-changes-sidebar')).toHaveLength(1);
 
     // Toggling compare off returns to version 2 (the single version the reader was on)
-    const viewCurrentBtn = descendants(docBody).find(
-      (el) => el.tagName === 'BUTTON' && textOf(el).includes('View current')
+    const exitBtn = descendants(docBody).find(
+      (el) => el.tagName === 'BUTTON' && textOf(el).includes('View version 2')
     );
-    expect(viewCurrentBtn).toBeDefined();
-    viewCurrentBtn?.click();
+    expect(exitBtn).toBeDefined();
+    expect(exitBtn?.attributes.get('aria-label')).toBe(
+      'Return to viewing version 2'
+    );
+    exitBtn?.click();
 
     expect(withClass(docBody, 'stage-diff')).toHaveLength(0);
     expect(withClass(docBody, 'compare-picker')).toHaveLength(0);
@@ -563,6 +567,26 @@ describe('version comparison affordance', () => {
     expect(sidebar.className).toContain('is-open');
     expect(toggle.attributes.get('aria-expanded')).toBe('true');
     expect(tab.attributes.get('aria-expanded')).toBe('true');
+  });
+
+  test('commentRow displays unversioned badge when version is null', () => {
+    const entry = {
+      kind: 'open' as const,
+      id: 'c1',
+      author: 'ada@example.com',
+      createdAt: new Date().toISOString(),
+      body: 'historical comment',
+      displayName: null,
+      anchor: null,
+      version: null,
+    };
+    const row = commentRow(entry) as unknown as ElementStub;
+    expect(textOf(row)).toContain('Predates versioning');
+    expect(withClass(row, 'comment-badge-unversioned')).toHaveLength(1);
+
+    const versionedEntry = { ...entry, version: 2 };
+    const versionedRow = commentRow(versionedEntry) as unknown as ElementStub;
+    expect(textOf(versionedRow)).not.toContain('Predates versioning');
   });
 
   test('a version that cannot be decrypted shows the refusal notice', async () => {

@@ -575,18 +575,30 @@ export function buildBar(
     // on something that cannot be compared is the kind of promise that reads
     // to a reader as their own failure when it does not happen.
     const closed = canCompare ? 'Compare versions' : 'Earlier versions';
-    const label = options.comparisonOpen === true ? 'View current' : closed;
+    const exitLabel =
+      view.version === view.currentVersion
+        ? 'View current'
+        : `View version ${view.version}`;
+    const label = options.comparisonOpen === true ? exitLabel : closed;
     const compare = button(label, ICONS.compare, options.onCompare);
     compare.setAttribute(
       'aria-pressed',
       options.comparisonOpen === true ? 'true' : 'false'
     );
+    compare.setAttribute(
+      'aria-label',
+      options.comparisonOpen === true
+        ? `Return to viewing version ${view.version}`
+        : canCompare
+          ? `Compare version ${view.version} with its history`
+          : 'Open an earlier version of this relic'
+    );
     compare.title =
       options.comparisonOpen === true
-        ? `Return to version ${view.currentVersion}`
+        ? `Return to viewing version ${view.version}`
         : canCompare
-          ? `Compare version ${view.currentVersion} with its history`
-          : `Open an earlier version of this relic`;
+          ? `Compare version ${view.version} with its history`
+          : 'Open an earlier version of this relic';
     actions.appendChild(compare);
   }
 
@@ -2467,6 +2479,12 @@ export function commentRow(
     badge.textContent = 'Published this relic';
     head.appendChild(badge);
   }
+  if (entry.version === null || entry.version === undefined) {
+    const unversioned = document.createElement('span');
+    unversioned.className = 'comment-badge comment-badge-unversioned';
+    unversioned.textContent = 'Predates versioning';
+    head.appendChild(unversioned);
+  }
 
   if (entry.createdAt !== null) {
     const time = document.createElement('time');
@@ -4306,22 +4324,39 @@ export function buildThread(
     // Paint first, then build the rows. Which marks landed is only known
     // after the paint pass, and a row that has to say its mark could not be
     // placed cannot be built before that is decided.
-    paintMarks(state.entries);
+    const viewedVersion = view.version;
+    const isCurrentVersion = view.version === view.currentVersion;
+    const filteredEntries = state.entries.filter((entry) => {
+      if (entry.version === viewedVersion) return true;
+      if (
+        (entry.version === null || entry.version === undefined) &&
+        isCurrentVersion
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    paintMarks(filteredEntries);
     list.replaceChildren(
-      // Not a bare `map(commentRow)`: `map` passes the index as the second
-      // argument, which would make every row after the first claim its mark
-      // was unplaceable.
-      ...state.entries.map((entry) =>
+      ...filteredEntries.map((entry) =>
         commentRow(entry, entry.id !== null && unplaceable.has(entry.id))
       )
     );
-    updateThreadToggle(toggle, state.entries.length);
+    updateThreadToggle(toggle, filteredEntries.length);
     status.replaceChildren(
-      ...(state.entries.length === 0
-        ? [line('thread-note', THREAD_EMPTY_NOTE)]
+      ...(filteredEntries.length === 0
+        ? [
+            line(
+              'thread-note',
+              isCurrentVersion
+                ? THREAD_EMPTY_NOTE
+                : `No comments on version ${viewedVersion}.`
+            ),
+          ]
         : [])
     );
-    onCount(state.entries.length);
+    onCount(filteredEntries.length);
   };
 
   /** The address form, for a reader this browser has not verified. */
@@ -4470,30 +4505,32 @@ export function buildThread(
       marks.clear();
       post.disabled = true;
       outcome.replaceChildren(line('thread-note', 'Encrypting and posting.'));
-      void postComment(relicId, draft, deps, sealer).then(async (result) => {
-        post.disabled = false;
-        if (result.kind === 'refused') {
-          outcome.replaceChildren(threadRefusal(result.refusal, () => {}));
-          if (result.refusal.code === 'invalid_session') {
-            session = { kind: 'anonymous' };
-            composer.replaceChildren(composeIdentity());
+      void postComment(relicId, draft, deps, sealer, view.version).then(
+        async (result) => {
+          post.disabled = false;
+          if (result.kind === 'refused') {
+            outcome.replaceChildren(threadRefusal(result.refusal, () => {}));
+            if (result.refusal.code === 'invalid_session') {
+              session = { kind: 'anonymous' };
+              composer.replaceChildren(composeIdentity());
+            }
+            return;
           }
-          return;
+          body.value = '';
+          // The body is this comment's and goes. The name is the reader's and
+          // stays, here and on the next relic they open.
+          writeDisplayName(name.value);
+          paintCount();
+          outcome.replaceChildren(
+            line(
+              'thread-note',
+              `Posted as ${plainLabel(result.author)}, which is what everybody ` +
+                'holding this link now sees.'
+            )
+          );
+          await refresh();
         }
-        body.value = '';
-        // The body is this comment's and goes. The name is the reader's and
-        // stays, here and on the next relic they open.
-        writeDisplayName(name.value);
-        paintCount();
-        outcome.replaceChildren(
-          line(
-            'thread-note',
-            `Posted as ${plainLabel(result.author)}, which is what everybody ` +
-              'holding this link now sees.'
-          )
-        );
-        await refresh();
-      });
+      );
     });
 
     return form;
@@ -4683,10 +4720,20 @@ export function renderReady(
           }),
     });
   }
-
   const showSingle = (viewToShow: ReadyView): void => {
     activeView = viewToShow;
     bar = barFor(false);
+    if (viewToShow.route !== 'download') {
+      thread = buildThread(viewToShow, relicId, deps, (count) => {
+        commentCount = count;
+        if (bar === undefined) return;
+        const replacement = barFor(false);
+        bar.replaceWith(replacement);
+        bar = replacement;
+      });
+    } else {
+      thread = undefined;
+    }
     const stage = buildStageWrap(viewToShow, usercontentOrigin);
     document.body.replaceChildren(
       bar,
@@ -4714,7 +4761,7 @@ export function renderReady(
 
   const showComparison = (left?: number, right?: number): void => {
     renderComparison(
-      view,
+      activeView,
       relicId,
       usercontentOrigin,
       deps,

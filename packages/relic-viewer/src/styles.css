@@ -2057,6 +2057,11 @@ canvas.relic-page {
   text-transform: uppercase;
 }
 
+.comment-badge-unversioned {
+  border-color: var(--rule-strong);
+  color: var(--ink-soft);
+}
+
 .comment-time {
   margin-left: auto;
   color: var(--ink-soft);
