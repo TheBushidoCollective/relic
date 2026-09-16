@@ -1317,6 +1317,11 @@ export function createApp(options: AppOptions = {}): RelicApp {
     }
 
     const body = (await readJson(request)) as Record<string, unknown>;
+    const author = await resolveAuthor(body, request, row.publishTokenHash);
+    if (author === undefined) {
+      return refuse('invalid_session', { relic_id: relicId });
+    }
+
     const explicitVersion = body['version'];
     let commentVersion: number;
     if (explicitVersion === undefined) {
@@ -1342,11 +1347,6 @@ export function createApp(options: AppOptions = {}): RelicApp {
     }
     if (ciphertext.length > config.commentCiphertextCapChars) {
       return refuse('invalid_comment', { relic_id: relicId });
-    }
-
-    const author = await resolveAuthor(body, request, row.publishTokenHash);
-    if (author === undefined) {
-      return refuse('invalid_session', { relic_id: relicId });
     }
 
     const commentId = newCommentId();

@@ -2432,6 +2432,24 @@ describe('comments', () => {
     expect(await app.store.listComments(id)).toHaveLength(0);
   });
 
+  test('unauthenticated caller with out-of-range version receives 401 rather than 400', async () => {
+    const { id } = await publish();
+
+    // No session cookie and no publish token provided
+    const response = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'YWJjZA',
+          version: 999,
+        }),
+      })
+    );
+    expect(response.status).toBe(401);
+    const problem = (await response.json()) as Record<string, unknown>;
+    expect(problem['code']).toBe('invalid_session');
+  });
+
   test('get returns version as a number for versioned rows and null for legacy rows', async () => {
     const { id, grant } = await publish();
     const token = grant['publish_token'] as string;
