@@ -2003,6 +2003,14 @@ interface ThreadHandle {
   readonly resizer: HTMLElement;
   /** Opens or closes the sidebar beside the relic. */
   readonly toggle: () => void;
+  /**
+   * Settles when the first load has finished painting.
+   *
+   * A caller that discards the page while this is pending leaves a fetch
+   * whose continuation has nowhere to paint. Tests await it; the browser
+   * path ignores it, because there the page outlives the fetch.
+   */
+  readonly ready: Promise<void>;
   /** The stage the marks are painted on. */
   readonly attach: (host: HTMLElement) => void;
 }
@@ -3725,6 +3733,10 @@ export function buildThread(
     if (opener === undefined) return;
     status.replaceChildren(line('thread-note', THREAD_LOADING_NOTE));
     const state = await loadThread(relicId, deps, opener);
+    // The fetch above can outlive the page that asked for it. In a browser
+    // this is a navigation; under test it is teardown. Either way there is
+    // nothing left to paint into, and painting is what throws.
+    if (typeof document === 'undefined') return;
     if (state.kind === 'refused') {
       list.replaceChildren();
       status.replaceChildren(
@@ -3981,6 +3993,7 @@ export function buildThread(
     }
     cipher = commentCipher(await deriveCommentKey(key));
     const [, discovered] = await Promise.all([refresh(), readSession(deps)]);
+    if (typeof document === 'undefined') return;
     session = discovered;
     paintComposer();
     if (
@@ -4004,12 +4017,19 @@ export function buildThread(
     if (document.visibilityState === 'visible') void recheck();
   });
 
-  void initialise();
+  // Exposed rather than fired and forgotten. A caller that tears its page
+  // down while this is in flight gets the continuation painting into a
+  // document that no longer exists, which is exactly what happened in CI:
+  // two unhandled `document is not defined` errors between test files, from
+  // a thread whose fetch outlived the test that started it.
+  const ready = initialise();
+  void ready;
 
   return {
     element: section,
     tab,
     resizer,
+    ready,
     toggle: toggleOpen,
     attach: (next) => {
       host = next;
