@@ -1262,6 +1262,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
         author: row.author,
         created_at: new Date(row.createdAt).toISOString(),
         ciphertext: row.ciphertext,
+        version: row.version ?? null,
       }))
     );
   }
@@ -1316,6 +1317,25 @@ export function createApp(options: AppOptions = {}): RelicApp {
     }
 
     const body = (await readJson(request)) as Record<string, unknown>;
+    const author = await resolveAuthor(body, request, row.publishTokenHash);
+    if (author === undefined) {
+      return refuse('invalid_session', { relic_id: relicId });
+    }
+
+    const explicitVersion = body['version'];
+    let commentVersion: number;
+    if (explicitVersion === undefined) {
+      commentVersion = row.version;
+    } else if (
+      typeof explicitVersion !== 'number' ||
+      !Number.isSafeInteger(explicitVersion) ||
+      explicitVersion < 1 ||
+      explicitVersion > row.version
+    ) {
+      return refuse('invalid_relic_version', { relic_id: relicId });
+    } else {
+      commentVersion = explicitVersion;
+    }
 
     // The one thing this server can check about a comment. The plaintext
     // caps live in `@relic/format` ahead of encryption and cannot be
@@ -1329,11 +1349,6 @@ export function createApp(options: AppOptions = {}): RelicApp {
       return refuse('invalid_comment', { relic_id: relicId });
     }
 
-    const author = await resolveAuthor(body, request, row.publishTokenHash);
-    if (author === undefined) {
-      return refuse('invalid_session', { relic_id: relicId });
-    }
-
     const commentId = newCommentId();
     await store.putComment({
       id: commentId,
@@ -1341,6 +1356,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       author,
       createdAt: now,
       ciphertext,
+      version: commentVersion,
     });
 
     return json(

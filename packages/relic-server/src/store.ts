@@ -134,6 +134,7 @@ export interface CommentRow {
   readonly author: string;
   readonly createdAt: number;
   readonly ciphertext: string;
+  readonly version?: number | undefined;
 }
 
 /** Summary of an author's engagement with a relic. */
@@ -396,7 +397,14 @@ export class MemoryStore implements RelicStore {
 
   async putComment(row: CommentRow): Promise<void> {
     const thread = this.comments.get(row.relicId) ?? [];
-    thread.push(row);
+    thread.push({
+      id: row.id,
+      relicId: row.relicId,
+      author: row.author,
+      createdAt: row.createdAt,
+      ciphertext: row.ciphertext,
+      version: typeof row.version === 'number' ? row.version : undefined,
+    });
     this.comments.set(row.relicId, thread);
   }
 

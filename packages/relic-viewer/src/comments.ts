@@ -56,6 +56,7 @@ export interface CommentRecord {
   readonly author: string;
   readonly created_at: string;
   readonly ciphertext: string;
+  readonly version?: number | null;
 }
 
 /**
@@ -80,12 +81,14 @@ export type CommentEntry =
       readonly body: string;
       readonly displayName: string | null;
       readonly anchor: CommentAnchor | null;
+      readonly version?: number | null;
     }
   | {
       readonly kind: 'sealed';
       readonly id: string;
       readonly author: string;
       readonly createdAt: string;
+      readonly version?: number | null;
     }
   | {
       /** Whatever the row did carry. Any of it may be absent. */
@@ -93,6 +96,7 @@ export type CommentEntry =
       readonly id: string | null;
       readonly author: string | null;
       readonly createdAt: string | null;
+      readonly version?: number | null;
     };
 
 /** The literal author the contract uses for a publish-token comment. */
@@ -370,11 +374,19 @@ function stringField(value: unknown, name: string): string | null {
  * holds something they are not seeing rather than shown a shorter thread.
  */
 function unreadableEntry(record: unknown): CommentEntry {
+  const version =
+    typeof record === 'object' &&
+    record !== null &&
+    'version' in record &&
+    typeof (record as { version?: unknown }).version === 'number'
+      ? (record as { version: number }).version
+      : null;
   return {
     kind: 'unreadable',
     id: stringField(record, 'comment_id'),
     author: stringField(record, 'author'),
     createdAt: stringField(record, 'created_at'),
+    version,
   };
 }
 
@@ -497,6 +509,7 @@ export async function openEntry(
   record: CommentRecord,
   cipher: CommentCipher
 ): Promise<CommentEntry> {
+  const version = typeof record.version === 'number' ? record.version : null;
   try {
     const plaintext = await cipher.open(record.ciphertext);
     return {
@@ -510,6 +523,7 @@ export async function openEntry(
           ? plaintext.display_name
           : null,
       anchor: plaintext.anchor ?? null,
+      version,
     };
   } catch (error) {
     // `format.md` 3.13 gives a decrypt failure no cause, and a malformed
@@ -527,6 +541,7 @@ export async function openEntry(
       id: record.comment_id,
       author: record.author,
       createdAt: record.created_at,
+      version,
     };
   }
 }
@@ -583,7 +598,8 @@ export async function postComment(
   relicId: string,
   draft: CommentPlaintext,
   deps: ViewerDeps,
-  cipher: CommentCipher
+  cipher: CommentCipher,
+  version?: number
 ): Promise<PostResult> {
   if (draft.body.trim().length === 0) {
     return { kind: 'refused', refusal: commentRefusal('empty_body') };
@@ -607,7 +623,10 @@ export async function postComment(
     response = await deps.fetch(commentsUrl(deps.serviceOrigin, relicId), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ciphertext }),
+      body: JSON.stringify({
+        ciphertext,
+        ...(typeof version === 'number' ? { version } : {}),
+      }),
     });
   } catch {
     return { kind: 'refused', refusal: commentRefusal('network') };

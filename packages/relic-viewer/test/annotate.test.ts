@@ -481,6 +481,9 @@ export async function mount(
     reported += 1;
     announce?.();
   });
+  // Awaited, so the thread's first load cannot resolve after this test has
+  // torn its document down. Unawaited it threw between test files in CI.
+  await handle.ready;
   const loaded = async (): Promise<void> => {
     if (reported <= awaited) {
       await new Promise<void>((resolve) => {
