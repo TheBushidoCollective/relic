@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   buildBar,
+  markerLabelFor,
   renderSandboxedHtml,
   renderSandboxedJsx,
   safeDownloadName,
@@ -13,7 +14,7 @@ import {
   isRenderMessage,
 } from '../src/sandbox.ts';
 import { isCacheable } from '../src/sw.ts';
-import type { ReadyView } from '../src/viewer.ts';
+import type { ReadyView, RenderRoute } from '../src/viewer.ts';
 
 describe('safeDownloadName', () => {
   // The filename is untrusted display text used here as a lookup key, which
@@ -399,6 +400,49 @@ describe('the usercontent frame the render routes build', () => {
       USERCONTENT_ORIGIN
     );
     expect(sandboxAttributeOf(wrapper)).toBe('allow-scripts');
+  });
+
+  test('the marker states what each route actually does with author code', () => {
+    // One string for every relic is how a five-second mp4 came to tell its
+    // recipient it runs the author's code. Only the two sandboxed routes
+    // execute anything an author wrote; the rest are decoded by the browser.
+    const executes: RenderRoute[] = ['sandboxed-html', 'sandboxed-jsx'];
+    const inert: RenderRoute[] = [
+      'markdown',
+      'code',
+      'image',
+      'media',
+      'pdf',
+      'download',
+    ];
+
+    for (const route of [...executes, ...inert]) {
+      const label = markerLabelFor(route);
+      expect(label.length).toBeGreaterThan(0);
+      if (executes.includes(route)) {
+        expect(label).toBe('Runs author code, isolated');
+      } else {
+        expect(label).not.toContain('Runs author code');
+        expect(label).toContain('no author code');
+      }
+    }
+
+    // And the claim reaches the rendered bar, not just the table: a media
+    // relic's marker must not carry the sandboxed sentence.
+    buildBar(
+      { ...view('sandboxed-html', 'x'), route: 'media', filename: 'clip.mp4' },
+      'aaaaaaaaaaaaaaaaaaaaaaaaaa'
+    );
+    const marker = created.find((element) =>
+      element.className.split(' ').includes('marker')
+    );
+    if (marker === undefined) throw new Error('the bar built no marker');
+    const visible = marker.children
+      .map((child) => child.textContent)
+      .join('')
+      .trim();
+    expect(visible).toBe('Plays in your browser, no author code');
+    expect(marker.attributes.get('aria-label') ?? '').toContain(visible);
   });
 
   test('the marker says the same thing to the eye and to a screen reader', () => {

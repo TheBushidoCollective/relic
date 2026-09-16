@@ -325,3 +325,22 @@ A media relic's card now correctly reads: "An audio or video file. It plays in y
 - `renders` if and only if the route is one of `markdown`, `code`, `image`, `sandboxed-html`, `sandboxed-jsx`
 
 The test is driven from `RENDERER_CLASSES`, ensuring that adding a ninth class to the taxonomy will fail the test immediately unless both viewer routing and card behavior explicitly account for it.
+
+## 2026-09-16: The isolation marker states its route, not the riskiest route
+
+The 2026-08-18 entry above records the pre-render statement being demoted to a compact marker reading "Runs author code, isolated". That string was one constant applied to every relic, so the marker was printed unchanged on relics where no author code runs at all. On a published five-second mp4 the header told its recipient the video runs the author's code, which the browser's media decoder does not do, and which `sandbox.html` is never reached to do.
+
+This is the same defect the 2026-09-13 entry above corrected on the unfurl card, one surface later: a single sentence written for the riskiest class, shown for all of them. The card was fixed by selecting on `CLASS_BEHAVIOUR`. The marker is fixed by selecting on the **route**, which is the stricter key of the two, because the route is what actually executes. `format.md` §3.6 lets a declared class and a sniffed class disagree, and the viewer resolves that to the least privileged of the two before the bar is built, so the marker now states the resolved decision rather than the envelope's claim.
+
+| route | marker |
+|---|---|
+| `sandboxed-html`, `sandboxed-jsx` | Runs author code, isolated |
+| `markdown`, `code` | Rendered as text, no author code |
+| `image` | Shown as an image, no author code |
+| `media` | Plays in your browser, no author code |
+| `pdf` | Rendered as a document, no author code |
+| `download` | Downloads to your device, no author code |
+
+Each line names the mechanism first and then what the reader is owed about author code, so the sentences stay parallel and the one route that does run code reads as the exception. The single string remains the label, the accessible name, and the stem of the tooltip, which is what the 2026-08-18 entry's WCAG 2.5.3 requirement asks for; only its selection changed.
+
+**The guard against recurrence.** A test in `packages/relic-viewer/test/browser.test.ts` walks every route: the two sandboxed routes must read exactly "Runs author code, isolated", and every other route must not contain "Runs author code" and must contain "no author code". It then builds the real bar for a `media` relic and asserts the rendered marker text and its accessible name. Restoring the single constant fails it.
