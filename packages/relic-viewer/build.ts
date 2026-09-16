@@ -30,6 +30,31 @@ export function computeShellHash(
   return hasher.digest('hex').slice(0, 16);
 }
 
+/**
+ * Asserts that the emitted service worker bundle is a valid classic script.
+ * Classic service workers in all browsers (including Firefox) fail evaluation
+ * immediately if any export keyword or top-level import statement is present.
+ */
+export function assertClassicWorkerScript(code: string): void {
+  if (/\bexport\b/.test(code)) {
+    throw new Error(
+      'Emitted sw.js contains forbidden "export" syntax; classic service workers fail evaluation on module syntax'
+    );
+  }
+  if (/\bimport\s*[{*"'\w]/.test(code)) {
+    throw new Error(
+      'Emitted sw.js contains forbidden "import" syntax; classic service workers fail evaluation on module syntax'
+    );
+  }
+  try {
+    new Function(code);
+  } catch (error) {
+    throw new Error(
+      `Emitted sw.js fails classic script syntax evaluation: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
 export async function buildViewer(options?: {
   outdir?: string;
 }): Promise<string> {
@@ -160,11 +185,14 @@ export async function buildViewer(options?: {
 
   const buildHash = computeShellHash(assetBuffers);
 
+  // sw.ts is bundled as an IIFE classic script so it runs in every browser
+  // without module support requirements (Firefox lacks module service workers).
+  // It must never emit export or top-level import syntax.
   const builtSw = await Bun.build({
     entrypoints: [`${pkgDir}src/sw.ts`],
     outdir: out,
     target: 'browser',
-    format: 'esm',
+    format: 'iife',
     minify: true,
     splitting: false,
     naming: '[name].js',
@@ -179,6 +207,12 @@ export async function buildViewer(options?: {
     for (const log of builtSw.logs) console.error(log);
     process.exit(1);
   }
+
+  // Build-time guard: verify that the emitted sw.js parses as a classic worker
+  // script and contains no module syntax. Classic service workers fail evaluation
+  // completely if any export/import is present.
+  const swText = await Bun.file(`${out}sw.js`).text();
+  assertClassicWorkerScript(swText);
 
   const names = (await readdir(out)).sort();
   console.log(

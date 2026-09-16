@@ -98,8 +98,12 @@ export function memoryAssets(
  * origin holding the fragment.
  */
 export const REGISTER_SW_JS = `if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {
-    // An unregistered worker costs offline support and nothing else.
+  navigator.serviceWorker.register('/sw.js').catch((error) => {
+    // A failed registration is logged to the console so syntax, evaluation,
+    // or network errors are visible in DevTools rather than staying silent.
+    // We log as a warning rather than throwing an unhandled rejection, so
+    // viewers continue to function online even if caching cannot be established.
+    console.warn('Service worker registration failed:', error);
   });
 }
 `;

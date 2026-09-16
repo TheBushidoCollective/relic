@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { computeShellHash } from '../build.ts';
-import type { MinimalCache, MinimalCacheStorage } from '../src/sw.ts';
+import { assertClassicWorkerScript, computeShellHash } from '../build.ts';
+import type { MinimalCache, MinimalCacheStorage } from '../src/sw-cache.ts';
 import {
   activateShell,
   installShell,
   isCacheable,
   SHELL_ASSETS,
   shellCacheName,
-} from '../src/sw.ts';
+} from '../src/sw-cache.ts';
 
 class FakeCache implements MinimalCache {
   readonly entries = new Set<string>();
@@ -162,5 +162,59 @@ describe('service worker shell cache generation', () => {
     expect(isCacheable(origin('/assets/viewer.js'), true)).toBe(true);
     expect(isCacheable(origin('/assets/styles.css'), true)).toBe(true);
     expect(isCacheable(origin('/manifest.webmanifest'), true)).toBe(true);
+  });
+});
+
+describe('classic service worker script guards', () => {
+  test('assertClassicWorkerScript rejects scripts containing export syntax', () => {
+    expect(() => {
+      assertClassicWorkerScript('export function isCacheable() {}');
+    }).toThrow('forbidden "export" syntax');
+
+    expect(() => {
+      assertClassicWorkerScript('export { a as b };');
+    }).toThrow('forbidden "export" syntax');
+
+    expect(() => {
+      assertClassicWorkerScript('export default 42;');
+    }).toThrow('forbidden "export" syntax');
+  });
+
+  test('assertClassicWorkerScript rejects scripts containing import syntax', () => {
+    expect(() => {
+      assertClassicWorkerScript('import { foo } from "./foo.js";');
+    }).toThrow('forbidden "import" syntax');
+
+    expect(() => {
+      assertClassicWorkerScript('import "./side-effect.js";');
+    }).toThrow('forbidden "import" syntax');
+  });
+
+  test('assertClassicWorkerScript rejects invalid script syntax', () => {
+    expect(() => {
+      assertClassicWorkerScript('function broken(');
+    }).toThrow('fails classic script syntax evaluation');
+  });
+
+  test('assertClassicWorkerScript accepts valid classic script bodies', () => {
+    expect(() => {
+      assertClassicWorkerScript(
+        '(()=>{self.addEventListener("install",()=>{});})();'
+      );
+    }).not.toThrow();
+  });
+
+  test('the emitted dist/sw.js artifact parses as a classic script with no module syntax', async () => {
+    const pkgDir = new URL('..', import.meta.url).pathname;
+    const swPath = `${pkgDir}dist/sw.js`;
+    const swText = await Bun.file(swPath).text();
+
+    expect(swText.length).toBeGreaterThan(0);
+    expect(/\bexport\b/.test(swText)).toBe(false);
+    expect(/\bimport\s*[{*"'\w]/.test(swText)).toBe(false);
+    expect(swText).toContain('relic-shell-');
+
+    // Asserts clean parsing via the guard
+    expect(() => assertClassicWorkerScript(swText)).not.toThrow();
   });
 });
