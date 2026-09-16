@@ -1357,7 +1357,7 @@ canvas.relic-page {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: min(100%, 28rem);
   min-height: 0;
   padding: 1.25rem 1.25rem 0;
   overflow: hidden;
@@ -1497,11 +1497,14 @@ canvas.relic-page {
 
 .compare-stage[data-layout='swipe'] {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .compare-stage[data-layout='swipe'] .compare-pane {
   grid-area: 1 / 1;
   min-width: 0;
+  min-height: 0;
   height: 100%;
 }
 
@@ -1512,10 +1515,12 @@ canvas.relic-page {
 .compare-stage[data-layout='split'] {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .compare-stage[data-layout='split'] .compare-pane {
   min-width: 0;
+  min-height: 0;
   height: 100%;
 }
 
@@ -1530,6 +1535,7 @@ canvas.relic-page {
 .compare-pane {
   overflow: auto;
   flex: 1 1 0;
+  min-width: 0;
   min-height: 0;
   height: 100%;
 }
@@ -1930,6 +1936,7 @@ canvas.relic-page {
 
 @media (max-width: 44rem) {
   .stage-diff {
+    min-width: 0;
     padding: 1rem 0.65rem 0;
   }
 
@@ -2086,6 +2093,11 @@ canvas.relic-page {
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
+}
+
+.diff-row .thread {
+  flex: 0 1 auto;
+  max-width: calc(100% - 28rem);
 }
 
 .diff-changes-sidebar .thread-title {
@@ -2264,8 +2276,10 @@ canvas.relic-page {
  * without a refetch.
  */
 @media (max-width: 44rem) {
+  .diff-row .thread,
   .thread.is-open {
     width: 100%;
+    max-width: 100%;
   }
 
   /* Nothing left to divide, and a divider floating over the conversation at

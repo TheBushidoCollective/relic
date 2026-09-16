@@ -93,6 +93,42 @@ export function isRenderJsxMessage(data: unknown): data is RenderJsxMessage {
   );
 }
 
+export interface SetScrollMessage {
+  readonly type: 'relic:set-scroll';
+  readonly fraction: number;
+}
+
+export function isSetScrollMessage(data: unknown): data is SetScrollMessage {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'type' in data &&
+    'fraction' in data &&
+    data.type === 'relic:set-scroll' &&
+    typeof data.fraction === 'number' &&
+    Number.isFinite(data.fraction)
+  );
+}
+
+export interface FrameScrollMessage {
+  readonly type: 'relic:frame-scroll';
+  readonly fraction: number;
+}
+
+export function isFrameScrollMessage(
+  data: unknown
+): data is FrameScrollMessage {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'type' in data &&
+    'fraction' in data &&
+    data.type === 'relic:frame-scroll' &&
+    typeof data.fraction === 'number' &&
+    Number.isFinite(data.fraction)
+  );
+}
+
 export interface FrameInteractionHandler {
   setArmed(armed: boolean): void;
   onPaintMark(mark: FrameMarkPayload): boolean;
@@ -101,6 +137,7 @@ export interface FrameInteractionHandler {
   onClearMarks(): void;
   onRevealMark(msg: RevealMarkMessage): void;
   onPairMark(id: string, active: boolean): void;
+  onSetScroll?(fraction: number): void;
 }
 
 export interface FrameInteraction extends FrameInteractionHandler {
@@ -409,6 +446,56 @@ export function clearFrameRegions(root: HTMLElement, id?: string): void {
 /**
  * Setup pointer, selection, and mark manipulation listeners inside the frame.
  */
+/** How far down its travel the document in a window sits, or null when it cannot move. */
+export function documentScrollFraction(
+  doc: Document,
+  win: Window
+): number | null {
+  const el = doc.scrollingElement ?? doc.documentElement;
+  if (!el) return null;
+  const scrollHeight = Math.max(
+    el.scrollHeight ?? 0,
+    doc.body?.scrollHeight ?? 0
+  );
+  const clientHeight = win.innerHeight || el.clientHeight || 0;
+  const travel = scrollHeight - clientHeight;
+  if (!(travel > 0)) return null;
+  const scrollTop = win.scrollY || el.scrollTop || doc.body?.scrollTop || 0;
+  const clamped = Math.min(Math.max(scrollTop, 0), travel);
+  return clamped / travel;
+}
+
+/** Put the document in a window at a fraction of its travel. */
+export function applyDocumentScrollFraction(
+  doc: Document,
+  win: Window,
+  fraction: number
+): void {
+  const el = doc.scrollingElement ?? doc.documentElement;
+  if (!el) return;
+  const scrollHeight = Math.max(
+    el.scrollHeight ?? 0,
+    doc.body?.scrollHeight ?? 0
+  );
+  const clientHeight = win.innerHeight || el.clientHeight || 0;
+  const travel = scrollHeight - clientHeight;
+  if (!(travel > 0)) return;
+  const bounded = Math.min(Math.max(fraction, 0), 1);
+  const target = Math.round(bounded * travel);
+  const current = win.scrollY || el.scrollTop || doc.body?.scrollTop || 0;
+  if (Math.abs(current - target) > 1) {
+    if (typeof win.scrollTo === 'function') {
+      try {
+        win.scrollTo({ top: target, behavior: 'instant' as ScrollBehavior });
+      } catch {
+        win.scrollTo(0, target);
+      }
+    }
+    if (el && el.scrollTop !== target) el.scrollTop = target;
+    if (doc.body && doc.body.scrollTop !== target) doc.body.scrollTop = target;
+  }
+}
+
 export function setupFrameInteraction(
   doc: Document,
   win: Window,
@@ -418,6 +505,17 @@ export function setupFrameInteraction(
   let startX = 0;
   let startY = 0;
   let isDown = false;
+  let suppressScroll = false;
+  let scrollResetTimer: number | undefined;
+
+  const handleScroll = (): void => {
+    if (suppressScroll) return;
+    const fraction = documentScrollFraction(doc, win);
+    if (fraction === null) return;
+    postOutward({ type: 'relic:frame-scroll', fraction });
+  };
+
+  win.addEventListener('scroll', handleScroll, { passive: true });
 
   doc.addEventListener('mousedown', (event: MouseEvent) => {
     if (!armed) return;
@@ -608,6 +706,15 @@ export function setupFrameInteraction(
         target.classList.toggle('is-paired', active);
       }
     },
+
+    onSetScroll(fraction: number) {
+      suppressScroll = true;
+      clearTimeout(scrollResetTimer);
+      applyDocumentScrollFraction(doc, win, fraction);
+      scrollResetTimer = win.setTimeout(() => {
+        suppressScroll = false;
+      }, 50) as unknown as number;
+    },
   };
 }
 
@@ -682,6 +789,10 @@ export function createSandboxHandler(
       return true;
     }
 
+    if (isSetScrollMessage(data)) {
+      interaction?.onSetScroll?.(data.fraction);
+      return true;
+    }
     return false;
   };
 }
@@ -769,6 +880,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       onClearMarks: () => interaction?.onClearMarks(),
       onRevealMark: (msg) => interaction?.onRevealMark(msg),
       onPairMark: (id, active) => interaction?.onPairMark(id, active),
+      onSetScroll: (fraction) => interaction?.onSetScroll?.(fraction),
     }
   );
 
