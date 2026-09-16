@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isCacheable } from '../src/sw.ts';
+import { isCacheable } from '../src/sw-cache.ts';
 
 /**
  * Verifies the committed unfurl card at packages/relic-viewer/public/card.v1.png.

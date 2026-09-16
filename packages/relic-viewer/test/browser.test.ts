@@ -13,7 +13,7 @@ import {
   isRenderJsxMessage,
   isRenderMessage,
 } from '../src/sandbox.ts';
-import { isCacheable } from '../src/sw.ts';
+import { isCacheable } from '../src/sw-cache.ts';
 import type { ReadyView, RenderRoute } from '../src/viewer.ts';
 
 describe('safeDownloadName', () => {
