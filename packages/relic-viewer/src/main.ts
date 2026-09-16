@@ -2226,6 +2226,27 @@ function renderImageChangeNotice(): HTMLElement {
   return list;
 }
 
+/**
+ * Seeds the initial pair of versions to compare.
+ *
+ * Never seeds the same version on both sides. When viewing an earlier version
+ * with a predecessor, it pairs backward (predecessor on the left, viewed version
+ * on the right). When viewing version 1, which has no predecessor, it pairs
+ * forward (version 1 on the left, version 2 on the right).
+ */
+export function seedComparisonPair(
+  viewedVersion: number,
+  currentVersion: number
+): { readonly left: number; readonly right: number } {
+  if (currentVersion <= 1) {
+    return { left: 1, right: 1 };
+  }
+  if (viewedVersion <= 1) {
+    return { left: 1, right: 2 };
+  }
+  return { left: viewedVersion - 1, right: viewedVersion };
+}
+
 export function renderComparison(
   current: ReadyView,
   relicId: string,
@@ -2235,10 +2256,12 @@ export function renderComparison(
   initialLeft?: number,
   initialRight?: number
 ): void {
-  let leftVersion =
-    initialLeft ??
-    (current.currentVersion > 1 ? current.currentVersion - 1 : 1);
-  let rightVersion = initialRight ?? current.currentVersion;
+  const defaultPair = seedComparisonPair(
+    current.version,
+    current.currentVersion
+  );
+  let leftVersion = initialLeft ?? defaultPair.left;
+  let rightVersion = initialRight ?? defaultPair.right;
 
   const versionCache = new Map<number, HistoricalVersionState>();
   if (current.version !== undefined) {
@@ -4706,10 +4729,11 @@ export function renderReady(
         if (comparisonOpen) {
           showSingle(activeView);
         } else {
-          showComparison(
-            activeView.version > 1 ? activeView.version - 1 : 1,
-            activeView.version
+          const pair = seedComparisonPair(
+            activeView.version,
+            activeView.currentVersion
           );
+          showComparison(pair.left, pair.right);
         }
       },
       ...(thread === undefined

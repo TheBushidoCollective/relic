@@ -15,6 +15,7 @@ import {
   renderLoadedVersion,
   renderReady,
   renderRenderedComparison,
+  seedComparisonPair,
   uncomparableReason,
 } from '../src/main.ts';
 import type { ReadyView, ViewerDeps } from '../src/viewer.ts';
@@ -587,6 +588,29 @@ describe('version comparison affordance', () => {
     const versionedEntry = { ...entry, version: 2 };
     const versionedRow = commentRow(versionedEntry) as unknown as ElementStub;
     expect(textOf(versionedRow)).not.toContain('Predates versioning');
+  });
+
+  test('seedComparisonPair never seeds the same version on both sides', () => {
+    for (const total of [2, 3, 4, 5]) {
+      for (let v = 1; v <= total; v++) {
+        const pair = seedComparisonPair(v, total);
+        // This assertion catches the defect where v1 paired with itself:
+        expect(pair.left).not.toBe(pair.right);
+      }
+    }
+  });
+
+  test('viewing version 1 pairs forward to version 2 on compare entry', () => {
+    // These assertions catch the defect where v1 fell back to pairing with itself:
+    const fromV1 = seedComparisonPair(1, 3);
+    expect(fromV1).toEqual({ left: 1, right: 2 });
+    expect(fromV1.left).not.toBe(fromV1.right);
+
+    const fromV2 = seedComparisonPair(2, 3);
+    expect(fromV2).toEqual({ left: 1, right: 2 });
+
+    const fromV3 = seedComparisonPair(3, 3);
+    expect(fromV3).toEqual({ left: 2, right: 3 });
   });
 
   test('a version that cannot be decrypted shows the refusal notice', async () => {
