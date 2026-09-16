@@ -2095,8 +2095,25 @@ canvas.relic-page {
   width: 100%;
 }
 
+/**
+ * The sidebar needs a floor of its own, not just a ceiling.
+ *
+ * Bounding it to `calc(100% - 28rem)` stopped it crushing the comparison,
+ * which was the defect it was written for, and then handed the sidebar
+ * whatever was left: 167px at a 1180 viewport, 192 at 1400, 135 at 900, with
+ * two dozen of its own children overflowing horizontally and its rows reading
+ * "CHANGED par". A squeezed panel is the same defect as a squeezed rail, one
+ * element over.
+ *
+ * So both sides carry a legible minimum and the ceiling stays. `clamp` picks
+ * the reader's dragged width when it fits between them. Below the width where
+ * both minima cannot hold, the narrow rule further down takes over and the
+ * row stacks instead of splitting.
+ */
 .diff-row .thread {
   flex: 0 1 auto;
+  width: clamp(18rem, var(--thread-width, 22rem), calc(100% - 28rem));
+  min-width: 18rem;
   max-width: calc(100% - 28rem);
 }
 
@@ -2279,11 +2296,11 @@ canvas.relic-page {
   .diff-row .thread,
   .thread.is-open {
     width: 100%;
+    /* The floor above is for sharing a row. Here the sidebar owns the row, so
+       carrying a minimum would only let it overflow a narrow screen. */
+    min-width: 0;
     max-width: 100%;
   }
-
-  /* Nothing left to divide, and a divider floating over the conversation at
-     the old width would be a control that no longer does anything. */
   .thread.is-open ~ .thread-resizer {
     display: none;
   }

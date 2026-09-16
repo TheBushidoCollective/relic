@@ -338,6 +338,14 @@ function comparisonLayoutFaults(source: string): readonly string[] {
       'thread in diff-row has no max-width bound leaving room for stage-diff'
     );
   }
+  // The ceiling alone left the sidebar whatever was spare, which measured
+  // 167px at a 1180 viewport with two dozen of its own children overflowing.
+  // A bound needs a floor at both ends or it just moves the crush.
+  if (!/min-width:\s*18rem/.test(threadInDiff)) {
+    faults.push(
+      'thread in diff-row has no legible minimum, so the spare width crushes it'
+    );
+  }
   if (!/grid-template-rows:\s*minmax\(0,\s*1fr\)/.test(splitStage)) {
     faults.push(
       'split comparison stage has no row constraint, expanding to max-content'
@@ -1174,6 +1182,38 @@ describe('comparison layout chain and viewport guards', () => {
       const paneBottom = paneTop + paneClientHeight;
       expect(paneBottom).toBeLessThanOrEqual(vp.height);
     }
+  });
+
+  test('mutation proof: the checker fails when the sidebar loses its minimum', () => {
+    // The shipped bound had only a ceiling, so the sidebar took the spare
+    // width and clipped its own rows. This is that stylesheet.
+    const ceilingOnly = `
+      .stage-diff {
+        min-width: min(100%, 28rem);
+      }
+      .diff-row .thread {
+        flex: 0 1 auto;
+        max-width: calc(100% - 28rem);
+      }
+    `;
+    expect(comparisonLayoutFaults(ceilingOnly)).toContain(
+      'thread in diff-row has no legible minimum, so the spare width crushes it'
+    );
+
+    const both = `
+      .stage-diff {
+        min-width: min(100%, 28rem);
+      }
+      .diff-row .thread {
+        flex: 0 1 auto;
+        width: clamp(18rem, var(--thread-width, 22rem), calc(100% - 28rem));
+        min-width: 18rem;
+        max-width: calc(100% - 28rem);
+      }
+    `;
+    expect(comparisonLayoutFaults(both)).not.toContain(
+      'thread in diff-row has no legible minimum, so the spare width crushes it'
+    );
   });
 
   test('mutation proof: layout fault checker fails if min-width on stage-diff is removed', () => {
