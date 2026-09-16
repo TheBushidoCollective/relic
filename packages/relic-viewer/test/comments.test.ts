@@ -686,6 +686,62 @@ describe('posting a comment', () => {
       anchor: null,
     });
   });
+
+  test('postComment sends the version being viewed', async () => {
+    const calls: Call[] = [];
+    const deps = stubDeps(
+      () => json({ comment_id: 'c9', author: 'ada@example.com' }),
+      calls
+    );
+    const cipher = commentCipher(await deriveCommentKey(KEY_BYTES));
+    await postComment(
+      RELIC_ID,
+      { body: 'on version 2', display_name: null },
+      deps,
+      cipher,
+      2
+    );
+    const parsed: unknown = JSON.parse(calls[0]?.body ?? '{}');
+    expect(parsed).toEqual(
+      expect.objectContaining({
+        version: 2,
+      })
+    );
+  });
+
+  test('loadThread extracts the version from each comment record', async () => {
+    const cipher = commentCipher(await deriveCommentKey(KEY_BYTES));
+    const ct1 = await cipher.seal({ body: 'v1 comment', display_name: null });
+    const ct2 = await cipher.seal({
+      body: 'unversioned comment',
+      display_name: null,
+    });
+    const calls: Call[] = [];
+    const deps = stubDeps(
+      () =>
+        json([
+          {
+            comment_id: 'c1',
+            author: 'a@b.c',
+            created_at: new Date().toISOString(),
+            ciphertext: ct1,
+            version: 1,
+          },
+          {
+            comment_id: 'c2',
+            author: 'a@b.c',
+            created_at: new Date().toISOString(),
+            ciphertext: ct2,
+            version: null,
+          },
+        ]),
+      calls
+    );
+    const state = await loadThread(RELIC_ID, deps, cipher);
+    if (state.kind !== 'ready') throw new Error('thread not ready');
+    expect(state.entries[0]?.version).toBe(1);
+    expect(state.entries[1]?.version).toBeNull();
+  });
 });
 
 describe('the magic-link round trip', () => {

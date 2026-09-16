@@ -87,7 +87,6 @@ import {
   diffModeForRoutes,
   type TextDiffPart,
   versionHistoryAvailability,
-  versionHistoryCopy,
 } from './diff.ts';
 import { diffTrees, type RenderedChange, type TreeDiff } from './domdiff.ts';
 import { transpileJsx } from './jsx.ts';
@@ -105,6 +104,7 @@ import {
   type DashboardRelicRow,
   type DeadView,
   formatBytes,
+  type HistoricalVersionState,
   isKeyEntryRecoverable,
   load,
   loadCommentedRelics,
@@ -308,26 +308,16 @@ function versionLabels(
 }
 
 /**
- * The version chip in the identity zone, which is a control only when there
- * is a choice to make.
+ * The version control on the taskbar.
  *
- * A relic on its second version has exactly one historical version, so a
- * picker there would be a menu with one item: it looks like a decision and
- * offers none. That case renders a label, and Compare versions in the actions
- * zone is the only control. From the third version on there is a real choice,
- * so the chip becomes an owned listbox.
- *
- * Owned rather than a native `select`, and that is a platform limit rather
- * than a styling preference: a native popup cannot be positioned or sized by
- * the page, and on macOS it rendered as a large panel detached from its
- * control, floating in empty space. No stylesheet reaches it.
+ * Offers a dropdown of all versions when onSelectVersion is provided. Selecting
+ * an earlier version displays that version on its own at full height with its
+ * comment thread. Compare mode is entered deliberately through the compare button.
  */
 function buildVersionControl(
   view: ReadyView,
   options: BarOptions
 ): HTMLElement | undefined {
-  // A single-version relic says nothing about versions at all. A number with
-  // no history behind it invites a question that has no answer.
   if (!Number.isInteger(view.currentVersion) || view.currentVersion <= 1) {
     return undefined;
   }
@@ -349,7 +339,7 @@ function buildVersionControl(
   };
 
   const onSelect = options.onSelectVersion;
-  if (onSelect === undefined || view.currentVersion < 3) {
+  if (onSelect === undefined) {
     const label = document.createElement('div');
     label.className = 'version-label';
     text(label);
@@ -364,7 +354,7 @@ function buildVersionControl(
   trigger.setAttribute('aria-expanded', 'false');
   trigger.setAttribute(
     'aria-label',
-    `${labels.long}. Choose an earlier version to compare`
+    `${labels.long}. Choose a version to view`
   );
   text(trigger);
   trigger.appendChild(icon(ICONS.chevron));
@@ -372,19 +362,21 @@ function buildVersionControl(
   const list = document.createElement('div');
   list.className = 'version-list';
   list.setAttribute('role', 'listbox');
-  list.setAttribute('aria-label', 'Earlier version to compare');
+  list.setAttribute('aria-label', 'Version to view');
   list.hidden = true;
 
   const optionElements: HTMLElement[] = [];
-  for (let version = view.currentVersion - 1; version >= 1; version--) {
+  for (let version = view.currentVersion; version >= 1; version--) {
     const option = document.createElement('div');
     option.className = 'version-option';
+    option.dataset['version'] = String(version);
     option.setAttribute('role', 'option');
     option.setAttribute('aria-selected', version === shown ? 'true' : 'false');
-    // Roving focus rather than a tab stop each: a listbox is one stop, and
-    // arrow keys move within it.
     option.tabIndex = -1;
-    option.textContent = `Version ${version}`;
+    option.textContent =
+      version === view.currentVersion
+        ? `Version ${version}, current`
+        : `Version ${version}`;
     option.addEventListener('click', () => {
       close();
       onSelect(version);
@@ -417,14 +409,29 @@ function buildVersionControl(
 
   trigger.addEventListener('click', () => {
     if (open) close();
-    else show(0);
+    else {
+      const currentIndex = optionElements.findIndex(
+        (el) => Number(el.dataset['version']) === shown
+      );
+      show(currentIndex >= 0 ? currentIndex : 0);
+    }
   });
 
   trigger.addEventListener('keydown', (event: KeyboardEvent) => {
-    if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ')
-      show(0);
-    else if (event.key === 'ArrowUp') show(optionElements.length - 1);
-    else return;
+    if (
+      event.key === 'ArrowDown' ||
+      event.key === 'Enter' ||
+      event.key === ' '
+    ) {
+      const currentIndex = optionElements.findIndex(
+        (el) => Number(el.dataset['version']) === shown
+      );
+      show(currentIndex >= 0 ? currentIndex : 0);
+    } else if (event.key === 'ArrowUp') {
+      show(optionElements.length - 1);
+    } else {
+      return;
+    }
     event.preventDefault();
   });
 
@@ -436,15 +443,14 @@ function buildVersionControl(
     else if (event.key === 'Home') move(index, -optionElements.length);
     else if (event.key === 'End') move(index, optionElements.length);
     else if (event.key === 'Escape' || event.key === 'Tab') close(true);
-    else if (event.key === 'Enter' || event.key === ' ')
+    else if (event.key === 'Enter' || event.key === ' ') {
       optionElements[index]?.click();
-    else return;
+    } else {
+      return;
+    }
     event.preventDefault();
   });
 
-  // A click anywhere else dismisses it. Bound on the document rather than on
-  // a blur, because focus moves inside the list on every arrow key and a
-  // blur handler would close it mid-navigation.
   document.addEventListener('click', (event: Event) => {
     if (!wrap.contains(event.target as Node)) close();
   });
@@ -569,18 +575,30 @@ export function buildBar(
     // on something that cannot be compared is the kind of promise that reads
     // to a reader as their own failure when it does not happen.
     const closed = canCompare ? 'Compare versions' : 'Earlier versions';
-    const label = options.comparisonOpen === true ? 'View current' : closed;
+    const exitLabel =
+      view.version === view.currentVersion
+        ? 'View current'
+        : `View version ${view.version}`;
+    const label = options.comparisonOpen === true ? exitLabel : closed;
     const compare = button(label, ICONS.compare, options.onCompare);
     compare.setAttribute(
       'aria-pressed',
       options.comparisonOpen === true ? 'true' : 'false'
     );
+    compare.setAttribute(
+      'aria-label',
+      options.comparisonOpen === true
+        ? `Return to viewing version ${view.version}`
+        : canCompare
+          ? `Compare version ${view.version} with its history`
+          : 'Open an earlier version of this relic'
+    );
     compare.title =
       options.comparisonOpen === true
-        ? `Return to version ${view.currentVersion}`
+        ? `Return to viewing version ${view.version}`
         : canCompare
-          ? `Compare version ${view.currentVersion} with its history`
-          : `Open an earlier version of this relic`;
+          ? `Compare version ${view.version} with its history`
+          : 'Open an earlier version of this relic';
     actions.appendChild(compare);
   }
 
@@ -1357,7 +1375,8 @@ export function renderRenderedComparison(
   current: ReadyView,
   historical: ReadyView,
   mode: 'markdown' | 'rendered',
-  usercontentOrigin: string
+  usercontentOrigin: string,
+  onChanges?: (changes: readonly RenderedChange[], summary: string) => void
 ): HTMLElement {
   const wrapper = document.createElement('section');
   wrapper.className = `diff-view diff-view-${mode}`;
@@ -1395,10 +1414,16 @@ export function renderRenderedComparison(
 
   const beforeLabel = document.createElement('span');
   beforeLabel.className = 'compare-label compare-label-before';
-  beforeLabel.textContent = `Version ${historical.version}`;
+  beforeLabel.textContent =
+    historical.version === historical.currentVersion
+      ? `Version ${historical.version}, current`
+      : `Version ${historical.version}`;
   const afterLabel = document.createElement('span');
   afterLabel.className = 'compare-label compare-label-current';
-  afterLabel.textContent = `Version ${current.version}, current`;
+  afterLabel.textContent =
+    current.version === current.currentVersion
+      ? `Version ${current.version}, current`
+      : `Version ${current.version}`;
   const divider = document.createElement('span');
   divider.className = 'compare-divider';
   divider.setAttribute('aria-hidden', 'true');
@@ -1457,7 +1482,7 @@ export function renderRenderedComparison(
   const result = document.createElement('div');
   result.className = 'diff-rendered-result';
 
-  wrapper.append(stage, controls, result);
+  wrapper.append(controls, stage, result);
 
   // The structural comparison is the annotation, and the two live renders are
   // the evidence. So a frame that never reports a tree costs the outlines and
@@ -1478,11 +1503,16 @@ export function renderRenderedComparison(
       counts.textContent = diff.summary;
       before.annotate(diff.removedMarks);
       after.annotate(diff.addedMarks);
+      if (onChanges !== undefined) {
+        onChanges(diff.changes, diff.summary);
+      }
       if (!diff.changed) {
-        result.replaceChildren(noChanges(diff.summary));
+        if (onChanges === undefined) {
+          result.replaceChildren(noChanges(diff.summary));
+        }
         return;
       }
-      if (diff.changes.length > 0) {
+      if (diff.changes.length > 0 && onChanges === undefined) {
         result.replaceChildren(renderChangeList(diff.changes));
       }
     }
@@ -1553,10 +1583,16 @@ export function renderImageComparison(
 
   const beforeLabel = document.createElement('span');
   beforeLabel.className = 'image-diff-label image-diff-label-before';
-  beforeLabel.textContent = `Version ${historical.version}`;
+  beforeLabel.textContent =
+    historical.version === historical.currentVersion
+      ? `Version ${historical.version}, current`
+      : `Version ${historical.version}`;
   const currentLabel = document.createElement('span');
   currentLabel.className = 'image-diff-label image-diff-label-current';
-  currentLabel.textContent = `Version ${current.version}, current`;
+  currentLabel.textContent =
+    current.version === current.currentVersion
+      ? `Version ${current.version}, current`
+      : `Version ${current.version}`;
   const divider = document.createElement('span');
   divider.className = 'image-diff-divider';
   divider.setAttribute('aria-hidden', 'true');
@@ -1613,21 +1649,284 @@ export function renderImageComparison(
   return wrapper;
 }
 
-interface ComparisonScaffold {
+export function comparisonCopy(
+  leftVersion: number,
+  rightVersion: number,
+  currentVersion: number,
+  comparable = true
+): { readonly headline: string; readonly detail: string } {
+  const headline = comparable
+    ? `Comparing version ${leftVersion} with version ${rightVersion}`
+    : `Version ${leftVersion} of ${rightVersion}`;
+
+  let detail: string;
+  if (leftVersion === rightVersion) {
+    detail = 'Choose two different versions to see what changed between them.';
+  } else if (rightVersion === currentVersion) {
+    detail =
+      `Version ${rightVersion} is current. Version ${leftVersion} is retained history ` +
+      'and may contain content removed from the current artifact.';
+  } else if (leftVersion === currentVersion) {
+    detail =
+      `Version ${leftVersion} is current. Version ${rightVersion} is retained history ` +
+      'and may contain content removed from the current artifact.';
+  } else {
+    detail =
+      `Version ${currentVersion} is current. Versions ${leftVersion} and ${rightVersion} ` +
+      'are retained history and may contain content removed from the current artifact.';
+  }
+
+  return { headline, detail };
+}
+
+export interface SidePickerHandle {
+  readonly wrap: HTMLElement;
+  readonly trigger: HTMLButtonElement;
+  readonly list: HTMLElement;
+  readonly options: HTMLElement[];
+  setVersion(version: number): void;
+}
+
+export function buildSidePicker(
+  side: 'left' | 'right',
+  labelText: string,
+  initialVersion: number,
+  currentVersion: number,
+  onSelect: (version: number) => void
+): SidePickerHandle {
+  let selected = initialVersion;
+
+  const wrap = document.createElement('div');
+  wrap.className = `compare-picker-side compare-picker-${side}`;
+  wrap.dataset['side'] = side;
+
+  const caption = document.createElement('span');
+  caption.className = 'compare-picker-caption';
+  caption.textContent = labelText;
+  wrap.appendChild(caption);
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'version-label version-trigger compare-picker-trigger';
+  trigger.dataset['side'] = side;
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-expanded', 'false');
+
+  const triggerValue = document.createElement('span');
+  triggerValue.className = 'compare-picker-value';
+
+  const updateTriggerLabel = (): void => {
+    const isCurrent = selected === currentVersion;
+    const text = isCurrent
+      ? `Version ${selected}, current`
+      : `Version ${selected}`;
+    triggerValue.textContent = text;
+    trigger.setAttribute('aria-label', `${labelText} version: ${text}`);
+  };
+  updateTriggerLabel();
+
+  trigger.append(triggerValue, icon(ICONS.chevron));
+  wrap.appendChild(trigger);
+
+  const list = document.createElement('div');
+  list.className = 'version-list compare-picker-list';
+  list.dataset['side'] = side;
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', `${labelText} version to compare`);
+  list.hidden = true;
+
+  const optionElements: HTMLElement[] = [];
+  for (let v = currentVersion; v >= 1; v--) {
+    const option = document.createElement('div');
+    option.className = 'version-option compare-picker-option';
+    option.dataset['version'] = String(v);
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', v === selected ? 'true' : 'false');
+    option.tabIndex = -1;
+    option.textContent =
+      v === currentVersion ? `Version ${v}, current` : `Version ${v}`;
+
+    option.addEventListener('click', () => {
+      close();
+      if (v !== selected) {
+        selected = v;
+        updateTriggerLabel();
+        updateOptionsSelected();
+        onSelect(v);
+      }
+    });
+
+    list.appendChild(option);
+    optionElements.push(option);
+  }
+
+  const updateOptionsSelected = (): void => {
+    for (const opt of optionElements) {
+      const v = Number(opt.dataset['version']);
+      opt.setAttribute('aria-selected', v === selected ? 'true' : 'false');
+    }
+  };
+
+  let open = false;
+  function close(focusTrigger = false): void {
+    if (!open) return;
+    open = false;
+    list.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    if (focusTrigger) trigger.focus();
+  }
+
+  function showList(index: number): void {
+    open = true;
+    list.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    optionElements[index]?.focus();
+  }
+
+  const move = (from: number, delta: number): void => {
+    const last = optionElements.length - 1;
+    const next = Math.min(last, Math.max(0, from + delta));
+    optionElements[next]?.focus();
+  };
+
+  trigger.addEventListener('click', () => {
+    if (open) {
+      close();
+    } else {
+      const currentIndex = optionElements.findIndex(
+        (el) => Number(el.dataset['version']) === selected
+      );
+      showList(currentIndex >= 0 ? currentIndex : 0);
+    }
+  });
+
+  trigger.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (
+      event.key === 'ArrowDown' ||
+      event.key === 'Enter' ||
+      event.key === ' '
+    ) {
+      const currentIndex = optionElements.findIndex(
+        (el) => Number(el.dataset['version']) === selected
+      );
+      showList(currentIndex >= 0 ? currentIndex : 0);
+    } else if (event.key === 'ArrowUp') {
+      showList(optionElements.length - 1);
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
+
+  list.addEventListener('keydown', (event: KeyboardEvent) => {
+    const index = optionElements.indexOf(event.target as HTMLElement);
+    if (index < 0) return;
+    if (event.key === 'ArrowDown') move(index, 1);
+    else if (event.key === 'ArrowUp') move(index, -1);
+    else if (event.key === 'Home') move(index, -optionElements.length);
+    else if (event.key === 'End') move(index, optionElements.length);
+    else if (event.key === 'Escape' || event.key === 'Tab') close(true);
+    else if (event.key === 'Enter' || event.key === ' ') {
+      optionElements[index]?.click();
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
+
+  document.addEventListener('click', (event: Event) => {
+    if (!wrap.contains(event.target as Node)) close();
+  });
+
+  wrap.appendChild(list);
+
+  return {
+    wrap,
+    trigger,
+    list,
+    options: optionElements,
+    setVersion(version: number): void {
+      selected = version;
+      updateTriggerLabel();
+      updateOptionsSelected();
+    },
+  };
+}
+
+export interface ComparePickerOptions {
+  readonly leftVersion: number;
+  readonly rightVersion: number;
+  readonly currentVersion: number;
+  readonly onSelectLeft: (version: number) => void;
+  readonly onSelectRight: (version: number) => void;
+}
+
+export interface ComparePickerHandle {
+  readonly element: HTMLElement;
+  readonly left: SidePickerHandle;
+  readonly right: SidePickerHandle;
+  setVersions(left: number, right: number): void;
+}
+
+export function buildComparePicker(
+  options: ComparePickerOptions
+): ComparePickerHandle {
+  const container = document.createElement('div');
+  container.className = 'compare-picker';
+  container.setAttribute('role', 'group');
+  container.setAttribute('aria-label', 'Compare versions');
+
+  const left = buildSidePicker(
+    'left',
+    'Left',
+    options.leftVersion,
+    options.currentVersion,
+    options.onSelectLeft
+  );
+
+  const separator = document.createElement('span');
+  separator.className = 'compare-picker-separator';
+  separator.setAttribute('aria-hidden', 'true');
+  separator.textContent = 'to';
+
+  const right = buildSidePicker(
+    'right',
+    'Right',
+    options.rightVersion,
+    options.currentVersion,
+    options.onSelectRight
+  );
+
+  container.append(left.wrap, separator, right.wrap);
+
+  return {
+    element: container,
+    left,
+    right,
+    setVersions(newLeft: number, newRight: number): void {
+      left.setVersion(newLeft);
+      right.setVersion(newRight);
+    },
+  };
+}
+
+export interface ComparisonScaffold {
   readonly main: HTMLElement;
   readonly result: HTMLElement;
   readonly headline: HTMLElement;
   readonly historyNote: HTMLElement;
+  readonly picker: ComparePickerHandle;
 }
 
 /**
- * The comparison shell, and it carries no version picker of its own.
- *
- * The taskbar spans both views and now holds the version, so a second
- * selector down here would be the same choice offered twice. What is left is
- * the heading, which names both version numbers, and the result area.
+ * The comparison shell, carrying the version pickers in the toolbar.
  */
-function buildComparisonScaffold(): ComparisonScaffold {
+export function buildComparisonScaffold(
+  currentVersion: number,
+  initialLeft: number,
+  initialRight: number,
+  onPick: (left: number, right: number) => void
+): ComparisonScaffold {
   const main = document.createElement('main');
   main.className = 'stage stage-diff';
 
@@ -1647,14 +1946,34 @@ function buildComparisonScaffold(): ComparisonScaffold {
   const historyNote = document.createElement('p');
   historyNote.className = 'diff-history-note';
   copy.append(eyebrow, headline, historyNote);
-  toolbar.appendChild(copy);
+
+  let left = initialLeft;
+  let right = initialRight;
+
+  const picker = buildComparePicker({
+    leftVersion: left,
+    rightVersion: right,
+    currentVersion,
+    onSelectLeft: (selectedLeft) => {
+      left = selectedLeft;
+      onPick(left, right);
+    },
+    onSelectRight: (selectedRight) => {
+      right = selectedRight;
+      onPick(left, right);
+    },
+  });
+
+  toolbar.append(copy, picker.element);
 
   const result = document.createElement('div');
   result.className = 'diff-result';
   result.setAttribute('aria-live', 'polite');
+
   shell.append(toolbar, result);
   main.appendChild(shell);
-  return { main, result, headline, historyNote };
+
+  return { main, result, headline, historyNote, picker };
 }
 
 /**
@@ -1702,11 +2021,13 @@ export function uncomparableReason(
 export function renderSingleVersion(
   view: ReadyView,
   usercontentOrigin: string,
-  reason: string
+  reason?: string
 ): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'diff-single';
-  wrap.appendChild(notice(reason));
+  if (reason !== undefined && reason.length > 0) {
+    wrap.appendChild(notice(reason));
+  }
 
   const label = document.createElement('p');
   label.className = 'diff-single-label';
@@ -1720,13 +2041,6 @@ export function renderSingleVersion(
 /**
  * How a historical version that loaded is presented.
  *
- * One function rather than a branch inside the panel's loader, and the reason
- * is that the branch was untestable where it sat. The decision lived at a
- * call site inside an async closure in a module-local function, so nothing
- * could reach it: replacing the render with a bare notice, which is exactly
- * the defect being fixed, left every test passing. A guarantee no test can
- * reach is a guarantee that regresses silently, and this one already had.
- *
  * Side by side when the two versions can be diffed, the version on its own
  * when they cannot. Never neither.
  */
@@ -1734,7 +2048,8 @@ export function renderLoadedVersion(
   current: ReadyView,
   historical: ReadyView,
   selectedVersion: number,
-  usercontentOrigin: string
+  usercontentOrigin: string,
+  onChanges?: (changes: readonly RenderedChange[], summary: string) => void
 ): HTMLElement {
   const mode = diffModeForRoutes(current.route, historical.route);
   if (mode === undefined) {
@@ -1746,85 +2061,361 @@ export function renderLoadedVersion(
   }
   if (mode === 'image') return renderImageComparison(current, historical);
   if (mode === 'code') return renderCodeComparison(current, historical);
-  return renderRenderedComparison(current, historical, mode, usercontentOrigin);
+  return renderRenderedComparison(
+    current,
+    historical,
+    mode,
+    usercontentOrigin,
+    onChanges
+  );
 }
 
-function renderComparison(
+export interface ChangesSidebarHandle {
+  readonly sidebar: HTMLElement;
+  readonly resizer: HTMLElement;
+  readonly tab: HTMLElement;
+  setChanges(count: number, content: HTMLElement | undefined): void;
+}
+
+export function buildChangesSidebar(): ChangesSidebarHandle {
+  const sidebar = document.createElement('aside');
+  sidebar.className = 'thread diff-changes-sidebar is-open';
+  sidebar.id = 'diff-changes-sidebar';
+  sidebar.setAttribute('aria-labelledby', 'changes-title');
+
+  const title = document.createElement('h2');
+  title.className = 'thread-title';
+  title.id = 'changes-title';
+
+  const toggle = document.createElement('button');
+  toggle.className = 'thread-toggle';
+  toggle.type = 'button';
+  toggle.setAttribute('aria-controls', sidebar.id);
+  toggle.setAttribute('aria-expanded', 'true');
+
+  const toggleLabel = document.createElement('span');
+  toggleLabel.textContent = 'Changes';
+  const toggleCount = document.createElement('span');
+  toggleCount.className = 'action-count';
+  toggleCount.textContent = '0';
+  toggle.append(toggleLabel, toggleCount);
+  title.appendChild(toggle);
+
+  const resizer = document.createElement('div');
+  resizer.className = 'thread-resizer diff-resizer';
+  resizer.setAttribute('role', 'separator');
+  resizer.setAttribute('aria-orientation', 'vertical');
+  resizer.setAttribute('aria-label', 'Resize the changes');
+  resizer.tabIndex = 0;
+
+  const tab = document.createElement('button');
+  tab.className = 'thread-tab diff-tab';
+  tab.type = 'button';
+  tab.setAttribute('aria-controls', sidebar.id);
+  tab.setAttribute('aria-expanded', 'true');
+  const tabLabel = document.createElement('span');
+  tabLabel.textContent = 'Changes';
+  const tabCount = document.createElement('span');
+  tabCount.className = 'action-count';
+  tabCount.textContent = '0';
+  tab.append(tabLabel, tabCount);
+
+  const body = document.createElement('div');
+  body.className = 'diff-changes-body';
+
+  sidebar.append(title, body);
+
+  const setOpen = (open: boolean): void => {
+    sidebar.classList.toggle('is-open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    tab.setAttribute('aria-expanded', String(open));
+    if (open) toggle.focus({ preventScroll: true });
+  };
+
+  const toggleOpen = (): void => {
+    setOpen(!sidebar.classList.contains('is-open'));
+  };
+
+  toggle.addEventListener('click', toggleOpen);
+  tab.addEventListener('click', toggleOpen);
+
+  resizer.addEventListener('pointerdown', (event) => {
+    const row = resizer.parentElement;
+    if (row === null) return;
+    event.preventDefault();
+    const right = row.getBoundingClientRect().right;
+    resizer.setPointerCapture(event.pointerId);
+    const move = (moved: PointerEvent): void => {
+      const width = Math.max(
+        280,
+        Math.min(window.innerWidth * 0.8, right - moved.clientX)
+      );
+      document.documentElement.style.setProperty(
+        '--thread-width',
+        `${Math.round(width)}px`
+      );
+    };
+    const done = (): void => {
+      resizer.removeEventListener('pointermove', move);
+      resizer.removeEventListener('pointerup', done);
+      resizer.removeEventListener('pointercancel', done);
+    };
+    resizer.addEventListener('pointermove', move);
+    resizer.addEventListener('pointerup', done);
+    resizer.addEventListener('pointercancel', done);
+  });
+
+  return {
+    sidebar,
+    resizer,
+    tab,
+    setChanges(count: number, content: HTMLElement | undefined): void {
+      toggleCount.textContent = String(count);
+      tabCount.textContent = String(count);
+      if (content !== undefined) {
+        body.replaceChildren(content);
+      } else {
+        body.replaceChildren(noChanges('No changes between these versions.'));
+      }
+      setOpen(count > 0);
+    },
+  };
+}
+
+function renderCodeChangeList(parts: readonly TextDiffPart[]): HTMLElement {
+  const list = document.createElement('ul');
+  list.className = 'diff-change-list';
+  for (const part of parts) {
+    if (part.kind === 'unchanged') continue;
+    const item = document.createElement('li');
+    item.className = `diff-change diff-change-${part.kind}`;
+    const kind = document.createElement('span');
+    kind.className = 'diff-change-kind';
+    kind.textContent = part.kind;
+    const what = document.createElement('span');
+    what.className = 'diff-change-what';
+    what.textContent =
+      part.kind === 'added'
+        ? `Line ${part.currentStart ?? 1}`
+        : `Line ${part.beforeStart ?? 1}`;
+    const detail = document.createElement('span');
+    detail.className = 'diff-change-detail';
+    detail.textContent = part.value.trim();
+    item.append(kind, what, detail);
+    list.appendChild(item);
+  }
+  return list;
+}
+
+function renderImageChangeNotice(): HTMLElement {
+  const list = document.createElement('ul');
+  list.className = 'diff-change-list';
+  const item = document.createElement('li');
+  item.className = 'diff-change diff-change-changed';
+  const kind = document.createElement('span');
+  kind.className = 'diff-change-kind';
+  kind.textContent = 'changed';
+  const what = document.createElement('span');
+  what.className = 'diff-change-what';
+  what.textContent = 'Image';
+  const detail = document.createElement('span');
+  detail.className = 'diff-change-detail';
+  detail.textContent = 'Dimensions or pixel content changed.';
+  item.append(kind, what, detail);
+  list.appendChild(item);
+  return list;
+}
+
+/**
+ * Seeds the initial pair of versions to compare.
+ *
+ * Never seeds the same version on both sides. When viewing an earlier version
+ * with a predecessor, it pairs backward (predecessor on the left, viewed version
+ * on the right). When viewing version 1, which has no predecessor, it pairs
+ * forward (version 1 on the left, version 2 on the right).
+ */
+export function seedComparisonPair(
+  viewedVersion: number,
+  currentVersion: number
+): { readonly left: number; readonly right: number } {
+  if (currentVersion <= 1) {
+    return { left: 1, right: 1 };
+  }
+  if (viewedVersion <= 1) {
+    return { left: 1, right: 2 };
+  }
+  return { left: viewedVersion - 1, right: viewedVersion };
+}
+
+export function renderComparison(
   current: ReadyView,
   relicId: string,
   usercontentOrigin: string,
   deps: ViewerDeps,
   onClose: () => void,
-  initialVersion?: number
+  initialLeft?: number,
+  initialRight?: number
 ): void {
-  const scaffold = buildComparisonScaffold();
+  const defaultPair = seedComparisonPair(
+    current.version,
+    current.currentVersion
+  );
+  let leftVersion = initialLeft ?? defaultPair.left;
+  let rightVersion = initialRight ?? defaultPair.right;
+
+  const versionCache = new Map<number, HistoricalVersionState>();
+  if (current.version !== undefined) {
+    versionCache.set(current.version, { kind: 'ready', view: current });
+  }
+
   let request = 0;
 
-  const loadSelected = async (selectedVersion: number): Promise<void> => {
+  const scaffold = buildComparisonScaffold(
+    current.currentVersion,
+    leftVersion,
+    rightVersion,
+    (newLeft, newRight) => {
+      leftVersion = newLeft;
+      rightVersion = newRight;
+      void updateSelected();
+    }
+  );
+
+  const changesSidebar = buildChangesSidebar();
+
+  const getVersion = async (
+    version: number
+  ): Promise<HistoricalVersionState> => {
+    if (version === current.version) {
+      return { kind: 'ready', view: current };
+    }
+    const cached = versionCache.get(version);
+    if (cached !== undefined) return cached;
+    const loaded = await loadHistoricalVersion(relicId, version, current, deps);
+    versionCache.set(version, loaded);
+    return loaded;
+  };
+
+  const updateSelected = async (): Promise<void> => {
     const thisRequest = ++request;
-    const copy = versionHistoryCopy(current.version, selectedVersion);
-    scaffold.headline.textContent = copy.headline;
-    scaffold.historyNote.textContent = copy.detail;
-    scaffold.result.setAttribute('aria-busy', 'true');
-    const loading = document.createElement('p');
-    loading.className = 'diff-loading';
-    loading.setAttribute('role', 'status');
-    loading.textContent = `Loading version ${selectedVersion}.`;
-    scaffold.result.replaceChildren(loading);
 
-    const historical = await loadHistoricalVersion(
-      relicId,
-      selectedVersion,
-      current,
-      deps
-    );
-    if (thisRequest !== request) return;
-    scaffold.result.setAttribute('aria-busy', 'false');
-
-    if (historical.kind === 'unavailable') {
-      // The only case that genuinely has nothing to show: the bytes could not
-      // be fetched, opened, or decrypted. Every other refusal now falls
-      // through to rendering the version on its own.
-      scaffold.result.replaceChildren(notice(historical.detail));
+    // Refuse comparison if both sides are identical
+    if (leftVersion === rightVersion) {
+      scaffold.headline.textContent = `Version ${leftVersion}`;
+      scaffold.historyNote.textContent =
+        'Choose two different versions to see what changed between them.';
+      scaffold.result.setAttribute('aria-busy', 'false');
+      scaffold.result.replaceChildren(
+        notice(
+          'Comparing a version to itself produces no diff. Choose two different versions to compare.'
+        )
+      );
+      changesSidebar.setChanges(0, undefined);
       return;
     }
 
-    // The heading was written before the fetch, when nothing knew whether a
-    // comparison was possible. Now it does, so it is corrected rather than
-    // left claiming to compare above a page showing one version.
-    const comparable =
-      diffModeForRoutes(current.route, historical.view.route) !== undefined;
-    scaffold.headline.textContent = versionHistoryCopy(
-      current.version,
-      selectedVersion,
+    const copy = comparisonCopy(
+      leftVersion,
+      rightVersion,
+      current.currentVersion
+    );
+    scaffold.headline.textContent = copy.headline;
+    scaffold.historyNote.textContent = copy.detail;
+    scaffold.result.setAttribute('aria-busy', 'true');
+
+    const loading = document.createElement('p');
+    loading.className = 'diff-loading';
+    loading.setAttribute('role', 'status');
+    loading.textContent = `Loading comparison: version ${leftVersion} and version ${rightVersion}.`;
+    scaffold.result.replaceChildren(loading);
+
+    const [leftRes, rightRes] = await Promise.all([
+      getVersion(leftVersion),
+      getVersion(rightVersion),
+    ]);
+    if (thisRequest !== request) return;
+    if (typeof document === 'undefined') return;
+    scaffold.result.setAttribute('aria-busy', 'false');
+
+    if (leftRes.kind === 'unavailable') {
+      scaffold.result.replaceChildren(notice(leftRes.detail));
+      changesSidebar.setChanges(0, undefined);
+      return;
+    }
+    if (rightRes.kind === 'unavailable') {
+      scaffold.result.replaceChildren(notice(rightRes.detail));
+      changesSidebar.setChanges(0, undefined);
+      return;
+    }
+
+    const mode = diffModeForRoutes(leftRes.view.route, rightRes.view.route);
+    const comparable = mode !== undefined;
+    scaffold.headline.textContent = comparisonCopy(
+      leftVersion,
+      rightVersion,
+      current.currentVersion,
       comparable
     ).headline;
 
+    if (mode === 'code') {
+      const textDiff = createTextDiff(
+        decodeText(leftRes.view.content),
+        decodeText(rightRes.view.content)
+      );
+      const changedParts = textDiff.parts.filter((p) => p.kind !== 'unchanged');
+      changesSidebar.setChanges(
+        changedParts.length,
+        changedParts.length > 0
+          ? renderCodeChangeList(textDiff.parts)
+          : undefined
+      );
+    } else if (mode === 'image') {
+      const isChanged = !bytesEqual(
+        leftRes.view.content,
+        rightRes.view.content
+      );
+      changesSidebar.setChanges(
+        isChanged ? 1 : 0,
+        isChanged ? renderImageChangeNotice() : undefined
+      );
+    }
+
     scaffold.result.replaceChildren(
       renderLoadedVersion(
-        current,
-        historical.view,
-        selectedVersion,
-        usercontentOrigin
+        rightRes.view,
+        leftRes.view,
+        leftVersion,
+        usercontentOrigin,
+        (changes) => {
+          if (thisRequest !== request) return;
+          changesSidebar.setChanges(
+            changes.length,
+            changes.length > 0 ? renderChangeList(changes) : undefined
+          );
+        }
       )
     );
   };
 
-  const show = (selectedVersion: number): void => {
-    document.body.replaceChildren(
-      buildBar(current, relicId, {
-        onCompare: onClose,
-        comparisonOpen: true,
-        selectedVersion,
-        onSelectVersion: show,
-      }),
-      scaffold.main
-    );
-    scaffold.headline.focus();
-    void loadSelected(selectedVersion);
-  };
+  const diffRow = document.createElement('div');
+  diffRow.className = 'relic-row diff-row';
+  diffRow.append(
+    scaffold.main,
+    changesSidebar.sidebar,
+    changesSidebar.resizer,
+    changesSidebar.tab
+  );
 
-  show(initialVersion ?? current.currentVersion - 1);
+  document.body.replaceChildren(
+    buildBar(current, relicId, {
+      onCompare: onClose,
+      comparisonOpen: true,
+      selectedVersion: rightVersion,
+    }),
+    diffRow
+  );
+  scaffold.headline.focus();
+  void updateSelected();
 }
 
 /* ---------- the comment thread ---------- */
@@ -1910,6 +2501,12 @@ export function commentRow(
     badge.className = 'comment-badge';
     badge.textContent = 'Published this relic';
     head.appendChild(badge);
+  }
+  if (entry.version === null || entry.version === undefined) {
+    const unversioned = document.createElement('span');
+    unversioned.className = 'comment-badge comment-badge-unversioned';
+    unversioned.textContent = 'Predates versioning';
+    head.appendChild(unversioned);
   }
 
   if (entry.createdAt !== null) {
@@ -3729,6 +4326,7 @@ export function buildThread(
   };
 
   const refresh = async (): Promise<void> => {
+    if (typeof document === 'undefined') return;
     const opener = cipher;
     if (opener === undefined) return;
     status.replaceChildren(line('thread-note', THREAD_LOADING_NOTE));
@@ -3749,22 +4347,39 @@ export function buildThread(
     // Paint first, then build the rows. Which marks landed is only known
     // after the paint pass, and a row that has to say its mark could not be
     // placed cannot be built before that is decided.
-    paintMarks(state.entries);
+    const viewedVersion = view.version;
+    const isCurrentVersion = view.version === view.currentVersion;
+    const filteredEntries = state.entries.filter((entry) => {
+      if (entry.version === viewedVersion) return true;
+      if (
+        (entry.version === null || entry.version === undefined) &&
+        isCurrentVersion
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    paintMarks(filteredEntries);
     list.replaceChildren(
-      // Not a bare `map(commentRow)`: `map` passes the index as the second
-      // argument, which would make every row after the first claim its mark
-      // was unplaceable.
-      ...state.entries.map((entry) =>
+      ...filteredEntries.map((entry) =>
         commentRow(entry, entry.id !== null && unplaceable.has(entry.id))
       )
     );
-    updateThreadToggle(toggle, state.entries.length);
+    updateThreadToggle(toggle, filteredEntries.length);
     status.replaceChildren(
-      ...(state.entries.length === 0
-        ? [line('thread-note', THREAD_EMPTY_NOTE)]
+      ...(filteredEntries.length === 0
+        ? [
+            line(
+              'thread-note',
+              isCurrentVersion
+                ? THREAD_EMPTY_NOTE
+                : `No comments on version ${viewedVersion}.`
+            ),
+          ]
         : [])
     );
-    onCount(state.entries.length);
+    onCount(filteredEntries.length);
   };
 
   /** The address form, for a reader this browser has not verified. */
@@ -3913,30 +4528,32 @@ export function buildThread(
       marks.clear();
       post.disabled = true;
       outcome.replaceChildren(line('thread-note', 'Encrypting and posting.'));
-      void postComment(relicId, draft, deps, sealer).then(async (result) => {
-        post.disabled = false;
-        if (result.kind === 'refused') {
-          outcome.replaceChildren(threadRefusal(result.refusal, () => {}));
-          if (result.refusal.code === 'invalid_session') {
-            session = { kind: 'anonymous' };
-            composer.replaceChildren(composeIdentity());
+      void postComment(relicId, draft, deps, sealer, view.version).then(
+        async (result) => {
+          post.disabled = false;
+          if (result.kind === 'refused') {
+            outcome.replaceChildren(threadRefusal(result.refusal, () => {}));
+            if (result.refusal.code === 'invalid_session') {
+              session = { kind: 'anonymous' };
+              composer.replaceChildren(composeIdentity());
+            }
+            return;
           }
-          return;
+          body.value = '';
+          // The body is this comment's and goes. The name is the reader's and
+          // stays, here and on the next relic they open.
+          writeDisplayName(name.value);
+          paintCount();
+          outcome.replaceChildren(
+            line(
+              'thread-note',
+              `Posted as ${plainLabel(result.author)}, which is what everybody ` +
+                'holding this link now sees.'
+            )
+          );
+          await refresh();
         }
-        body.value = '';
-        // The body is this comment's and goes. The name is the reader's and
-        // stays, here and on the next relic they open.
-        writeDisplayName(name.value);
-        paintCount();
-        outcome.replaceChildren(
-          line(
-            'thread-note',
-            `Posted as ${plainLabel(result.author)}, which is what everybody ` +
-              'holding this link now sees.'
-          )
-        );
-        await refresh();
-      });
+      );
     });
 
     return form;
@@ -4086,7 +4703,7 @@ export function buildRelicRow(
   return row;
 }
 
-function renderReady(
+export function renderReady(
   view: ReadyView,
   relicId: string,
   usercontentOrigin: string,
@@ -4097,10 +4714,28 @@ function renderReady(
   let commentCount: number | undefined;
   let thread: ThreadHandle | undefined;
 
-  function barFor(): HTMLElement {
-    return buildBar(view, relicId, {
-      onCompare: () => showComparison(),
-      onSelectVersion: showComparison,
+  let activeView = view;
+  const loadedViews = new Map<number, ReadyView>();
+  loadedViews.set(view.version, view);
+
+  function barFor(comparisonOpen = false): HTMLElement {
+    return buildBar(activeView, relicId, {
+      comparisonOpen,
+      selectedVersion: activeView.version,
+      onSelectVersion: (version: number) => {
+        void showVersion(version);
+      },
+      onCompare: () => {
+        if (comparisonOpen) {
+          showSingle(activeView);
+        } else {
+          const pair = seedComparisonPair(
+            activeView.version,
+            activeView.currentVersion
+          );
+          showComparison(pair.left, pair.right);
+        }
+      },
       ...(thread === undefined
         ? {}
         : {
@@ -4109,24 +4744,54 @@ function renderReady(
           }),
     });
   }
-
-  const showCurrent = (): void => {
-    bar = barFor();
-    const stage = buildStageWrap(view, usercontentOrigin);
+  const showSingle = (viewToShow: ReadyView): void => {
+    activeView = viewToShow;
+    bar = barFor(false);
+    if (viewToShow.route !== 'download') {
+      thread = buildThread(viewToShow, relicId, deps, (count) => {
+        commentCount = count;
+        if (bar === undefined) return;
+        const replacement = barFor(false);
+        bar.replaceWith(replacement);
+        bar = replacement;
+      });
+    } else {
+      thread = undefined;
+    }
+    const stage = buildStageWrap(viewToShow, usercontentOrigin);
     document.body.replaceChildren(
       bar,
       buildRelicRow(stage, thread?.element, thread?.resizer, thread?.tab)
     );
     thread?.attach(stage);
   };
-  const showComparison = (selectedVersion?: number): void => {
+
+  const showVersion = async (v: number): Promise<void> => {
+    if (v === activeView.version) {
+      showSingle(activeView);
+      return;
+    }
+    const cached = loadedViews.get(v);
+    if (cached !== undefined) {
+      showSingle(cached);
+      return;
+    }
+    const res = await loadHistoricalVersion(relicId, v, view, deps);
+    if (res.kind === 'ready') {
+      loadedViews.set(v, res.view);
+      showSingle(res.view);
+    }
+  };
+
+  const showComparison = (left?: number, right?: number): void => {
     renderComparison(
-      view,
+      activeView,
       relicId,
       usercontentOrigin,
       deps,
-      showCurrent,
-      selectedVersion
+      () => showSingle(activeView),
+      left,
+      right
     );
   };
 
@@ -4137,13 +4802,13 @@ function renderReady(
     thread = buildThread(view, relicId, deps, (count) => {
       commentCount = count;
       if (bar === undefined) return;
-      const replacement = barFor();
+      const replacement = barFor(false);
       bar.replaceWith(replacement);
       bar = replacement;
     });
   }
 
-  showCurrent();
+  showSingle(activeView);
 }
 
 export function renderDead(
