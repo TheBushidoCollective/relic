@@ -344,3 +344,18 @@ This is the same defect the 2026-09-13 entry above corrected on the unfurl card,
 Each line names the mechanism first and then what the reader is owed about author code, so the sentences stay parallel and the one route that does run code reads as the exception. The single string remains the label, the accessible name, and the stem of the tooltip, which is what the 2026-08-18 entry's WCAG 2.5.3 requirement asks for; only its selection changed.
 
 **The guard against recurrence.** A test in `packages/relic-viewer/test/browser.test.ts` walks every route: the two sandboxed routes must read exactly "Runs author code, isolated", and every other route must not contain "Runs author code" and must contain "no author code". It then builds the real bar for a `media` relic and asserts the rendered marker text and its accessible name. Restoring the single constant fails it.
+## 2026-09-16: Historical comments without a version belong to version 1, never the current version
+
+**The reported defect.** When per-version comments were introduced, comments written before the server stamped version numbers carried no stored version (`null` or `undefined`). The viewer filter previously showed these unversioned rows whenever viewing the current version (`(entry.version === null || entry.version === undefined) && isCurrentVersion`). Because existing relics predating versioning only have unversioned comments, their current/latest versions displayed their entire historical comment thread, directly violating the requirement that the latest version must remain clean and comments must live with their respective versions.
+
+**The rule.**
+1. A comment stamped with an explicit version shows only when viewing that exact version.
+2. A relic with no history (`currentVersion <= 1`) shows all comments regardless of stored version, ensuring single-version relics never lose rows.
+3. On a relic with version history (`currentVersion > 1`), a comment carrying no version shows only on the oldest version (version 1), never on the current version or intermediate versions.
+4. The unversioned comment badge displays "Version unknown" as its visible text, with "Predates versioning" preserved in the `title` attribute. It states the honest truth about placement rather than merely noting the comment's age, while retaining the `.comment-badge-unversioned` class.
+5. The taskbar comment count is derived directly from the filtered entries list and strictly equals the number of comment rows rendered in the thread in every view.
+6. Newly submitted comments continue to post stamped with the version currently being viewed.
+
+**Why version 1 rather than hiding them.** An unversioned comment's true version is unknowable, so it cannot be claimed for any later version. Quietly dropping or hiding historical comments would erase real reader discussion and make threads appear shorter than they are. Version 1 is the origin of the relic and the honest home where unversioned historical comments remain discoverable and readable without polluting newer revisions.
+
+**The guard against recurrence.** Guarded by tests in `packages/relic-viewer/test/version-diff-ui.test.ts` under `comment version scoping`. Specifically, `viewing v3 on a multi-version relic shows v3 comments but not v1 or unversioned comments` asserts that viewing version 3 of a 3-version relic excludes unversioned comments. Restoring the `isCurrentVersion` clause causes this test to fail on line 1145.
