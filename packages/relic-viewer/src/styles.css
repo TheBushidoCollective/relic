@@ -1126,6 +1126,44 @@ canvas.relic-page {
   font-size: 0.88rem;
 }
 
+.compare-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: none;
+}
+
+.compare-picker-side {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  position: relative;
+}
+
+.compare-picker-caption {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.compare-picker-separator {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-soft);
+}
+
+.compare-picker-trigger {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.compare-picker-right .version-list {
+  left: auto;
+  right: 0;
+}
+
 .image-diff-control input:focus-visible,
 .compare-swipe input:focus-visible {
   outline: 2px solid var(--patina);
@@ -1563,6 +1601,11 @@ canvas.relic-page {
     flex-direction: column;
     gap: 0.85rem;
   }
+  .compare-picker {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
 
   /* Two columns of prose at 320px is two columns of nothing, so a split
      layout stacks and the swipe control keeps working either way. */

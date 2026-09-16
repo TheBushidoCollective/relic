@@ -427,15 +427,19 @@ export async function loadHistoricalVersion(
   if (
     !Number.isInteger(requestedVersion) ||
     requestedVersion < 1 ||
-    requestedVersion >= current.currentVersion
+    requestedVersion > current.currentVersion
   ) {
     return {
       kind: 'unavailable',
       code: 'version_invalid',
       detail:
         `Version ${requestedVersion} does not exist. Choose a version from 1 ` +
-        `through ${current.currentVersion - 1}.`,
+        `through ${current.currentVersion}.`,
     };
+  }
+
+  if (current.version === requestedVersion) {
+    return { kind: 'ready', view: current };
   }
 
   // Nothing about comparison is decided here, and that is the point of this

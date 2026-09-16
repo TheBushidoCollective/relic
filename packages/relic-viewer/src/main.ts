@@ -87,7 +87,6 @@ import {
   diffModeForRoutes,
   type TextDiffPart,
   versionHistoryAvailability,
-  versionHistoryCopy,
 } from './diff.ts';
 import { diffTrees, type RenderedChange, type TreeDiff } from './domdiff.ts';
 import { transpileJsx } from './jsx.ts';
@@ -105,6 +104,7 @@ import {
   type DashboardRelicRow,
   type DeadView,
   formatBytes,
+  type HistoricalVersionState,
   isKeyEntryRecoverable,
   load,
   loadCommentedRelics,
@@ -308,19 +308,11 @@ function versionLabels(
 }
 
 /**
- * The version chip in the identity zone, which is a control only when there
- * is a choice to make.
+ * The version metadata on the taskbar.
  *
- * A relic on its second version has exactly one historical version, so a
- * picker there would be a menu with one item: it looks like a decision and
- * offers none. That case renders a label, and Compare versions in the actions
- * zone is the only control. From the third version on there is a real choice,
- * so the chip becomes an owned listbox.
- *
- * Owned rather than a native `select`, and that is a platform limit rather
- * than a styling preference: a native popup cannot be positioned or sized by
- * the page, and on macOS it rendered as a large panel detached from its
- * control, floating in empty space. No stylesheet reaches it.
+ * Always a label rather than an interactive picker. Compare is entered
+ * deliberately through the compare control in the actions group, not by
+ * dropping the reader into comparison when inspecting version metadata.
  */
 function buildVersionControl(
   view: ReadyView,
@@ -337,119 +329,17 @@ function buildVersionControl(
   const wrap = document.createElement('div');
   wrap.className = 'version';
 
-  const text = (parent: HTMLElement): void => {
-    const long = document.createElement('span');
-    long.className = 'version-long';
-    long.textContent = labels.long;
-    const short = document.createElement('span');
-    short.className = 'version-short';
-    short.setAttribute('aria-hidden', 'true');
-    short.textContent = labels.short;
-    parent.append(long, short);
-  };
-
-  const onSelect = options.onSelectVersion;
-  if (onSelect === undefined || view.currentVersion < 3) {
-    const label = document.createElement('div');
-    label.className = 'version-label';
-    text(label);
-    wrap.appendChild(label);
-    return wrap;
-  }
-
-  const trigger = document.createElement('button');
-  trigger.type = 'button';
-  trigger.className = 'version-label version-trigger';
-  trigger.setAttribute('aria-haspopup', 'listbox');
-  trigger.setAttribute('aria-expanded', 'false');
-  trigger.setAttribute(
-    'aria-label',
-    `${labels.long}. Choose an earlier version to compare`
-  );
-  text(trigger);
-  trigger.appendChild(icon(ICONS.chevron));
-
-  const list = document.createElement('div');
-  list.className = 'version-list';
-  list.setAttribute('role', 'listbox');
-  list.setAttribute('aria-label', 'Earlier version to compare');
-  list.hidden = true;
-
-  const optionElements: HTMLElement[] = [];
-  for (let version = view.currentVersion - 1; version >= 1; version--) {
-    const option = document.createElement('div');
-    option.className = 'version-option';
-    option.setAttribute('role', 'option');
-    option.setAttribute('aria-selected', version === shown ? 'true' : 'false');
-    // Roving focus rather than a tab stop each: a listbox is one stop, and
-    // arrow keys move within it.
-    option.tabIndex = -1;
-    option.textContent = `Version ${version}`;
-    option.addEventListener('click', () => {
-      close();
-      onSelect(version);
-    });
-    list.appendChild(option);
-    optionElements.push(option);
-  }
-
-  let open = false;
-  function close(focusTrigger = false): void {
-    if (!open) return;
-    open = false;
-    list.hidden = true;
-    trigger.setAttribute('aria-expanded', 'false');
-    if (focusTrigger) trigger.focus();
-  }
-
-  const move = (from: number, delta: number): void => {
-    const last = optionElements.length - 1;
-    const next = Math.min(last, Math.max(0, from + delta));
-    optionElements[next]?.focus();
-  };
-
-  function show(index: number): void {
-    open = true;
-    list.hidden = false;
-    trigger.setAttribute('aria-expanded', 'true');
-    optionElements[index]?.focus();
-  }
-
-  trigger.addEventListener('click', () => {
-    if (open) close();
-    else show(0);
-  });
-
-  trigger.addEventListener('keydown', (event: KeyboardEvent) => {
-    if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ')
-      show(0);
-    else if (event.key === 'ArrowUp') show(optionElements.length - 1);
-    else return;
-    event.preventDefault();
-  });
-
-  list.addEventListener('keydown', (event: KeyboardEvent) => {
-    const index = optionElements.indexOf(event.target as HTMLElement);
-    if (index < 0) return;
-    if (event.key === 'ArrowDown') move(index, 1);
-    else if (event.key === 'ArrowUp') move(index, -1);
-    else if (event.key === 'Home') move(index, -optionElements.length);
-    else if (event.key === 'End') move(index, optionElements.length);
-    else if (event.key === 'Escape' || event.key === 'Tab') close(true);
-    else if (event.key === 'Enter' || event.key === ' ')
-      optionElements[index]?.click();
-    else return;
-    event.preventDefault();
-  });
-
-  // A click anywhere else dismisses it. Bound on the document rather than on
-  // a blur, because focus moves inside the list on every arrow key and a
-  // blur handler would close it mid-navigation.
-  document.addEventListener('click', (event: Event) => {
-    if (!wrap.contains(event.target as Node)) close();
-  });
-
-  wrap.append(trigger, list);
+  const label = document.createElement('div');
+  label.className = 'version-label';
+  const long = document.createElement('span');
+  long.className = 'version-long';
+  long.textContent = labels.long;
+  const short = document.createElement('span');
+  short.className = 'version-short';
+  short.setAttribute('aria-hidden', 'true');
+  short.textContent = labels.short;
+  label.append(long, short);
+  wrap.appendChild(label);
   return wrap;
 }
 
@@ -1395,10 +1285,16 @@ export function renderRenderedComparison(
 
   const beforeLabel = document.createElement('span');
   beforeLabel.className = 'compare-label compare-label-before';
-  beforeLabel.textContent = `Version ${historical.version}`;
+  beforeLabel.textContent =
+    historical.version === historical.currentVersion
+      ? `Version ${historical.version}, current`
+      : `Version ${historical.version}`;
   const afterLabel = document.createElement('span');
   afterLabel.className = 'compare-label compare-label-current';
-  afterLabel.textContent = `Version ${current.version}, current`;
+  afterLabel.textContent =
+    current.version === current.currentVersion
+      ? `Version ${current.version}, current`
+      : `Version ${current.version}`;
   const divider = document.createElement('span');
   divider.className = 'compare-divider';
   divider.setAttribute('aria-hidden', 'true');
@@ -1553,10 +1449,16 @@ export function renderImageComparison(
 
   const beforeLabel = document.createElement('span');
   beforeLabel.className = 'image-diff-label image-diff-label-before';
-  beforeLabel.textContent = `Version ${historical.version}`;
+  beforeLabel.textContent =
+    historical.version === historical.currentVersion
+      ? `Version ${historical.version}, current`
+      : `Version ${historical.version}`;
   const currentLabel = document.createElement('span');
   currentLabel.className = 'image-diff-label image-diff-label-current';
-  currentLabel.textContent = `Version ${current.version}, current`;
+  currentLabel.textContent =
+    current.version === current.currentVersion
+      ? `Version ${current.version}, current`
+      : `Version ${current.version}`;
   const divider = document.createElement('span');
   divider.className = 'image-diff-divider';
   divider.setAttribute('aria-hidden', 'true');
@@ -1613,21 +1515,284 @@ export function renderImageComparison(
   return wrapper;
 }
 
-interface ComparisonScaffold {
+export function comparisonCopy(
+  leftVersion: number,
+  rightVersion: number,
+  currentVersion: number,
+  comparable = true
+): { readonly headline: string; readonly detail: string } {
+  const headline = comparable
+    ? `Comparing version ${leftVersion} with version ${rightVersion}`
+    : `Version ${leftVersion} of ${rightVersion}`;
+
+  let detail: string;
+  if (leftVersion === rightVersion) {
+    detail = 'Choose two different versions to see what changed between them.';
+  } else if (rightVersion === currentVersion) {
+    detail =
+      `Version ${rightVersion} is current. Version ${leftVersion} is retained history ` +
+      'and may contain content removed from the current artifact.';
+  } else if (leftVersion === currentVersion) {
+    detail =
+      `Version ${leftVersion} is current. Version ${rightVersion} is retained history ` +
+      'and may contain content removed from the current artifact.';
+  } else {
+    detail =
+      `Version ${currentVersion} is current. Versions ${leftVersion} and ${rightVersion} ` +
+      'are retained history and may contain content removed from the current artifact.';
+  }
+
+  return { headline, detail };
+}
+
+export interface SidePickerHandle {
+  readonly wrap: HTMLElement;
+  readonly trigger: HTMLButtonElement;
+  readonly list: HTMLElement;
+  readonly options: HTMLElement[];
+  setVersion(version: number): void;
+}
+
+export function buildSidePicker(
+  side: 'left' | 'right',
+  labelText: string,
+  initialVersion: number,
+  currentVersion: number,
+  onSelect: (version: number) => void
+): SidePickerHandle {
+  let selected = initialVersion;
+
+  const wrap = document.createElement('div');
+  wrap.className = `compare-picker-side compare-picker-${side}`;
+  wrap.dataset['side'] = side;
+
+  const caption = document.createElement('span');
+  caption.className = 'compare-picker-caption';
+  caption.textContent = labelText;
+  wrap.appendChild(caption);
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'version-label version-trigger compare-picker-trigger';
+  trigger.dataset['side'] = side;
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-expanded', 'false');
+
+  const triggerValue = document.createElement('span');
+  triggerValue.className = 'compare-picker-value';
+
+  const updateTriggerLabel = (): void => {
+    const isCurrent = selected === currentVersion;
+    const text = isCurrent
+      ? `Version ${selected}, current`
+      : `Version ${selected}`;
+    triggerValue.textContent = text;
+    trigger.setAttribute('aria-label', `${labelText} version: ${text}`);
+  };
+  updateTriggerLabel();
+
+  trigger.append(triggerValue, icon(ICONS.chevron));
+  wrap.appendChild(trigger);
+
+  const list = document.createElement('div');
+  list.className = 'version-list compare-picker-list';
+  list.dataset['side'] = side;
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', `${labelText} version to compare`);
+  list.hidden = true;
+
+  const optionElements: HTMLElement[] = [];
+  for (let v = currentVersion; v >= 1; v--) {
+    const option = document.createElement('div');
+    option.className = 'version-option compare-picker-option';
+    option.dataset['version'] = String(v);
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', v === selected ? 'true' : 'false');
+    option.tabIndex = -1;
+    option.textContent =
+      v === currentVersion ? `Version ${v}, current` : `Version ${v}`;
+
+    option.addEventListener('click', () => {
+      close();
+      if (v !== selected) {
+        selected = v;
+        updateTriggerLabel();
+        updateOptionsSelected();
+        onSelect(v);
+      }
+    });
+
+    list.appendChild(option);
+    optionElements.push(option);
+  }
+
+  const updateOptionsSelected = (): void => {
+    for (const opt of optionElements) {
+      const v = Number(opt.dataset['version']);
+      opt.setAttribute('aria-selected', v === selected ? 'true' : 'false');
+    }
+  };
+
+  let open = false;
+  function close(focusTrigger = false): void {
+    if (!open) return;
+    open = false;
+    list.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    if (focusTrigger) trigger.focus();
+  }
+
+  function showList(index: number): void {
+    open = true;
+    list.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    optionElements[index]?.focus();
+  }
+
+  const move = (from: number, delta: number): void => {
+    const last = optionElements.length - 1;
+    const next = Math.min(last, Math.max(0, from + delta));
+    optionElements[next]?.focus();
+  };
+
+  trigger.addEventListener('click', () => {
+    if (open) {
+      close();
+    } else {
+      const currentIndex = optionElements.findIndex(
+        (el) => Number(el.dataset['version']) === selected
+      );
+      showList(currentIndex >= 0 ? currentIndex : 0);
+    }
+  });
+
+  trigger.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (
+      event.key === 'ArrowDown' ||
+      event.key === 'Enter' ||
+      event.key === ' '
+    ) {
+      const currentIndex = optionElements.findIndex(
+        (el) => Number(el.dataset['version']) === selected
+      );
+      showList(currentIndex >= 0 ? currentIndex : 0);
+    } else if (event.key === 'ArrowUp') {
+      showList(optionElements.length - 1);
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
+
+  list.addEventListener('keydown', (event: KeyboardEvent) => {
+    const index = optionElements.indexOf(event.target as HTMLElement);
+    if (index < 0) return;
+    if (event.key === 'ArrowDown') move(index, 1);
+    else if (event.key === 'ArrowUp') move(index, -1);
+    else if (event.key === 'Home') move(index, -optionElements.length);
+    else if (event.key === 'End') move(index, optionElements.length);
+    else if (event.key === 'Escape' || event.key === 'Tab') close(true);
+    else if (event.key === 'Enter' || event.key === ' ') {
+      optionElements[index]?.click();
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
+
+  document.addEventListener('click', (event: Event) => {
+    if (!wrap.contains(event.target as Node)) close();
+  });
+
+  wrap.appendChild(list);
+
+  return {
+    wrap,
+    trigger,
+    list,
+    options: optionElements,
+    setVersion(version: number): void {
+      selected = version;
+      updateTriggerLabel();
+      updateOptionsSelected();
+    },
+  };
+}
+
+export interface ComparePickerOptions {
+  readonly leftVersion: number;
+  readonly rightVersion: number;
+  readonly currentVersion: number;
+  readonly onSelectLeft: (version: number) => void;
+  readonly onSelectRight: (version: number) => void;
+}
+
+export interface ComparePickerHandle {
+  readonly element: HTMLElement;
+  readonly left: SidePickerHandle;
+  readonly right: SidePickerHandle;
+  setVersions(left: number, right: number): void;
+}
+
+export function buildComparePicker(
+  options: ComparePickerOptions
+): ComparePickerHandle {
+  const container = document.createElement('div');
+  container.className = 'compare-picker';
+  container.setAttribute('role', 'group');
+  container.setAttribute('aria-label', 'Compare versions');
+
+  const left = buildSidePicker(
+    'left',
+    'Left',
+    options.leftVersion,
+    options.currentVersion,
+    options.onSelectLeft
+  );
+
+  const separator = document.createElement('span');
+  separator.className = 'compare-picker-separator';
+  separator.setAttribute('aria-hidden', 'true');
+  separator.textContent = 'to';
+
+  const right = buildSidePicker(
+    'right',
+    'Right',
+    options.rightVersion,
+    options.currentVersion,
+    options.onSelectRight
+  );
+
+  container.append(left.wrap, separator, right.wrap);
+
+  return {
+    element: container,
+    left,
+    right,
+    setVersions(newLeft: number, newRight: number): void {
+      left.setVersion(newLeft);
+      right.setVersion(newRight);
+    },
+  };
+}
+
+export interface ComparisonScaffold {
   readonly main: HTMLElement;
   readonly result: HTMLElement;
   readonly headline: HTMLElement;
   readonly historyNote: HTMLElement;
+  readonly picker: ComparePickerHandle;
 }
 
 /**
- * The comparison shell, and it carries no version picker of its own.
- *
- * The taskbar spans both views and now holds the version, so a second
- * selector down here would be the same choice offered twice. What is left is
- * the heading, which names both version numbers, and the result area.
+ * The comparison shell, carrying the version pickers in the toolbar.
  */
-function buildComparisonScaffold(): ComparisonScaffold {
+export function buildComparisonScaffold(
+  currentVersion: number,
+  initialLeft: number,
+  initialRight: number,
+  onPick: (left: number, right: number) => void
+): ComparisonScaffold {
   const main = document.createElement('main');
   main.className = 'stage stage-diff';
 
@@ -1647,14 +1812,34 @@ function buildComparisonScaffold(): ComparisonScaffold {
   const historyNote = document.createElement('p');
   historyNote.className = 'diff-history-note';
   copy.append(eyebrow, headline, historyNote);
-  toolbar.appendChild(copy);
+
+  let left = initialLeft;
+  let right = initialRight;
+
+  const picker = buildComparePicker({
+    leftVersion: left,
+    rightVersion: right,
+    currentVersion,
+    onSelectLeft: (selectedLeft) => {
+      left = selectedLeft;
+      onPick(left, right);
+    },
+    onSelectRight: (selectedRight) => {
+      right = selectedRight;
+      onPick(left, right);
+    },
+  });
+
+  toolbar.append(copy, picker.element);
 
   const result = document.createElement('div');
   result.className = 'diff-result';
   result.setAttribute('aria-live', 'polite');
+
   shell.append(toolbar, result);
   main.appendChild(shell);
-  return { main, result, headline, historyNote };
+
+  return { main, result, headline, historyNote, picker };
 }
 
 /**
@@ -1749,82 +1934,127 @@ export function renderLoadedVersion(
   return renderRenderedComparison(current, historical, mode, usercontentOrigin);
 }
 
-function renderComparison(
+export function renderComparison(
   current: ReadyView,
   relicId: string,
   usercontentOrigin: string,
   deps: ViewerDeps,
   onClose: () => void,
-  initialVersion?: number
+  initialLeft?: number,
+  initialRight?: number
 ): void {
-  const scaffold = buildComparisonScaffold();
+  let leftVersion =
+    initialLeft ??
+    (current.currentVersion > 1 ? current.currentVersion - 1 : 1);
+  let rightVersion = initialRight ?? current.currentVersion;
+
+  const versionCache = new Map<number, HistoricalVersionState>();
+  if (current.version !== undefined) {
+    versionCache.set(current.version, { kind: 'ready', view: current });
+  }
+
   let request = 0;
 
-  const loadSelected = async (selectedVersion: number): Promise<void> => {
+  const scaffold = buildComparisonScaffold(
+    current.currentVersion,
+    leftVersion,
+    rightVersion,
+    (newLeft, newRight) => {
+      leftVersion = newLeft;
+      rightVersion = newRight;
+      void updateSelected();
+    }
+  );
+
+  const getVersion = async (
+    version: number
+  ): Promise<HistoricalVersionState> => {
+    if (version === current.version) {
+      return { kind: 'ready', view: current };
+    }
+    const cached = versionCache.get(version);
+    if (cached !== undefined) return cached;
+    const loaded = await loadHistoricalVersion(relicId, version, current, deps);
+    versionCache.set(version, loaded);
+    return loaded;
+  };
+
+  const updateSelected = async (): Promise<void> => {
     const thisRequest = ++request;
-    const copy = versionHistoryCopy(current.version, selectedVersion);
-    scaffold.headline.textContent = copy.headline;
-    scaffold.historyNote.textContent = copy.detail;
-    scaffold.result.setAttribute('aria-busy', 'true');
-    const loading = document.createElement('p');
-    loading.className = 'diff-loading';
-    loading.setAttribute('role', 'status');
-    loading.textContent = `Loading version ${selectedVersion}.`;
-    scaffold.result.replaceChildren(loading);
 
-    const historical = await loadHistoricalVersion(
-      relicId,
-      selectedVersion,
-      current,
-      deps
-    );
-    if (thisRequest !== request) return;
-    scaffold.result.setAttribute('aria-busy', 'false');
-
-    if (historical.kind === 'unavailable') {
-      // The only case that genuinely has nothing to show: the bytes could not
-      // be fetched, opened, or decrypted. Every other refusal now falls
-      // through to rendering the version on its own.
-      scaffold.result.replaceChildren(notice(historical.detail));
+    // Refuse comparison if both sides are identical
+    if (leftVersion === rightVersion) {
+      scaffold.headline.textContent = `Version ${leftVersion}`;
+      scaffold.historyNote.textContent =
+        'Choose two different versions to see what changed between them.';
+      scaffold.result.setAttribute('aria-busy', 'false');
+      scaffold.result.replaceChildren(
+        notice(
+          'Comparing a version to itself produces no diff. Choose two different versions to compare.'
+        )
+      );
       return;
     }
 
-    // The heading was written before the fetch, when nothing knew whether a
-    // comparison was possible. Now it does, so it is corrected rather than
-    // left claiming to compare above a page showing one version.
+    const copy = comparisonCopy(
+      leftVersion,
+      rightVersion,
+      current.currentVersion
+    );
+    scaffold.headline.textContent = copy.headline;
+    scaffold.historyNote.textContent = copy.detail;
+    scaffold.result.setAttribute('aria-busy', 'true');
+
+    const loading = document.createElement('p');
+    loading.className = 'diff-loading';
+    loading.setAttribute('role', 'status');
+    loading.textContent = `Loading comparison: version ${leftVersion} and version ${rightVersion}.`;
+    scaffold.result.replaceChildren(loading);
+
+    const [leftRes, rightRes] = await Promise.all([
+      getVersion(leftVersion),
+      getVersion(rightVersion),
+    ]);
+    if (thisRequest !== request) return;
+    scaffold.result.setAttribute('aria-busy', 'false');
+
+    if (leftRes.kind === 'unavailable') {
+      scaffold.result.replaceChildren(notice(leftRes.detail));
+      return;
+    }
+    if (rightRes.kind === 'unavailable') {
+      scaffold.result.replaceChildren(notice(rightRes.detail));
+      return;
+    }
+
     const comparable =
-      diffModeForRoutes(current.route, historical.view.route) !== undefined;
-    scaffold.headline.textContent = versionHistoryCopy(
-      current.version,
-      selectedVersion,
+      diffModeForRoutes(leftRes.view.route, rightRes.view.route) !== undefined;
+    scaffold.headline.textContent = comparisonCopy(
+      leftVersion,
+      rightVersion,
+      current.currentVersion,
       comparable
     ).headline;
 
     scaffold.result.replaceChildren(
       renderLoadedVersion(
-        current,
-        historical.view,
-        selectedVersion,
+        rightRes.view,
+        leftRes.view,
+        leftVersion,
         usercontentOrigin
       )
     );
   };
 
-  const show = (selectedVersion: number): void => {
-    document.body.replaceChildren(
-      buildBar(current, relicId, {
-        onCompare: onClose,
-        comparisonOpen: true,
-        selectedVersion,
-        onSelectVersion: show,
-      }),
-      scaffold.main
-    );
-    scaffold.headline.focus();
-    void loadSelected(selectedVersion);
-  };
-
-  show(initialVersion ?? current.currentVersion - 1);
+  document.body.replaceChildren(
+    buildBar(current, relicId, {
+      onCompare: onClose,
+      comparisonOpen: true,
+    }),
+    scaffold.main
+  );
+  scaffold.headline.focus();
+  void updateSelected();
 }
 
 /* ---------- the comment thread ---------- */
@@ -3729,6 +3959,7 @@ export function buildThread(
   };
 
   const refresh = async (): Promise<void> => {
+    if (typeof document === 'undefined') return;
     const opener = cipher;
     if (opener === undefined) return;
     status.replaceChildren(line('thread-note', THREAD_LOADING_NOTE));
@@ -4086,7 +4317,7 @@ export function buildRelicRow(
   return row;
 }
 
-function renderReady(
+export function renderReady(
   view: ReadyView,
   relicId: string,
   usercontentOrigin: string,
@@ -4100,7 +4331,6 @@ function renderReady(
   function barFor(): HTMLElement {
     return buildBar(view, relicId, {
       onCompare: () => showComparison(),
-      onSelectVersion: showComparison,
       ...(thread === undefined
         ? {}
         : {
@@ -4119,14 +4349,15 @@ function renderReady(
     );
     thread?.attach(stage);
   };
-  const showComparison = (selectedVersion?: number): void => {
+  const showComparison = (left?: number, right?: number): void => {
     renderComparison(
       view,
       relicId,
       usercontentOrigin,
       deps,
       showCurrent,
-      selectedVersion
+      left,
+      right
     );
   };
 
