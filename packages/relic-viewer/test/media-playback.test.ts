@@ -42,6 +42,10 @@ class ElementStub {
     if (name === 'preload') this.preload = value;
     if (name === 'src') this.src = value;
   }
+  removeAttribute(name: string): void {
+    this.attributes.delete(name);
+    if (name === 'controls') this.controls = false;
+  }
 
   getAttribute(name: string): string | null {
     return this.attributes.get(name) ?? null;
@@ -71,6 +75,15 @@ class ElementStub {
     const list = this.listeners.get(event) ?? [];
     list.push(listener);
     this.listeners.set(event, list);
+  }
+  removeEventListener(
+    event: string,
+    listener: (...args: unknown[]) => void
+  ): void {
+    const list = this.listeners.get(event);
+    if (!list) return;
+    const idx = list.indexOf(listener);
+    if (idx >= 0) list.splice(idx, 1);
   }
 
   dispatchEvent(event: string, ...args: unknown[]): void {
@@ -183,8 +196,8 @@ describe('media playback support', () => {
 
     expect(video.className).toContain('media-player media-video');
     expect(video.className).toContain('relic-media');
-    expect(video.controls).toBe(true);
-    expect(video.hasAttribute('controls')).toBe(true);
+    expect(video.controls).toBe(false);
+    expect(video.hasAttribute('controls')).toBe(false);
     expect(video.hasAttribute('playsinline')).toBe(true);
     expect(video.getAttribute('preload')).toBe('metadata');
     expect(video.src).toMatch(/^blob:test-media-/);
@@ -226,8 +239,8 @@ describe('media playback support', () => {
 
     expect(audio.className).toContain('media-player media-audio');
     expect(audio.className).toContain('relic-media');
-    expect(audio.controls).toBe(true);
-    expect(audio.hasAttribute('controls')).toBe(true);
+    expect(audio.controls).toBe(false);
+    expect(audio.hasAttribute('controls')).toBe(false);
     expect(audio.getAttribute('preload')).toBe('metadata');
     expect(audio.src).toMatch(/^blob:test-media-/);
     expect(createdUrls).toContain(audio.src);

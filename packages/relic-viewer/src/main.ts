@@ -32,6 +32,7 @@ import {
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
+import { createMediaPlayer } from './media-player.ts';
 import { syncScrollers } from './scroll-sync.ts';
 import { localStorageKeyVault } from './vault.ts';
 
@@ -1041,8 +1042,6 @@ export function renderMediaView(view: ReadyView): HTMLElement {
   if (isAudio) {
     const audio = document.createElement('audio');
     audio.className = 'media-player media-audio relic-media';
-    audio.controls = true;
-    audio.setAttribute('controls', '');
     audio.preload = 'metadata';
     audio.setAttribute('preload', 'metadata');
     audio.src = blobUrl;
@@ -1050,8 +1049,6 @@ export function renderMediaView(view: ReadyView): HTMLElement {
   } else {
     const video = document.createElement('video');
     video.className = 'media-player media-video relic-media';
-    video.controls = true;
-    video.setAttribute('controls', '');
     video.playsInline = true;
     video.setAttribute('playsinline', '');
     video.preload = 'metadata';
@@ -1060,8 +1057,17 @@ export function renderMediaView(view: ReadyView): HTMLElement {
     player = video;
   }
 
-  wrapper.appendChild(player);
+  const customPlayer = createMediaPlayer(player, {
+    isAudio,
+    filename: view.filename,
+  });
 
+  if (customPlayer.audioCard) {
+    wrapper.appendChild(customPlayer.audioCard);
+  }
+  wrapper.appendChild(player);
+  wrapper.appendChild(customPlayer.chrome);
+  wrapper.addEventListener('cleanup', () => customPlayer.destroy());
   const strip = document.createElement('div');
   strip.className = 'media-meta-strip';
 
@@ -3059,6 +3065,14 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     disarm();
     disarmSpan();
     removeKeyboardBox();
+    if (
+      typeof CustomEvent === 'function' &&
+      typeof host?.dispatchEvent === 'function'
+    ) {
+      host.dispatchEvent(
+        new CustomEvent('relic:time-selection-cleared', { bubbles: true })
+      );
+    }
   };
 
   const paintChip = (): void => {
@@ -3086,7 +3100,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   };
   reset.addEventListener('click', clear);
 
-  const aim = (next: CommentAnchor, keepSpanArmed = false): void => {
+  const aim = (
+    next: CommentAnchor,
+    keepSpanArmed = false,
+    focusBody = true
+  ): void => {
     anchor = next;
     dismiss();
     disarm();
@@ -3095,7 +3113,21 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     paintChip();
     deps.repaint();
     deps.open();
-    deps.focusBody();
+    if (focusBody) {
+      deps.focusBody();
+    }
+    if (
+      next.kind === 'time' &&
+      typeof CustomEvent === 'function' &&
+      typeof host?.dispatchEvent === 'function'
+    ) {
+      host.dispatchEvent(
+        new CustomEvent('relic:time-selection', {
+          detail: { anchor: next },
+          bubbles: true,
+        })
+      );
+    }
   };
   const arm = (): void => {
     const surface = host;
@@ -3653,8 +3685,8 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
               said.className = 'mark-hint mark-time-hint';
               said.setAttribute('aria-live', 'polite');
               said.textContent = isAudio
-                ? 'Play or seek to mark the end of the span, or press Escape to keep this moment.'
-                : 'Play or seek to mark the end of the span, or press Escape to keep this frame.';
+                ? 'Play, seek, or scrub to mark the end of the span, or press Escape to keep this moment.'
+                : 'Play, seek, or scrub to mark the end of the span, or press Escape to keep this frame.';
               next.appendChild(said);
               timeHint = said;
             } else {
@@ -3955,6 +3987,16 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         if (row instanceof HTMLElement) {
           deps.open();
           row.scrollIntoView({ block: 'nearest' });
+        }
+      }) as EventListener);
+      next.addEventListener('relic:time-aim', ((
+        event: CustomEvent<{
+          anchor: Extract<CommentAnchor, { kind: 'time' }>;
+          focus?: boolean;
+        }>
+      ) => {
+        if (event.detail?.anchor) {
+          aim(event.detail.anchor, false, event.detail.focus ?? true);
         }
       }) as EventListener);
 
