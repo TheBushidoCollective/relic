@@ -53,6 +53,16 @@ interface Versioned<T> {
   readonly value: T;
   readonly generation: string;
 }
+function toCommentRow(raw: CommentRow): CommentRow {
+  return {
+    id: raw.id,
+    relicId: raw.relicId,
+    author: raw.author,
+    createdAt: raw.createdAt,
+    ciphertext: raw.ciphertext,
+    version: typeof raw.version === 'number' ? raw.version : undefined,
+  };
+}
 
 export function gcsStore(options: GcsStoreOptions): RelicStore {
   const host = options.host ?? DEFAULT_HOST;
@@ -340,7 +350,14 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
     // compare-and-swap per comment, and two readers commenting at once would
     // make one of them lose their words rather than merely retry.
     async putComment(row: CommentRow): Promise<void> {
-      await put(key('comment', row.relicId, `${row.id}.json`), row);
+      await put(key('comment', row.relicId, `${row.id}.json`), {
+        id: row.id,
+        relicId: row.relicId,
+        author: row.author,
+        createdAt: row.createdAt,
+        ciphertext: row.ciphertext,
+        ...(typeof row.version === 'number' ? { version: row.version } : {}),
+      });
 
       // Maintain a per-author index so listing an author's commented relics
       // does not require an unbounded bucket scan. A failed index write must
@@ -363,19 +380,18 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
       relicId: string,
       commentId: string
     ): Promise<CommentRow | undefined> {
-      return (
-        await get<CommentRow>(key('comment', relicId, `${commentId}.json`))
-      )?.value;
+      const doc = await get<CommentRow>(
+        key('comment', relicId, `${commentId}.json`)
+      );
+      if (doc === undefined) return undefined;
+      return toCommentRow(doc.value);
     },
 
     async listComments(relicId: string): Promise<readonly CommentRow[]> {
       const rows = await list<CommentRow>(`${prefix}/comment/${relicId}/`);
-      // Oldest first, ties broken on id so the order is total. A listing
-      // comes back in whatever order the bucket likes, which is lexical by
-      // object name, and a random comment id is not chronological.
-      return [...rows].sort(
-        (a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1)
-      );
+      return rows
+        .map(toCommentRow)
+        .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
     },
 
     async deleteComment(relicId: string, commentId: string): Promise<void> {
