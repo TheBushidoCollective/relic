@@ -287,7 +287,6 @@ export function createMediaPlayer(
     currentSeconds: number;
     hasMoved: boolean;
   } | null = null;
-  let handleDragState: { pointerId: number } | null = null;
 
   const getDuration = (): number => {
     const d = media.duration;
@@ -295,10 +294,24 @@ export function createMediaPlayer(
   };
 
   const dispatchTimeAim = (
-    anchor: Extract<CommentAnchor, { kind: 'time' }>
+    anchor: Extract<CommentAnchor, { kind: 'time' }>,
+    focus = true
   ): void => {
+    const roundedAnchor: Extract<CommentAnchor, { kind: 'time' }> = {
+      kind: 'time',
+      t: Math.round(anchor.t * 1000) / 1000,
+      ...(anchor.t_end !== undefined
+        ? { t_end: Math.round(anchor.t_end * 1000) / 1000 }
+        : {}),
+      ...(anchor.rect !== undefined ? { rect: anchor.rect } : {}),
+    };
     if (typeof chrome.dispatchEvent === 'function') {
-      chrome.dispatchEvent(createCustomEvent('relic:time-aim', { anchor }));
+      chrome.dispatchEvent(
+        createCustomEvent('relic:time-aim', {
+          anchor: roundedAnchor,
+          focus,
+        })
+      );
     }
   };
 
@@ -453,6 +466,13 @@ export function createMediaPlayer(
     });
   }
 
+  // Click on media picture focuses the player and toggles play/pause
+  media.addEventListener('click', (event: MouseEvent) => {
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    scrubber.focus();
+    togglePlay();
+  });
+
   // --------------------------------------------------------------------------
   // Scrubber Pointer Gestures (Seek, Drag-to-span, Hover indicator)
   // --------------------------------------------------------------------------
@@ -469,13 +489,10 @@ export function createMediaPlayer(
 
     const duration = getDuration();
     if (duration <= 0) return;
-
-    if (typeof scrubber.setPointerCapture === 'function') {
-      try {
-        scrubber.setPointerCapture(event.pointerId);
-      } catch {}
+    if (typeof event.preventDefault === 'function') {
+      event.preventDefault();
     }
-
+    scrubber.focus();
     const geom = getTrackGeometry(rail);
     const frac = pointerFraction(event.clientX, geom.left, geom.width);
     const t = fractionToTime(frac, duration);
@@ -492,38 +509,92 @@ export function createMediaPlayer(
       hasMoved: false,
     };
 
-    setPendingAnchor({ t });
     hoverIndicator.classList.add('is-hidden');
-  });
 
-  scrubber.addEventListener('pointermove', (event: PointerEvent) => {
-    const duration = getDuration();
-    if (duration <= 0) return;
-
-    const geom = getTrackGeometry(rail);
-    const frac = pointerFraction(event.clientX, geom.left, geom.width);
-    const currentSeconds = fractionToTime(frac, duration);
-
-    if (dragState !== null) {
+    const onWindowMove = (e: PointerEvent): void => {
+      if (dragState === null) return;
+      const g = getTrackGeometry(rail);
+      const f = pointerFraction(e.clientX, g.left, g.width);
+      const currentSeconds = fractionToTime(f, duration);
       dragState.currentSeconds = currentSeconds;
       if (Math.abs(currentSeconds - dragState.startSeconds) >= 0.2) {
         dragState.hasMoved = true;
       }
       media.currentTime = currentSeconds;
-      const span = spanFromDrag(dragState.startSeconds, currentSeconds);
-      setPendingAnchor(span);
-      hoverIndicator.classList.add('is-hidden');
-    } else {
-      // Hover affordance: update without seeking
-      hoverIndicator.classList.remove('is-hidden');
-      hoverIndicator.style.left = `${frac * 100}%`;
-      hoverTimecode.textContent = formatTimecode(currentSeconds);
-      hoverCommentBtn.setAttribute(
-        'aria-label',
-        `Comment at ${formatTimecode(currentSeconds)}`
-      );
-      hoverCommentBtn.dataset.time = String(currentSeconds);
+      if (dragState.hasMoved) {
+        const span = spanFromDrag(dragState.startSeconds, currentSeconds);
+        setPendingAnchor(span);
+        dispatchTimeAim(
+          {
+            kind: 'time',
+            t: span.t,
+            ...(span.t_end !== undefined ? { t_end: span.t_end } : {}),
+          },
+          false
+        );
+      }
+    };
+
+    const onWindowUp = (): void => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pointermove', onWindowMove);
+        window.removeEventListener('pointerup', onWindowUp);
+        window.removeEventListener('pointercancel', onWindowUp);
+      }
+      if (dragState === null) return;
+
+      if (
+        dragState.hasMoved &&
+        Math.abs(dragState.currentSeconds - dragState.startSeconds) >= 0.2
+      ) {
+        const span = spanFromDrag(
+          dragState.startSeconds,
+          dragState.currentSeconds
+        );
+        setPendingAnchor(span);
+        dispatchTimeAim(
+          {
+            kind: 'time',
+            t: span.t,
+            ...(span.t_end !== undefined ? { t_end: span.t_end } : {}),
+          },
+          false
+        );
+        spanHandle.focus();
+      } else {
+        // Bare click seeking: seeks to time without opening composer
+        setPendingAnchor(null);
+        chrome.dispatchEvent(
+          createCustomEvent('relic:time-selection-cleared', {})
+        );
+      }
+      dragState = null;
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointermove', onWindowMove);
+      window.addEventListener('pointerup', onWindowUp);
+      window.addEventListener('pointercancel', onWindowUp);
     }
+  });
+
+  scrubber.addEventListener('pointermove', (event: PointerEvent) => {
+    const duration = getDuration();
+    if (duration <= 0 || dragState !== null) return;
+
+    const geom = getTrackGeometry(rail);
+    const frac = pointerFraction(event.clientX, geom.left, geom.width);
+    const currentSeconds = fractionToTime(frac, duration);
+
+    // Hover affordance: update without seeking
+    hoverIndicator.classList.remove('is-hidden');
+    hoverIndicator.style.left = `${frac * 100}%`;
+    hoverTimecode.textContent = formatTimecode(currentSeconds);
+    hoverCommentBtn.setAttribute(
+      'aria-label',
+      `Comment at ${formatTimecode(currentSeconds)}`
+    );
+    hoverCommentBtn.dataset.time = String(currentSeconds);
   });
 
   scrubber.addEventListener('pointerleave', () => {
@@ -531,30 +602,6 @@ export function createMediaPlayer(
       hoverIndicator.classList.add('is-hidden');
     }
   });
-
-  const finishScrubberDrag = (event: PointerEvent): void => {
-    if (dragState === null || dragState.pointerId !== event.pointerId) return;
-
-    if (typeof scrubber.releasePointerCapture === 'function') {
-      try {
-        scrubber.releasePointerCapture(event.pointerId);
-      } catch {}
-    }
-
-    const span = spanFromDrag(dragState.startSeconds, dragState.currentSeconds);
-    const anchor: Extract<CommentAnchor, { kind: 'time' }> = {
-      kind: 'time',
-      t: span.t,
-      ...(span.t_end !== undefined ? { t_end: span.t_end } : {}),
-    };
-
-    setPendingAnchor(span);
-    dispatchTimeAim(anchor);
-    dragState = null;
-  };
-
-  scrubber.addEventListener('pointerup', finishScrubberDrag);
-  scrubber.addEventListener('pointercancel', finishScrubberDrag);
 
   // Hover comment button click
   hoverCommentBtn.addEventListener('click', (event: MouseEvent) => {
@@ -574,103 +621,135 @@ export function createMediaPlayer(
       t: boundedTime,
     };
     setPendingAnchor({ t: boundedTime });
-    dispatchTimeAim(anchor);
+    dispatchTimeAim(anchor, true);
+    spanHandle.focus();
   });
 
   // --------------------------------------------------------------------------
   // Span End Handle (Dragging & Keyboard Stepping)
   // --------------------------------------------------------------------------
   spanHandle.addEventListener('pointerdown', (event: PointerEvent) => {
-    event.stopPropagation();
-    handleDragState = { pointerId: event.pointerId };
-    if (typeof spanHandle.setPointerCapture === 'function') {
-      try {
-        spanHandle.setPointerCapture(event.pointerId);
-      } catch {}
+    if (typeof event.stopPropagation === 'function') event.stopPropagation();
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    spanHandle.focus();
+    let handleActive = true;
+
+    const onHandleMove = (e: PointerEvent): void => {
+      if (!handleActive || pendingSpan === null) return;
+      const duration = getDuration();
+      if (duration <= 0) return;
+
+      const geom = getTrackGeometry(rail);
+      const frac = pointerFraction(e.clientX, geom.left, geom.width);
+      const newTime = fractionToTime(frac, duration);
+
+      if (newTime - pendingSpan.t < STEP_SECONDS / 2) {
+        pendingSpan = { t: pendingSpan.t };
+      } else {
+        pendingSpan = { t: pendingSpan.t, t_end: newTime };
+      }
+
+      media.currentTime = newTime;
+      updatePendingVisuals();
+      dispatchTimeAim(
+        {
+          kind: 'time',
+          t: pendingSpan.t,
+          ...(pendingSpan.t_end !== undefined
+            ? { t_end: pendingSpan.t_end }
+            : {}),
+        },
+        false
+      );
+    };
+
+    const onHandleUp = (): void => {
+      handleActive = false;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pointermove', onHandleMove);
+        window.removeEventListener('pointerup', onHandleUp);
+        window.removeEventListener('pointercancel', onHandleUp);
+      }
+      spanHandle.focus();
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointermove', onHandleMove);
+      window.addEventListener('pointerup', onHandleUp);
+      window.addEventListener('pointercancel', onHandleUp);
     }
   });
-
-  spanHandle.addEventListener('pointermove', (event: PointerEvent) => {
-    if (handleDragState === null || pendingSpan === null) return;
-    const duration = getDuration();
-    if (duration <= 0) return;
-
-    const geom = getTrackGeometry(rail);
-    const frac = pointerFraction(event.clientX, geom.left, geom.width);
-    const newTime = fractionToTime(frac, duration);
-
-    if (newTime - pendingSpan.t < STEP_SECONDS / 2) {
-      pendingSpan = { t: pendingSpan.t };
-    } else {
-      pendingSpan = { t: pendingSpan.t, t_end: newTime };
-    }
-
-    media.currentTime = newTime;
-    updatePendingVisuals();
-  });
-
-  const finishHandleDrag = (event: PointerEvent): void => {
-    if (
-      handleDragState === null ||
-      handleDragState.pointerId !== event.pointerId
-    ) {
-      return;
-    }
-    handleDragState = null;
-    if (typeof spanHandle.releasePointerCapture === 'function') {
-      try {
-        spanHandle.releasePointerCapture(event.pointerId);
-      } catch {}
-    }
-    if (pendingSpan !== null) {
-      dispatchTimeAim({
-        kind: 'time',
-        t: pendingSpan.t,
-        ...(pendingSpan.t_end !== undefined
-          ? { t_end: pendingSpan.t_end }
-          : {}),
-      });
-    }
-  };
-
-  spanHandle.addEventListener('pointerup', finishHandleDrag);
-  spanHandle.addEventListener('pointercancel', finishHandleDrag);
 
   spanHandle.addEventListener('keydown', (event: KeyboardEvent) => {
     if (pendingSpan === null) return;
     const duration = getDuration();
+    const isCoarse = Boolean(
+      event.shiftKey ||
+        (typeof event.getModifierState === 'function' &&
+          event.getModifierState('Shift')) ||
+        event.key === 'PageUp' ||
+        event.key === 'PageDown'
+    );
 
-    if (event.key === 'ArrowRight') {
+    if (event.key === 'ArrowRight' || event.key === 'PageUp') {
       event.preventDefault();
       event.stopPropagation();
-      const updated = stepSpanEnd(pendingSpan, 1, duration, event.shiftKey);
+      const updated = stepSpanEnd(pendingSpan, 1, duration, isCoarse);
       pendingSpan = updated;
       media.currentTime = updated.t_end ?? updated.t;
       updatePendingVisuals();
-      dispatchTimeAim({
-        kind: 'time',
-        t: updated.t,
-        ...(updated.t_end !== undefined ? { t_end: updated.t_end } : {}),
-      });
-    } else if (event.key === 'ArrowLeft') {
+      dispatchTimeAim(
+        {
+          kind: 'time',
+          t: updated.t,
+          ...(updated.t_end !== undefined ? { t_end: updated.t_end } : {}),
+        },
+        false
+      );
+      spanHandle.focus();
+    } else if (event.key === 'ArrowLeft' || event.key === 'PageDown') {
       event.preventDefault();
       event.stopPropagation();
-      const updated = stepSpanEnd(pendingSpan, -1, duration, event.shiftKey);
+      const updated = stepSpanEnd(pendingSpan, -1, duration, isCoarse);
       pendingSpan = updated;
       media.currentTime = updated.t_end ?? updated.t;
       updatePendingVisuals();
-      dispatchTimeAim({
-        kind: 'time',
-        t: updated.t,
-        ...(updated.t_end !== undefined ? { t_end: updated.t_end } : {}),
-      });
+      dispatchTimeAim(
+        {
+          kind: 'time',
+          t: updated.t,
+          ...(updated.t_end !== undefined ? { t_end: updated.t_end } : {}),
+        },
+        false
+      );
+      spanHandle.focus();
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      event.stopPropagation();
+      pendingSpan = { t: pendingSpan.t };
+      media.currentTime = pendingSpan.t;
+      updatePendingVisuals();
+      dispatchTimeAim({ kind: 'time', t: pendingSpan.t }, false);
+      spanHandle.focus();
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      event.stopPropagation();
+      pendingSpan = { t: pendingSpan.t, t_end: duration };
+      media.currentTime = duration;
+      updatePendingVisuals();
+      dispatchTimeAim(
+        { kind: 'time', t: pendingSpan.t, t_end: duration },
+        false
+      );
+      spanHandle.focus();
     } else if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
       pendingSpan = { t: pendingSpan.t };
       media.currentTime = pendingSpan.t;
       updatePendingVisuals();
-      dispatchTimeAim({ kind: 'time', t: pendingSpan.t });
+      dispatchTimeAim({ kind: 'time', t: pendingSpan.t }, false);
+      spanHandle.focus();
     }
   });
 

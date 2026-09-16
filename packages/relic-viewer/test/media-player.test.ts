@@ -329,9 +329,25 @@ describe('custom media player and comment timeline', () => {
       querySelectorAll: (s: string) => docNode.querySelectorAll(s),
     };
 
+    const winListeners = new Map<string, Array<(e: unknown) => void>>();
     (globalThis as { window?: unknown }).window = {
-      addEventListener: () => {},
-      removeEventListener: () => {},
+      addEventListener: (type: string, h: (e: unknown) => void) => {
+        const list = winListeners.get(type) ?? [];
+        list.push(h);
+        winListeners.set(type, list);
+      },
+      removeEventListener: (type: string, h: (e: unknown) => void) => {
+        const list = winListeners.get(type);
+        if (list) {
+          const idx = list.indexOf(h);
+          if (idx >= 0) list.splice(idx, 1);
+        }
+      },
+      dispatchEvent: (e: unknown) => {
+        const type = typeof e === 'string' ? e : (e as { type: string }).type;
+        for (const h of winListeners.get(type) ?? []) h(e);
+        return true;
+      },
       getSelection: () => null,
     };
   });
@@ -584,7 +600,7 @@ describe('custom media player and comment timeline', () => {
     });
   });
 
-  test('press-release on track aims a moment anchor', () => {
+  test('bare click on track seeks without opening comment composer', () => {
     const video = new MediaTestNode('video');
     const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
       isAudio: false,
@@ -604,31 +620,27 @@ describe('custom media player and comment timeline', () => {
     // Press down at 25% (25s)
     scrubber.dispatchEvent({
       type: 'pointerdown',
-      pointerId: 1,
+      clientX: 160,
+      bubbles: true,
+      preventDefault: () => {},
+    });
+
+    // Release at same position without moving
+    (
+      window as unknown as { dispatchEvent: (e: unknown) => void }
+    ).dispatchEvent({
+      type: 'pointerup',
       clientX: 160,
       bubbles: true,
     });
 
-    // Release at same position without moving
-    scrubber.dispatchEvent({
-      type: 'pointerup',
-      pointerId: 1,
-      bubbles: true,
-    });
-
     expect(video.currentTime).toBe(25);
-    expect(aimedAnchor as CommentAnchor | null).toEqual({
-      kind: 'time',
-      t: 25,
-    });
+    expect(aimedAnchor).toBeNull();
 
-    // Pending selection shows moment and end handle
-    const pending = requireNode(
-      chrome.querySelector('.media-pending-selection'),
-      'pending'
+    const pending = chrome.querySelector('.media-pending-selection');
+    expect(pending === null || pending.classes().includes('is-hidden')).toBe(
+      true
     );
-    expect(pending.classes()).not.toContain('is-hidden');
-    expect(pending.style.left).toBe('25%');
   });
 
   test('press-drag on track aims a span anchor matching spanFromDrag', () => {
@@ -651,23 +663,26 @@ describe('custom media player and comment timeline', () => {
     // Press down at 10% (10s)
     scrubber.dispatchEvent({
       type: 'pointerdown',
-      pointerId: 2,
       clientX: 64,
       bubbles: true,
+      preventDefault: () => {},
     });
 
     // Drag to 40% (40s)
-    scrubber.dispatchEvent({
+    (
+      window as unknown as { dispatchEvent: (e: unknown) => void }
+    ).dispatchEvent({
       type: 'pointermove',
-      pointerId: 2,
       clientX: 256,
       bubbles: true,
     });
 
     // Release pointer
-    scrubber.dispatchEvent({
+    (
+      window as unknown as { dispatchEvent: (e: unknown) => void }
+    ).dispatchEvent({
       type: 'pointerup',
-      pointerId: 2,
+      clientX: 256,
       bubbles: true,
     });
 
@@ -687,6 +702,31 @@ describe('custom media player and comment timeline', () => {
     expect(pending.classes()).not.toContain('is-hidden');
     expect(pending.style.left).toBe('10%');
     expect(pending.style.width).toBe('30%'); // 40% - 10% = 30%
+  });
+
+  test('clicking video focuses the scrubber and toggles play', () => {
+    const video = new MediaTestNode('video');
+    const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+      isAudio: false,
+    });
+    const chrome = player.chrome as unknown as TestNode;
+    const scrubber = requireNode(
+      chrome.querySelector('.media-scrubber'),
+      'scrubber'
+    );
+
+    let focusedElement: unknown = null;
+    scrubber.focus = () => {
+      focusedElement = scrubber;
+    };
+
+    expect(video.paused).toBe(true);
+    video.click();
+    expect(focusedElement).toBe(scrubber);
+    expect(video.paused).toBe(false);
+
+    video.click();
+    expect(video.paused).toBe(true);
   });
 
   test('end handle steps span via keyboard and collapses back to moment', () => {

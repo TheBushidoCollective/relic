@@ -55,7 +55,7 @@ export function timeToFraction(
 export function fractionToTime(fraction: number, duration: number): number {
   if (!Number.isFinite(duration) || duration <= 0) return 0;
   const bounded = Math.min(Math.max(fraction, 0), 1);
-  return bounded * duration;
+  return Math.round(bounded * duration * 1000) / 1000;
 }
 
 /**
@@ -88,8 +88,8 @@ export function spanFromDrag(
   toSeconds: number,
   minimumSpanSeconds = 0.2
 ): TimeSpan {
-  const start = Math.min(fromSeconds, toSeconds);
-  const end = Math.max(fromSeconds, toSeconds);
+  const start = Math.round(Math.min(fromSeconds, toSeconds) * 1000) / 1000;
+  const end = Math.round(Math.max(fromSeconds, toSeconds) * 1000) / 1000;
   if (end - start < minimumSpanSeconds) return { t: start };
   return { t: start, t_end: end };
 }
@@ -111,14 +111,15 @@ export function stepSpanEnd(
   duration: number,
   coarse = false
 ): TimeSpan {
+  const start = Math.round(span.t * 1000) / 1000;
+  const current = Math.round((span.t_end ?? span.t) * 1000) / 1000;
   const step = (coarse ? COARSE_STEP_SECONDS : STEP_SECONDS) * direction;
-  const current = span.t_end ?? span.t;
-  const next = Math.min(Math.max(current + step, 0), Math.max(duration, 0));
-  // Half a step, not a whole one. `10 + 0.1 - 10` is 0.09999999999999964 in
-  // binary floating point, so comparing against the step itself collapsed the
-  // span a reader had just created and no keyboard step ever produced one.
-  if (next - span.t < STEP_SECONDS / 2) return { t: span.t };
-  return { t: span.t, t_end: next };
+  const next =
+    Math.round(
+      Math.min(Math.max(current + step, 0), Math.max(duration, 0)) * 1000
+    ) / 1000;
+  if (next - start < STEP_SECONDS / 2) return { t: start };
+  return { t: start, t_end: next };
 }
 
 /** Lay one anchor out on a track of known duration. */

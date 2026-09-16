@@ -2495,7 +2495,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
   };
   reset.addEventListener('click', clear);
 
-  const aim = (next: CommentAnchor, keepSpanArmed = false): void => {
+  const aim = (
+    next: CommentAnchor,
+    keepSpanArmed = false,
+    focusBody = true
+  ): void => {
     anchor = next;
     dismiss();
     disarm();
@@ -2504,7 +2508,9 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     paintChip();
     deps.repaint();
     deps.open();
-    deps.focusBody();
+    if (focusBody) {
+      deps.focusBody();
+    }
     if (
       next.kind === 'time' &&
       typeof CustomEvent === 'function' &&
@@ -3379,10 +3385,13 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         }
       }) as EventListener);
       next.addEventListener('relic:time-aim', ((
-        event: CustomEvent<{ anchor: Extract<CommentAnchor, { kind: 'time' }> }>
+        event: CustomEvent<{
+          anchor: Extract<CommentAnchor, { kind: 'time' }>;
+          focus?: boolean;
+        }>
       ) => {
         if (event.detail?.anchor) {
-          aim(event.detail.anchor);
+          aim(event.detail.anchor, false, event.detail.focus ?? true);
         }
       }) as EventListener);
 

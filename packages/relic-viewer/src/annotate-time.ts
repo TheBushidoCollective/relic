@@ -30,7 +30,7 @@ import {
  */
 export function formatTimecode(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-  const totalSeconds = Math.floor(seconds);
+  const totalSeconds = Math.floor(Math.round(seconds * 1000) / 1000);
   const s = totalSeconds % 60;
   const totalMinutes = Math.floor(totalSeconds / 60);
   const m = totalMinutes % 60;
@@ -40,6 +40,12 @@ export function formatTimecode(seconds: number): string {
     return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   }
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+export function formatTimecodeTenths(seconds: number): string {
+  const base = formatTimecode(seconds);
+  const tenths = Math.floor(Math.round(seconds * 10) % 10);
+  return `${base}.${tenths}`;
 }
 
 /**
@@ -54,6 +60,9 @@ export function timeTargetLabel(
   const start = formatTimecode(anchor.t);
   if (anchor.t_end !== undefined) {
     const end = formatTimecode(anchor.t_end);
+    if (start === end || anchor.t_end - anchor.t < 1) {
+      return `Commenting at ${formatTimecodeTenths(anchor.t)} to ${formatTimecodeTenths(anchor.t_end)}`;
+    }
     return `Commenting at ${start} to ${end}`;
   }
   return `Commenting at ${start}`;
