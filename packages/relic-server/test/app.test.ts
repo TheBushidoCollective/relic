@@ -2300,6 +2300,246 @@ describe('comments', () => {
     expect(own.status).toBe(204);
     expect(await app.store.listComments(id)).toHaveLength(0);
   });
+
+  test('absent version in post stamps current relic version', async () => {
+    const { id, key, grant } = await publish();
+    const token = grant['publish_token'] as string;
+
+    const post1 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ ciphertext: 'YWJjZA', publish_token: token }),
+      })
+    );
+    expect(post1.status).toBe(201);
+
+    const list1 = (await (
+      await app.fetch(req(`/api/relics/${id}/comments`))
+    ).json()) as Array<{
+      version: number | null;
+    }>;
+    expect(list1).toHaveLength(1);
+    expect(list1[0]?.version).toBe(1);
+
+    // Advance time and advance relic to version 2
+    now += 1000;
+    await republish(id, token);
+    storage.put(`${id}/v2`, await encrypted('relic revision 2', key));
+
+    now += 1000;
+    const post2 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ ciphertext: 'ZGVmZw', publish_token: token }),
+      })
+    );
+    expect(post2.status).toBe(201);
+
+    const list2 = (await (
+      await app.fetch(req(`/api/relics/${id}/comments`))
+    ).json()) as Array<{
+      version: number | null;
+    }>;
+    expect(list2).toHaveLength(2);
+    expect(list2[0]?.version).toBe(1);
+    expect(list2[1]?.version).toBe(2);
+  });
+
+  test('a valid earlier version in post is stored as given', async () => {
+    const { id, key, grant } = await publish();
+    const token = grant['publish_token'] as string;
+
+    // Advance to version 3
+    await republish(id, token);
+    storage.put(`${id}/v2`, await encrypted('relic revision 2', key));
+    await republish(id, token);
+    storage.put(`${id}/v3`, await encrypted('relic revision 3', key));
+    now += 1000;
+    const postV1 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'Y29tbWVudDE',
+          publish_token: token,
+          version: 1,
+        }),
+      })
+    );
+    expect(postV1.status).toBe(201);
+    now += 1000;
+    const postV2 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'Y29tbWVudDI',
+          publish_token: token,
+          version: 2,
+        }),
+      })
+    );
+    expect(postV2.status).toBe(201);
+    now += 1000;
+    const postV3 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'Y29tbWVudDM',
+          publish_token: token,
+          version: 3,
+        }),
+      })
+    );
+    expect(postV3.status).toBe(201);
+
+    const list = (await (
+      await app.fetch(req(`/api/relics/${id}/comments`))
+    ).json()) as Array<{
+      version: number | null;
+      ciphertext: string;
+    }>;
+    expect(list).toHaveLength(3);
+    expect(list[0]?.version).toBe(1);
+    expect(list[1]?.version).toBe(2);
+    expect(list[2]?.version).toBe(3);
+  });
+
+  test('refuses invalid versions on comment post with 400 invalid_relic_version', async () => {
+    const { id, key, grant } = await publish();
+    const token = grant['publish_token'] as string;
+
+    // Advance to version 2
+    await republish(id, token);
+    storage.put(`${id}/v2`, await encrypted('relic revision 2', key));
+
+    // Zero, negative, fraction, string, and one past current (3)
+    for (const badVersion of [0, -1, 1.5, 'three', 3]) {
+      const response = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({
+            ciphertext: 'YWJjZA',
+            publish_token: token,
+            version: badVersion,
+          }),
+        })
+      );
+      expect(response.status).toBe(400);
+      const problem = (await response.json()) as Record<string, unknown>;
+      expect(problem['code']).toBe('invalid_relic_version');
+      expect(problem['relic_id']).toBe(id);
+    }
+
+    expect(await app.store.listComments(id)).toHaveLength(0);
+  });
+
+  test('get returns version as a number for versioned rows and null for legacy rows', async () => {
+    const { id, grant } = await publish();
+    const token = grant['publish_token'] as string;
+
+    // Seed a legacy comment directly in store with no version key
+    await app.store.putComment({
+      id: 'legacy_row',
+      relicId: id,
+      author: 'legacy@example.com',
+      createdAt: 1000,
+      ciphertext: 'bGVnYWN5',
+    });
+    now += 2000;
+    // Post a modern comment through the API
+    const posted = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'bW9kZXJu',
+          publish_token: token,
+        }),
+      })
+    );
+    expect(posted.status).toBe(201);
+
+    const list = (await (
+      await app.fetch(req(`/api/relics/${id}/comments`))
+    ).json()) as Array<{
+      comment_id: string;
+      version: number | null;
+    }>;
+    expect(list).toHaveLength(2);
+    expect(list[0]?.comment_id).toBe('legacy_row');
+    expect(list[0]?.version).toBeNull();
+
+    expect(list[1]?.version).toBe(1);
+
+    // In store, legacy row has undefined, not null
+    const storedLegacy = await app.store.getComment(id, 'legacy_row');
+    expect(storedLegacy?.version).toBeUndefined();
+  });
+
+  test('stored comment version survives the relic being republished', async () => {
+    const { id, key, grant } = await publish();
+    const token = grant['publish_token'] as string;
+
+    // Advance to version 2
+    await republish(id, token);
+    storage.put(`${id}/v2`, await encrypted('relic v2 content', key));
+
+    // Comment written on version 2
+    const posted = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'Y29tbWVudCBvbiB2Mg',
+          publish_token: token,
+          version: 2,
+        }),
+      })
+    );
+    expect(posted.status).toBe(201);
+
+    // Verify it reports version 2 before republish
+    const before = (await (
+      await app.fetch(req(`/api/relics/${id}/comments`))
+    ).json()) as Array<{
+      version: number | null;
+    }>;
+    expect(before[0]?.version).toBe(2);
+
+    // Advance to version 3
+    await republish(id, token);
+    storage.put(`${id}/v3`, await encrypted('relic v3 content', key));
+
+    expect((await app.store.getRelic(id))?.version).toBe(3);
+
+    // The comment written on version 2 still reports 2 after reaching version 3
+    const after = (await (
+      await app.fetch(req(`/api/relics/${id}/comments`))
+    ).json()) as Array<{
+      version: number | null;
+    }>;
+    expect(after).toHaveLength(1);
+    expect(after[0]?.version).toBe(2);
+
+    // Add a comment on version 3 without explicit version (defaults to 3)
+    now += 1000;
+    const postV3 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'Y29tbWVudCBvbiB2Mw',
+          publish_token: token,
+        }),
+      })
+    );
+    expect(postV3.status).toBe(201);
+
+    const final = (await (
+      await app.fetch(req(`/api/relics/${id}/comments`))
+    ).json()) as Array<{
+      version: number | null;
+    }>;
+    expect(final).toHaveLength(2);
+    expect(final[0]?.version).toBe(2);
+    expect(final[1]?.version).toBe(3);
+  });
 });
 
 describe('magic-link identity', () => {

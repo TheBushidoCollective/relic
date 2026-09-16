@@ -500,6 +500,73 @@ describe('gcsStore', () => {
     expect(await store.deleteCommentsForRelic('relic')).toBe(1);
     expect(await store.listComments('relic')).toEqual([]);
   });
+  test('a legacy comment row with no version key in the bucket reads back with version undefined', async () => {
+    const gcs = fakeGcs();
+    gcs.objects.set('m/comment/relic/legacy.json', {
+      body: JSON.stringify({
+        id: 'legacy',
+        relicId: 'relic',
+        author: 'reader@example.com',
+        createdAt: 500,
+        ciphertext: 'YWJjZA',
+      }),
+      generation: 1,
+    });
+    const store = storeOn(gcs);
+    const comment = await store.getComment('relic', 'legacy');
+    expect(comment).toBeDefined();
+    expect(comment?.version).toBeUndefined();
+
+    const listed = await store.listComments('relic');
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.id).toBe('legacy');
+    expect(listed[0]?.version).toBeUndefined();
+  });
+
+  test('a comment with an explicit version persists and reads back with that version', async () => {
+    const gcs = fakeGcs();
+    const store = storeOn(gcs);
+    await store.putComment({
+      id: 'v2comment',
+      relicId: 'relic',
+      author: 'publisher',
+      createdAt: 600,
+      ciphertext: 'YWJjZA',
+      version: 2,
+    });
+
+    const rawBody = gcs.objects.get('m/comment/relic/v2comment.json')?.body;
+    expect(rawBody).toBeDefined();
+    const parsed = JSON.parse(rawBody ?? '{}') as Record<string, unknown>;
+    expect(parsed['version']).toBe(2);
+
+    const comment = await store.getComment('relic', 'v2comment');
+    expect(comment?.version).toBe(2);
+
+    const listed = await store.listComments('relic');
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.version).toBe(2);
+  });
+
+  test('a comment without a version key omits the version property from the stored GCS document', async () => {
+    const gcs = fakeGcs();
+    const store = storeOn(gcs);
+    await store.putComment({
+      id: 'unversioned',
+      relicId: 'relic',
+      author: 'publisher',
+      createdAt: 700,
+      ciphertext: 'YWJjZA',
+    });
+
+    const rawBody = gcs.objects.get('m/comment/relic/unversioned.json')?.body;
+    expect(rawBody).toBeDefined();
+    const parsed = JSON.parse(rawBody ?? '{}') as Record<string, unknown>;
+    expect('version' in parsed).toBe(false);
+
+    const comment = await store.getComment('relic', 'unversioned');
+    expect(comment?.version).toBeUndefined();
+  });
 
   test('a magic link is spent on first consume, so a replay finds nothing', async () => {
     const store = storeOn(fakeGcs());
