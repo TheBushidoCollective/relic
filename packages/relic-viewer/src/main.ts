@@ -32,8 +32,9 @@ import {
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
+import { isFrameScrollMessage } from './frame-scroll.ts';
 import { createMediaPlayer } from './media-player.ts';
-import { syncScrollers } from './scroll-sync.ts';
+import { syncFrameScrollers, syncScrollers } from './scroll-sync.ts';
 import { localStorageKeyVault } from './vault.ts';
 
 // The adapter table is installed once, from the one module that knows the
@@ -769,6 +770,7 @@ interface FrameHandle {
    * channel is structurally incapable of changing what the document says.
    */
   annotate(marks: readonly Mark[]): void;
+  setScroll(fraction: number): void;
 }
 
 /**
@@ -863,13 +865,26 @@ function sandboxFrame(
       );
       return;
     }
+    if (isFrameScrollMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-scroll', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
   };
-  window.addEventListener('message', onMessage);
+  if (typeof window !== 'undefined') {
+    window.addEventListener('message', onMessage);
+  }
   frame.addEventListener('load', () => post(payload));
 
   return {
     frame,
     annotate: (marks) => post({ type: 'relic:annotate', marks }),
+    setScroll: (fraction: number) =>
+      post({ type: 'relic:set-scroll', fraction }),
   };
 }
 
@@ -1339,6 +1354,7 @@ interface ComparisonPane {
   /** Resolves with the pane's captured tree, or never when it cannot render. */
   readonly tree: Promise<TreeNode>;
   annotate(marks: readonly Mark[]): void;
+  readonly setScroll?: (fraction: number) => void;
 }
 
 /** How long to wait for a frame that renders nothing at all. */
@@ -1395,7 +1411,12 @@ function framePane(view: ReadyView, usercontentOrigin: string): ComparisonPane {
   const handle = sandboxFrame(view, usercontentOrigin, payload, (reported) =>
     settle?.(reported)
   );
-  return { element: handle.frame, tree, annotate: handle.annotate };
+  return {
+    element: handle.frame,
+    tree,
+    annotate: handle.annotate,
+    setScroll: handle.setScroll,
+  };
 }
 
 /**
@@ -1467,11 +1488,27 @@ export function renderRenderedComparison(
 
   stage.append(beforePane, afterPane, beforeLabel, afterLabel, divider);
 
-  // Both layouts need this. Side by side, two panes at different offsets are
-  // not a comparison; under the swipe they are overlaid, so the revealed strip
-  // would show a different part of the document than the strip beside it.
   // The listeners live on the panes, so they go when the stage does.
-  syncScrollers([beforePane, afterPane]);
+  if (mode === 'markdown') {
+    syncScrollers([beforePane, afterPane]);
+  } else if (before.setScroll !== undefined && after.setScroll !== undefined) {
+    syncFrameScrollers([
+      {
+        setScrollFraction: before.setScroll,
+        addEventListener: (type, listener) =>
+          before.element.addEventListener(type, listener),
+        removeEventListener: (type, listener) =>
+          before.element.removeEventListener(type, listener),
+      },
+      {
+        setScrollFraction: after.setScroll,
+        addEventListener: (type, listener) =>
+          after.element.addEventListener(type, listener),
+        removeEventListener: (type, listener) =>
+          after.element.removeEventListener(type, listener),
+      },
+    ]);
+  }
 
   const controls = document.createElement('div');
   controls.className = 'compare-controls';
@@ -1529,6 +1566,7 @@ export function renderRenderedComparison(
   });
   void Promise.race([Promise.all([before.tree, after.tree]), timeout]).then(
     (trees) => {
+      if (typeof document === 'undefined') return;
       if (trees === undefined) {
         counts.textContent =
           'Both versions are shown. Relik could not read their rendered ' +
@@ -2183,9 +2221,10 @@ export function buildChangesSidebar(): ChangesSidebarHandle {
     const right = row.getBoundingClientRect().right;
     resizer.setPointerCapture(event.pointerId);
     const move = (moved: PointerEvent): void => {
+      const minStage = 448;
       const width = Math.max(
         280,
-        Math.min(window.innerWidth * 0.8, right - moved.clientX)
+        Math.min(window.innerWidth - minStage, right - moved.clientX)
       );
       document.documentElement.style.setProperty(
         '--thread-width',
@@ -2319,6 +2358,18 @@ export function renderComparison(
   );
 
   const changesSidebar = buildChangesSidebar();
+
+  if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    const minStage = 448;
+    const maxSidebar = Math.max(280, window.innerWidth - minStage);
+    const stored = readThreadWidth();
+    if (stored !== undefined && stored > maxSidebar) {
+      document.documentElement.style.setProperty(
+        '--thread-width',
+        `${Math.round(maxSidebar)}px`
+      );
+    }
+  }
 
   const getVersion = async (
     version: number

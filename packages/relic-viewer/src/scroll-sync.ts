@@ -65,8 +65,16 @@ const SETTLED_PIXELS = 1;
 export function syncScrollers(
   panes: readonly Scroller[],
   schedule: (run: () => void) => void = (run) => {
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
-    else setTimeout(run, 0);
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.requestAnimationFrame === 'function'
+    ) {
+      window.requestAnimationFrame(run);
+    } else if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(run);
+    } else {
+      setTimeout(run, 0);
+    }
   }
 ): () => void {
   if (panes.length < 2) return () => {};
@@ -122,6 +130,116 @@ export function syncScrollers(
   return () => {
     for (const { pane, listener } of bound) {
       pane.removeEventListener('scroll', listener);
+    }
+  };
+}
+
+/**
+ * A sandboxed frame scroller that communicates through fractional scroll events
+ * and commands across an opaque origin boundary.
+ */
+export interface FrameScroller {
+  setScrollFraction(fraction: number): void;
+  addEventListener(type: string, listener: (event: Event) => void): void;
+  removeEventListener(type: string, listener: (event: Event) => void): void;
+}
+
+/**
+ * Whether two scroll fractions are close enough to leave alone.
+ *
+ * A difference smaller than half a thousandth is well below one pixel on any
+ * practical viewport, and avoiding redundant writes keeps rounding jitter
+ * from generating echo cycles across the postMessage bridge.
+ */
+const SETTLED_FRACTION = 0.001;
+
+/**
+ * Bind sandboxed frame scrollers so that scrolling any one moves the other
+ * to the same relative position. Returns a teardown that unbinds every listener.
+ *
+ * Like `syncScrollers`, this maintains proportional mapping and guards against
+ * reciprocal feedback. Because postMessage is asynchronous across the opaque
+ * frame boundary, the feedback guard tracks both the active driver during frame
+ * scheduling and the expected echo fraction sent to each follower.
+ */
+export function syncFrameScrollers(
+  panes: readonly FrameScroller[],
+  schedule: (run: () => void) => void = (run) => {
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.requestAnimationFrame === 'function'
+    ) {
+      window.requestAnimationFrame(run);
+    } else if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(run);
+    } else {
+      setTimeout(run, 0);
+    }
+  }
+): () => void {
+  if (panes.length < 2) return () => {};
+
+  let driver: FrameScroller | undefined;
+  let latestFraction: number | null = null;
+  let queued = false;
+  const expectedEchoes = new Map<FrameScroller, number>();
+
+  const follow = (): void => {
+    queued = false;
+    const leader = driver;
+    const fraction = latestFraction;
+    if (leader === undefined || fraction === null) return;
+
+    try {
+      const bounded = Math.min(Math.max(fraction, 0), 1);
+
+      for (const pane of panes) {
+        if (pane === leader) continue;
+        const lastSent = expectedEchoes.get(pane);
+        if (
+          lastSent !== undefined &&
+          Math.abs(lastSent - bounded) < SETTLED_FRACTION
+        ) {
+          continue;
+        }
+        expectedEchoes.set(pane, bounded);
+        pane.setScrollFraction(bounded);
+      }
+    } finally {
+      driver = undefined;
+      latestFraction = null;
+    }
+  };
+
+  const bound = panes.map((pane) => {
+    const listener = (event: Event): void => {
+      const frac = (event as CustomEvent<{ fraction?: number }>).detail
+        ?.fraction;
+      if (typeof frac !== 'number' || !Number.isFinite(frac)) return;
+
+      // An echo from a programmatic write to this follower is not a reader gesture.
+      const expected = expectedEchoes.get(pane);
+      if (
+        expected !== undefined &&
+        Math.abs(frac - expected) < SETTLED_FRACTION * 5
+      ) {
+        expectedEchoes.delete(pane);
+        return;
+      }
+      expectedEchoes.delete(pane);
+      driver = pane;
+      latestFraction = frac;
+      if (queued) return;
+      queued = true;
+      schedule(follow);
+    };
+    pane.addEventListener('relic:frame-scroll', listener);
+    return { pane, listener };
+  });
+
+  return () => {
+    for (const { pane, listener } of bound) {
+      pane.removeEventListener('relic:frame-scroll', listener);
     }
   };
 }

@@ -54,6 +54,11 @@ import {
   takeTailUtf8,
 } from './annotate-frame.ts';
 import {
+  type FrameScrollMessage,
+  isSetScrollMessage,
+  type SetScrollMessage,
+} from './frame-scroll.ts';
+import {
   applyMarks,
   captureTree,
   HIGHLIGHT_CSS,
@@ -101,6 +106,7 @@ export interface FrameInteractionHandler {
   onClearMarks(): void;
   onRevealMark(msg: RevealMarkMessage): void;
   onPairMark(id: string, active: boolean): void;
+  onSetScroll?(fraction: number): void;
 }
 
 export interface FrameInteraction extends FrameInteractionHandler {
@@ -409,6 +415,56 @@ export function clearFrameRegions(root: HTMLElement, id?: string): void {
 /**
  * Setup pointer, selection, and mark manipulation listeners inside the frame.
  */
+/** How far down its travel the document in a window sits, or null when it cannot move. */
+export function documentScrollFraction(
+  doc: Document,
+  win: Window
+): number | null {
+  const el = doc.scrollingElement ?? doc.documentElement;
+  if (!el) return null;
+  const scrollHeight = Math.max(
+    el.scrollHeight ?? 0,
+    doc.body?.scrollHeight ?? 0
+  );
+  const clientHeight = win.innerHeight || el.clientHeight || 0;
+  const travel = scrollHeight - clientHeight;
+  if (!(travel > 0)) return null;
+  const scrollTop = win.scrollY || el.scrollTop || doc.body?.scrollTop || 0;
+  const clamped = Math.min(Math.max(scrollTop, 0), travel);
+  return clamped / travel;
+}
+
+/** Put the document in a window at a fraction of its travel. */
+export function applyDocumentScrollFraction(
+  doc: Document,
+  win: Window,
+  fraction: number
+): void {
+  const el = doc.scrollingElement ?? doc.documentElement;
+  if (!el) return;
+  const scrollHeight = Math.max(
+    el.scrollHeight ?? 0,
+    doc.body?.scrollHeight ?? 0
+  );
+  const clientHeight = win.innerHeight || el.clientHeight || 0;
+  const travel = scrollHeight - clientHeight;
+  if (!(travel > 0)) return;
+  const bounded = Math.min(Math.max(fraction, 0), 1);
+  const target = Math.round(bounded * travel);
+  const current = win.scrollY || el.scrollTop || doc.body?.scrollTop || 0;
+  if (Math.abs(current - target) > 1) {
+    if (typeof win.scrollTo === 'function') {
+      try {
+        win.scrollTo({ top: target, behavior: 'instant' as ScrollBehavior });
+      } catch {
+        win.scrollTo(0, target);
+      }
+    }
+    if (el && el.scrollTop !== target) el.scrollTop = target;
+    if (doc.body && doc.body.scrollTop !== target) doc.body.scrollTop = target;
+  }
+}
+
 export function setupFrameInteraction(
   doc: Document,
   win: Window,
@@ -418,6 +474,24 @@ export function setupFrameInteraction(
   let startX = 0;
   let startY = 0;
   let isDown = false;
+  let suppressScroll = false;
+  let scrollResetTimer: number | undefined;
+
+  const handleScroll = (): void => {
+    if (suppressScroll) return;
+    const fraction = documentScrollFraction(doc, win);
+    if (fraction === null) return;
+    postOutward({ type: 'relic:frame-scroll', fraction });
+  };
+
+  // Guarded because this function is called with a stub window in the frame
+  // interaction tests, which predate scroll syncing and supply only the
+  // members they exercise. An unguarded call threw there and took two tests
+  // with it, which is the signal that the stub is the contract this function
+  // has always had.
+  if (typeof win.addEventListener === 'function') {
+    win.addEventListener('scroll', handleScroll, { passive: true });
+  }
 
   doc.addEventListener('mousedown', (event: MouseEvent) => {
     if (!armed) return;
@@ -608,6 +682,15 @@ export function setupFrameInteraction(
         target.classList.toggle('is-paired', active);
       }
     },
+
+    onSetScroll(fraction: number) {
+      suppressScroll = true;
+      clearTimeout(scrollResetTimer);
+      applyDocumentScrollFraction(doc, win, fraction);
+      scrollResetTimer = win.setTimeout(() => {
+        suppressScroll = false;
+      }, 50) as unknown as number;
+    },
   };
 }
 
@@ -682,6 +765,10 @@ export function createSandboxHandler(
       return true;
     }
 
+    if (isSetScrollMessage(data)) {
+      interaction?.onSetScroll?.(data.fraction);
+      return true;
+    }
     return false;
   };
 }
@@ -769,6 +856,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       onClearMarks: () => interaction?.onClearMarks(),
       onRevealMark: (msg) => interaction?.onRevealMark(msg),
       onPairMark: (id, active) => interaction?.onPairMark(id, active),
+      onSetScroll: (fraction) => interaction?.onSetScroll?.(fraction),
     }
   );
 
