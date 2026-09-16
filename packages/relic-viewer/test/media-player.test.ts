@@ -720,6 +720,61 @@ describe('custom media player and comment timeline', () => {
     expect(pending.style.width).toBe('30%'); // 40% - 10% = 30%
   });
 
+  test('a drag holds its aim until release, so the rail cannot slide under the pointer', () => {
+    const video = new MediaTestNode('video');
+    const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+      isAudio: false,
+    });
+    const chrome = player.chrome as unknown as TestNode;
+    const scrubber = requireNode(
+      chrome.querySelector('.media-scrubber'),
+      'scrubber'
+    );
+    const rail = requireNode(chrome.querySelector('.media-track-rail'), 'rail');
+
+    // Aiming opens the thread sidebar, which in the real layout shifts this
+    // rail 176px left. Reproduced here: any aim moves the rail.
+    const aims: CommentAnchor[] = [];
+    chrome.addEventListener('relic:time-aim', (event: unknown) => {
+      aims.push((event as { detail: { anchor: CommentAnchor } }).detail.anchor);
+      rail.rect = { ...rail.rect, left: -176, right: 464 };
+    });
+
+    const fire = (type: string, clientX: number): void => {
+      (
+        window as unknown as { dispatchEvent: (e: unknown) => void }
+      ).dispatchEvent({
+        type,
+        clientX,
+        bubbles: true,
+      });
+    };
+
+    // Press at 24% of a 640px rail at left 0, on a 100s clip.
+    scrubber.dispatchEvent({
+      type: 'pointerdown',
+      clientX: 0.24 * 640,
+      bubbles: true,
+      preventDefault: () => {},
+    });
+    // Drag to 36% and hold the finger there for a second move.
+    fire('pointermove', 0.36 * 640);
+    expect(aims).toHaveLength(0);
+    fire('pointermove', 0.36 * 640);
+    fire('pointerup', 0.36 * 640);
+
+    // One aim, on release, ending where the pointer actually was. If the aim
+    // fired during the drag the rail would have shifted and this same
+    // clientX would have read as 63.5s instead of 36s.
+    expect(aims).toHaveLength(1);
+    const expected = spanFromDrag(24, 36);
+    expect(aims[0]).toEqual({
+      kind: 'time',
+      t: expected.t,
+      ...(expected.t_end !== undefined ? { t_end: expected.t_end } : {}),
+    });
+  });
+
   test('clicking video focuses the scrubber and toggles play', () => {
     const video = new MediaTestNode('video');
     const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
@@ -730,75 +785,6 @@ describe('custom media player and comment timeline', () => {
       chrome.querySelector('.media-scrubber'),
       'scrubber'
     );
-    test('drag recomputes geometry when the rail shifts mid-gesture', () => {
-      const video = new MediaTestNode('video');
-      const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
-        isAudio: false,
-      });
-      const chrome = player.chrome as unknown as TestNode;
-      const scrubber = requireNode(
-        chrome.querySelector('.media-scrubber'),
-        'scrubber'
-      );
-
-      let aimedAnchor: CommentAnchor | null = null;
-      chrome.addEventListener('relic:time-aim', (event: unknown) => {
-        aimedAnchor = (event as { detail: { anchor: CommentAnchor } }).detail
-          .anchor;
-      });
-
-      // Rail at left=0, width=640 (the test default).
-      // Press down at 12%: startSeconds = 76.8
-      scrubber.dispatchEvent({
-        type: 'pointerdown',
-        clientX: 76.8,
-        bubbles: true,
-        preventDefault: () => {},
-      });
-
-      // Mid-gesture, the rail shifts left by 176px (a sidebar opening).
-      const rail = requireNode(
-        chrome.querySelector('.media-track-rail'),
-        'rail'
-      );
-      rail.rect = {
-        left: -176,
-        top: 0,
-        right: 464,
-        bottom: 24,
-        width: 640,
-        height: 24,
-      };
-
-      // Reader moves to what WOULD be 36% of the post-shift rail: 176 + 0.36 * 640
-      (
-        window as unknown as { dispatchEvent: (e: unknown) => void }
-      ).dispatchEvent({
-        type: 'pointermove',
-        clientX: 176 + 0.36 * 640,
-        bubbles: true,
-      });
-
-      (
-        window as unknown as { dispatchEvent: (e: unknown) => void }
-      ).dispatchEvent({
-        type: 'pointerup',
-        clientX: 176 + 0.36 * 640,
-        bubbles: true,
-      });
-
-      // The final end must be 36% of the live rail, not inflated by the shift.
-      const expectedSpan = spanFromDrag(76.8, 40);
-      const expectedAnchor: CommentAnchor = {
-        kind: 'time',
-        t: expectedSpan.t,
-        ...(expectedSpan.t_end !== undefined
-          ? { t_end: expectedSpan.t_end }
-          : {}),
-      };
-      expect(aimedAnchor as CommentAnchor | null).toEqual(expectedAnchor);
-    });
-
     let focusedElement: unknown = null;
     scrubber.focus = () => {
       focusedElement = scrubber;

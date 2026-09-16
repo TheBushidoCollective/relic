@@ -524,9 +524,12 @@ export function createMediaPlayer(
 
     const onWindowMove = (e: PointerEvent): void => {
       if (dragState === null) return;
-      // Re-read the rail on every move: opening the thread sidebar shifts
-      // the rail mid-gesture, so a rect captured at pointerdown is stale by
-      // the time the reader lets go.
+      // The rail rect is read live, which is only safe because nothing in
+      // this gesture can move it. The aiming event that opens the thread
+      // sidebar, and so shifts this rail 176px sideways, is held until
+      // pointerup: a track that slides under a reader's finger maps the
+      // same physical position to a later time, and the span they drew
+      // ends somewhere they never chose.
       const g = getTrackGeometry(rail);
       const f = pointerFraction(e.clientX, g.left, g.width);
       const currentSeconds = fractionToTime(f, duration);
@@ -536,20 +539,14 @@ export function createMediaPlayer(
       }
       media.currentTime = currentSeconds;
       if (dragState.hasMoved) {
-        const span = spanFromDrag(dragState.startSeconds, currentSeconds);
-        setPendingAnchor(span);
-        dispatchTimeAim(
-          {
-            kind: 'time',
-            t: span.t,
-            ...(span.t_end !== undefined ? { t_end: span.t_end } : {}),
-          },
-          false
-        );
+        // Painted locally, so the reader still watches the selection and its
+        // two timecodes grow under the pointer. None of that needs the
+        // sidebar, which is the only reason this is safe to defer.
+        setPendingAnchor(spanFromDrag(dragState.startSeconds, currentSeconds));
       }
     };
 
-    const onWindowUp = (e: PointerEvent): void => {
+    const onWindowUp = (): void => {
       if (typeof window !== 'undefined') {
         window.removeEventListener('pointermove', onWindowMove);
         window.removeEventListener('pointerup', onWindowUp);
@@ -561,13 +558,13 @@ export function createMediaPlayer(
         dragState.hasMoved &&
         Math.abs(dragState.currentSeconds - dragState.startSeconds) >= 0.2
       ) {
-        // Final end computed from the live rail rect, not the pointerdown
-        // one, so the sidebar shift cannot inflate it after the reader
-        // has already let go.
-        const g = getTrackGeometry(rail);
-        const f = pointerFraction(e.clientX, g.left, g.width);
-        const finalSeconds = fractionToTime(f, duration);
-        const span = spanFromDrag(dragState.startSeconds, finalSeconds);
+        // The end is the last position the pointer reached against the
+        // geometry the whole gesture saw. Aiming below is what opens the
+        // sidebar, so nothing has shifted between that read and this one.
+        const span = spanFromDrag(
+          dragState.startSeconds,
+          dragState.currentSeconds
+        );
         setPendingAnchor(span);
         dispatchTimeAim(
           {
