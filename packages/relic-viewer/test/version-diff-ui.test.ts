@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { encodeFragment, encryptRelic, generateKey } from '@relic/format';
+import {
+  deriveCommentKey,
+  encodeFragment,
+  encryptRelic,
+  generateKey,
+} from '@relic/format';
+import { commentCipher } from '../src/comments.ts';
 import { MAX_DIFF_BYTES } from '../src/diff.ts';
 import {
   buildBar,
@@ -7,6 +13,7 @@ import {
   buildComparePicker,
   buildComparisonScaffold,
   buildCurrentStage,
+  buildThread,
   commentRow,
   comparisonCopy,
   renderCodeComparison,
@@ -582,12 +589,15 @@ describe('version comparison affordance', () => {
       version: null,
     };
     const row = commentRow(entry) as unknown as ElementStub;
-    expect(textOf(row)).toContain('Predates versioning');
+    expect(textOf(row)).toContain('Version unknown');
     expect(withClass(row, 'comment-badge-unversioned')).toHaveLength(1);
+    const badge = withClass(row, 'comment-badge-unversioned')[0];
+    if (badge === undefined) throw new Error('no unversioned badge');
+    expect(badge.attributes.get('title')).toBe('Predates versioning');
 
     const versionedEntry = { ...entry, version: 2 };
     const versionedRow = commentRow(versionedEntry) as unknown as ElementStub;
-    expect(textOf(versionedRow)).not.toContain('Predates versioning');
+    expect(textOf(versionedRow)).not.toContain('Version unknown');
   });
 
   test('seedComparisonPair never seeds the same version on both sides', () => {
@@ -1014,5 +1024,245 @@ describe('version comparison affordance', () => {
       'No changes. These versions have identical content.'
     );
     expect(withClass(comparison, 'diff-changes')).toHaveLength(0);
+  });
+});
+
+describe('comment version scoping', () => {
+  beforeEach(() => {
+    const body = new ElementStub('BODY');
+    (globalThis as { document?: unknown }).document = {
+      body,
+      documentElement: {
+        style: {
+          setProperty: () => {},
+          getPropertyValue: () => '',
+        },
+      },
+      createElement: (tag: string) => new ElementStub(tag),
+      createElementNS: (_namespace: string, tag: string) =>
+        new ElementStub(tag),
+      addEventListener: () => {},
+    };
+    (globalThis as { window?: unknown }).window = {
+      innerWidth: 1024,
+      innerHeight: 768,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+  });
+
+  afterEach(() => {
+    delete (globalThis as { document?: unknown }).document;
+    delete (globalThis as { window?: unknown }).window;
+  });
+
+  const RELIC_ID = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+  async function createCommentFixture() {
+    const key = generateKey();
+    const shareUrl = `https://relik.example/${RELIC_ID}#${encodeFragment(key)}`;
+    const cipher = commentCipher(await deriveCommentKey(key));
+
+    const records = [
+      {
+        comment_id: 'c-v1',
+        author: 'alice@example.com',
+        created_at: '2026-09-16T10:00:00.000Z',
+        ciphertext: await cipher.seal({
+          body: 'comment on version 1',
+          display_name: null,
+        }),
+        version: 1,
+      },
+      {
+        comment_id: 'c-v2',
+        author: 'bob@example.com',
+        created_at: '2026-09-16T11:00:00.000Z',
+        ciphertext: await cipher.seal({
+          body: 'comment on version 2',
+          display_name: null,
+        }),
+        version: 2,
+      },
+      {
+        comment_id: 'c-v3',
+        author: 'carol@example.com',
+        created_at: '2026-09-16T12:00:00.000Z',
+        ciphertext: await cipher.seal({
+          body: 'comment on version 3',
+          display_name: null,
+        }),
+        version: 3,
+      },
+      {
+        comment_id: 'c-unversioned',
+        author: 'dan@example.com',
+        created_at: '2026-09-16T09:00:00.000Z',
+        ciphertext: await cipher.seal({
+          body: 'comment without version',
+          display_name: null,
+        }),
+        version: null,
+      },
+    ];
+
+    function makeDeps(customRecords = records): ViewerDeps {
+      return dummyDeps((async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/comments')) {
+          return Response.json(customRecords);
+        }
+        if (url.includes('/api/auth/session')) {
+          return Response.json({ email: null });
+        }
+        return new Response(new Uint8Array(0));
+      }) as typeof globalThis.fetch);
+    }
+
+    return { key, shareUrl, records, makeDeps };
+  }
+
+  test('viewing v3 on a multi-version relic shows v3 comments but not v1 or unversioned comments', async () => {
+    const { shareUrl, makeDeps } = await createCommentFixture();
+    const readyView = view('code', 3, undefined, 3, shareUrl);
+    let taskbarCount = -1;
+    const thread = buildThread(readyView, RELIC_ID, makeDeps(), (count) => {
+      taskbarCount = count;
+    });
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+    const renderedRows = withClass(threadElement, 'comment');
+    const threadText = textOf(threadElement);
+
+    // v3 comment shows
+    expect(threadText).toContain('comment on version 3');
+
+    // v1 comment does not show
+    expect(threadText).not.toContain('comment on version 1');
+
+    // unversioned comment does NOT show (this assertion catches the defect where unversioned showed on current version)
+    expect(threadText).not.toContain('comment without version');
+    expect(withClass(threadElement, 'comment-badge-unversioned')).toHaveLength(
+      0
+    );
+
+    // rendered row count equals taskbar count
+    expect(renderedRows.length).toBe(1);
+    expect(taskbarCount).toBe(renderedRows.length);
+
+    const bar = buildBar(readyView, RELIC_ID, {
+      onComments: () => {},
+      commentCount: taskbarCount,
+    }) as unknown as ElementStub;
+    const countSpan = withClass(bar, 'action-count')[0];
+    expect(countSpan?.textContent).toBe(String(taskbarCount));
+  });
+
+  test('viewing v1 on a multi-version relic shows v1 comments and unversioned comments with badge', async () => {
+    const { shareUrl, makeDeps } = await createCommentFixture();
+    const readyView = view('code', 1, undefined, 3, shareUrl);
+    let taskbarCount = -1;
+    const thread = buildThread(readyView, RELIC_ID, makeDeps(), (count) => {
+      taskbarCount = count;
+    });
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+    const renderedRows = withClass(threadElement, 'comment');
+    const threadText = textOf(threadElement);
+
+    // v1 comment shows
+    expect(threadText).toContain('comment on version 1');
+
+    // unversioned comment shows with the badge
+    expect(threadText).toContain('comment without version');
+    const badges = withClass(threadElement, 'comment-badge-unversioned');
+    expect(badges).toHaveLength(1);
+    expect(badges[0]?.textContent).toBe('Version unknown');
+    expect(badges[0]?.attributes.get('title')).toBe('Predates versioning');
+
+    // v2 and v3 comments do not show
+    expect(threadText).not.toContain('comment on version 2');
+    expect(threadText).not.toContain('comment on version 3');
+
+    // rendered row count equals taskbar count
+    expect(renderedRows.length).toBe(2);
+    expect(taskbarCount).toBe(renderedRows.length);
+
+    const bar = buildBar(readyView, RELIC_ID, {
+      onComments: () => {},
+      commentCount: taskbarCount,
+    }) as unknown as ElementStub;
+    const countSpan = withClass(bar, 'action-count')[0];
+    expect(countSpan?.textContent).toBe(String(taskbarCount));
+  });
+
+  test('viewing v2 on a multi-version relic shows only v2 comments', async () => {
+    const { shareUrl, makeDeps } = await createCommentFixture();
+    const readyView = view('code', 2, undefined, 3, shareUrl);
+    let taskbarCount = -1;
+    const thread = buildThread(readyView, RELIC_ID, makeDeps(), (count) => {
+      taskbarCount = count;
+    });
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+    const renderedRows = withClass(threadElement, 'comment');
+    const threadText = textOf(threadElement);
+
+    // only v2 comment shows
+    expect(threadText).toContain('comment on version 2');
+    expect(threadText).not.toContain('comment on version 1');
+    expect(threadText).not.toContain('comment on version 3');
+    expect(threadText).not.toContain('comment without version');
+    expect(withClass(threadElement, 'comment-badge-unversioned')).toHaveLength(
+      0
+    );
+
+    // rendered row count equals taskbar count
+    expect(renderedRows.length).toBe(1);
+    expect(taskbarCount).toBe(renderedRows.length);
+
+    const bar = buildBar(readyView, RELIC_ID, {
+      onComments: () => {},
+      commentCount: taskbarCount,
+    }) as unknown as ElementStub;
+    const countSpan = withClass(bar, 'action-count')[0];
+    expect(countSpan?.textContent).toBe(String(taskbarCount));
+  });
+
+  test('a relic with a single version shows unversioned comments', async () => {
+    const { shareUrl, makeDeps } = await createCommentFixture();
+    const readyView = view('code', 1, undefined, 1, shareUrl);
+    let taskbarCount = -1;
+    const thread = buildThread(readyView, RELIC_ID, makeDeps(), (count) => {
+      taskbarCount = count;
+    });
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+    const renderedRows = withClass(threadElement, 'comment');
+    const threadText = textOf(threadElement);
+
+    // unversioned comment DOES show
+    expect(threadText).toContain('comment without version');
+    expect(withClass(threadElement, 'comment-badge-unversioned')).toHaveLength(
+      1
+    );
+
+    // On a single-version relic, all comments show because no version dimension exists
+    expect(threadText).toContain('comment on version 1');
+
+    // rendered row count equals taskbar count
+    expect(renderedRows.length).toBe(4);
+    expect(taskbarCount).toBe(renderedRows.length);
+
+    const bar = buildBar(readyView, RELIC_ID, {
+      onComments: () => {},
+      commentCount: taskbarCount,
+    }) as unknown as ElementStub;
+    const countSpan = withClass(bar, 'action-count')[0];
+    expect(countSpan?.textContent).toBe(String(taskbarCount));
   });
 });

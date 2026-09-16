@@ -2593,7 +2593,10 @@ export function commentRow(
   if (entry.version === null || entry.version === undefined) {
     const unversioned = document.createElement('span');
     unversioned.className = 'comment-badge comment-badge-unversioned';
-    unversioned.textContent = 'Predates versioning';
+    unversioned.textContent = 'Version unknown';
+    // setAttribute rather than the title property, because the badge is read
+    // back through getAttribute in tests and the two were being set twice.
+    unversioned.setAttribute('title', 'Predates versioning');
     head.appendChild(unversioned);
   }
 
@@ -4473,15 +4476,27 @@ export function buildThread(
     // placed cannot be built before that is decided.
     const viewedVersion = view.version;
     const isCurrentVersion = view.version === view.currentVersion;
+    const hasHistory = view.currentVersion > 1;
     const filteredEntries = state.entries.filter((entry) => {
-      if (entry.version === viewedVersion) return true;
-      if (
-        (entry.version === null || entry.version === undefined) &&
-        isCurrentVersion
-      ) {
+      // 1. When a relic has no version history (currentVersion <= 1), there is
+      // no version dimension for a reader to navigate. Every comment shows
+      // regardless of stored version so single-version relics never lose rows.
+      if (!hasHistory) {
         return true;
       }
-      return false;
+
+      // 2. Comments explicitly stamped with a version belong to that version
+      // and show only when viewing it.
+      if (entry.version !== null && entry.version !== undefined) {
+        return entry.version === viewedVersion;
+      }
+
+      // 3. Comments carrying no version predate versioning. Their true version
+      // is unknowable, so they cannot be claimed for any specific later version,
+      // and the current or latest version must remain clean per Jason's rule.
+      // Version 1 (the oldest version) is where they land so they remain
+      // reachable without polluting newer revisions.
+      return viewedVersion === 1;
     });
 
     paintMarks(filteredEntries);
