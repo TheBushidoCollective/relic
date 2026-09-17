@@ -265,6 +265,7 @@ describe('writing a comment as the publisher', () => {
       body: 'The second chart is using last quarter numbers.',
       display_name: 'Relic Agent',
       anchor: null,
+      addresses: null,
     });
   });
 

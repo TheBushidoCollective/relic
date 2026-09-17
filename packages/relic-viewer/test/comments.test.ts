@@ -684,6 +684,10 @@ describe('posting a comment', () => {
       body: 'round trips',
       display_name: 'Ada',
       anchor: null,
+      // The read shape carries the reply pointer now, null when a comment
+      // answers nothing, so a caller never has to tell that from a missing
+      // field.
+      addresses: null,
     });
   });
 
