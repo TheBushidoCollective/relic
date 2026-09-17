@@ -53,8 +53,12 @@ import {
   isFrameSelectionMessage,
 } from './annotate-frame.ts';
 import {
+  type AddressedBy,
+  addressedBadgeLabel,
   type CommentCipher,
   type CommentEntry,
+  type CommentNode,
+  collectDisplayedEntries,
   commentCipher,
   commentTime,
   DELIVERY_DISCLOSURE,
@@ -71,8 +75,10 @@ import {
   type Refusal,
   readSession,
   requestMagicLink,
+  resolveAddressedMap,
   type SessionState,
   threadCountLabel,
+  threadEntries,
   unwrapTextQuotes,
   utf8Bytes,
   wrapTextQuote,
@@ -2554,11 +2560,17 @@ export function commentRow(
    * lands depends on what is currently rendered and only the paint pass
    * knows that.
    */
-  unplaceable = false
+  unplaceable = false,
+  addressed?: AddressedBy | null,
+  replies: HTMLElement[] = [],
+  isReply = false
 ): HTMLElement {
   const row = document.createElement('li');
   row.className =
     entry.kind === 'open' ? 'comment' : 'comment comment-undecryptable';
+  if (isReply) {
+    row.classList.add('comment-reply');
+  }
   if (entry.id !== null) row.dataset.commentId = entry.id;
 
   const head = document.createElement('div');
@@ -2600,6 +2612,24 @@ export function commentRow(
     head.appendChild(unversioned);
   }
 
+  const resolvedAddressed =
+    addressed ?? (entry.kind === 'open' ? entry.addressed : null);
+  if (resolvedAddressed !== null && resolvedAddressed !== undefined) {
+    const addressedBadge = document.createElement('span');
+    addressedBadge.className = 'comment-badge comment-badge-addressed';
+    addressedBadge.textContent = addressedBadgeLabel(resolvedAddressed);
+    addressedBadge.dataset.addressedKind = resolvedAddressed.kind;
+    if (
+      resolvedAddressed.version !== null &&
+      resolvedAddressed.version !== undefined
+    ) {
+      addressedBadge.dataset.addressedVersion = String(
+        resolvedAddressed.version
+      );
+    }
+    head.appendChild(addressedBadge);
+  }
+
   if (entry.createdAt !== null) {
     const time = document.createElement('time');
     time.className = 'comment-time';
@@ -2611,7 +2641,10 @@ export function commentRow(
   row.appendChild(head);
 
   if (entry.kind === 'open') {
-    row.appendChild(line('comment-body', entry.body));
+    const body = document.createElement('div');
+    body.className = 'comment-body';
+    body.innerHTML = renderMarkdown(entry.body);
+    row.appendChild(body);
   } else if (entry.kind === 'sealed') {
     row.appendChild(
       line(
@@ -2639,6 +2672,13 @@ export function commentRow(
   // about the whole relic, which is the wrong thing to conclude from it.
   if (unplaceable) {
     row.appendChild(line('comment-unplaceable', MARK_UNPLACEABLE_NOTE));
+  }
+
+  if (replies.length > 0) {
+    const repliesList = document.createElement('ol');
+    repliesList.className = 'comment-replies';
+    repliesList.append(...replies);
+    row.appendChild(repliesList);
   }
   return row;
 }
@@ -4499,15 +4539,25 @@ export function buildThread(
       return viewedVersion === 1;
     });
 
-    paintMarks(filteredEntries);
-    list.replaceChildren(
-      ...filteredEntries.map((entry) =>
-        commentRow(entry, entry.id !== null && unplaceable.has(entry.id))
-      )
-    );
-    updateThreadToggle(toggle, filteredEntries.length);
+    const addressedMap = resolveAddressedMap(state.entries);
+    const tree = threadEntries(filteredEntries);
+    const displayedEntries = collectDisplayedEntries(tree);
+
+    paintMarks(displayedEntries);
+
+    const renderNode = (node: CommentNode, isReply = false): HTMLElement => {
+      const replies = node.replies.map((child) => renderNode(child, true));
+      const isUnplaceable =
+        node.entry.id !== null && unplaceable.has(node.entry.id);
+      const addressed =
+        node.entry.id !== null ? addressedMap.get(node.entry.id) : null;
+      return commentRow(node.entry, isUnplaceable, addressed, replies, isReply);
+    };
+
+    list.replaceChildren(...tree.map((node) => renderNode(node)));
+    updateThreadToggle(toggle, displayedEntries.length);
     status.replaceChildren(
-      ...(filteredEntries.length === 0
+      ...(displayedEntries.length === 0
         ? [
             line(
               'thread-note',
@@ -4518,7 +4568,7 @@ export function buildThread(
           ]
         : [])
     );
-    onCount(filteredEntries.length);
+    onCount(displayedEntries.length);
   };
 
   /** The address form, for a reader this browser has not verified. */
