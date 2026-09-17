@@ -59,6 +59,11 @@ export interface RelicConfig {
   /** Sign-in requests per IP. Each one can send mail, so it is the tightest. */
   readonly authRateLimit: RateLimitConfig;
   /**
+   * Comment notification sends per recipient per relic.
+   * Collapses repeats inside the window and caps outbound mail volume.
+   */
+  readonly notificationRateLimit: RateLimitConfig;
+  /**
    * The longest comment ciphertext the server will store, in base64url
    * characters. It is a transport bound, not a plaintext one: the real caps
    * are 4096 and 64 bytes, enforced in `@relic/format` before encryption
@@ -103,6 +108,7 @@ export const DEFAULT_CONFIG: RelicConfig = {
   mintRateLimit: { limit: 240, windowSeconds: 3600 },
   commentRateLimit: { limit: 30, windowSeconds: 3600 },
   authRateLimit: { limit: 10, windowSeconds: 3600 },
+  notificationRateLimit: { limit: 1, windowSeconds: 10 * 60 },
   // 4096 plaintext bytes plus a 64-byte name, a 12-byte nonce and a 16-byte
   // tag, JSON framing, then base64url's 4-for-3 expansion, rounded up with
   // room to spare rather than computed to the byte.

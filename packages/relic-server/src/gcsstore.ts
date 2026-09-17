@@ -61,6 +61,7 @@ function toCommentRow(raw: CommentRow): CommentRow {
     createdAt: raw.createdAt,
     ciphertext: raw.ciphertext,
     version: typeof raw.version === 'number' ? raw.version : undefined,
+    addresses: typeof raw.addresses === 'string' ? raw.addresses : undefined,
   };
 }
 
@@ -221,7 +222,8 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
       id: string,
       rendererClass: RendererClass,
       declaredSizeBytes: number,
-      titleUpdate?: { readonly title: string | undefined }
+      titleUpdate?: { readonly title: string | undefined },
+      ownerUpdate?: { readonly ownerEmail: string | undefined }
     ): Promise<RelicRow | undefined> {
       return mutateRelic(id, (row) => ({
         ...row,
@@ -232,6 +234,8 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         objectLength: undefined,
         objectCrc32c: undefined,
         title: titleUpdate !== undefined ? titleUpdate.title : row.title,
+        ownerEmail:
+          ownerUpdate !== undefined ? ownerUpdate.ownerEmail : row.ownerEmail,
       }));
     },
 
@@ -357,6 +361,9 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         createdAt: row.createdAt,
         ciphertext: row.ciphertext,
         ...(typeof row.version === 'number' ? { version: row.version } : {}),
+        ...(typeof row.addresses === 'string'
+          ? { addresses: row.addresses }
+          : {}),
       });
 
       // Maintain a per-author index so listing an author's commented relics
@@ -438,11 +445,39 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
 
     async putSession(row: SessionRow): Promise<void> {
       await put(key('session', `${row.tokenHash}.json`), row);
+      try {
+        const emailKey = await sha256Hex(row.email.toLowerCase().trim());
+        await put(key('verified_identity', `${emailKey}.json`), {
+          email: row.email,
+          verifiedAt: row.createdAt,
+        });
+      } catch (error) {
+        console.error('Failed to write verified identity index in GCS', error);
+      }
     },
 
     async getSession(tokenHash: string): Promise<SessionRow | undefined> {
       return (await get<SessionRow>(key('session', `${tokenHash}.json`)))
         ?.value;
+    },
+
+    async recordVerifiedIdentity(
+      email: string,
+      at = Date.now()
+    ): Promise<void> {
+      const emailKey = await sha256Hex(email.toLowerCase().trim());
+      await put(key('verified_identity', `${emailKey}.json`), {
+        email,
+        verifiedAt: at,
+      });
+    },
+
+    async hasVerifiedIdentity(email: string): Promise<boolean> {
+      const emailKey = await sha256Hex(email.toLowerCase().trim());
+      const res = await get<{ email: string; verifiedAt: number }>(
+        key('verified_identity', `${emailKey}.json`)
+      );
+      return res !== undefined;
     },
   };
 

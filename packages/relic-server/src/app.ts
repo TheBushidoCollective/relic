@@ -15,6 +15,7 @@
  */
 
 import {
+  COMMENT_ADDRESSES_LIMIT_BYTES,
   encryptedSize,
   InvalidRelicIdError,
   isHostedService,
@@ -28,6 +29,11 @@ import {
 import { type AssetSource, memoryAssets, REGISTER_SW_JS } from './assets.ts';
 import { cardCopy } from './card.ts';
 import { assertConfig, DEFAULT_CONFIG, type RelicConfig } from './config.ts';
+import {
+  commentNotificationMail,
+  type OutboundMail,
+  replyNotificationMail,
+} from './mail.ts';
 import { newOccurrenceId, ProblemError, problemResponse } from './problems.ts';
 import { RateLimiter } from './ratelimit.ts';
 import {
@@ -55,6 +61,7 @@ const RESERVED = new Set(RESERVED_SEGMENTS);
  */
 export interface Mailer {
   send(email: string, link: string): Promise<void>;
+  sendMail?(email: string, mail: OutboundMail): Promise<void>;
 }
 
 /**
@@ -64,6 +71,7 @@ export interface Mailer {
  */
 export const NULL_MAILER: Mailer = {
   async send(): Promise<void> {},
+  async sendMail(): Promise<void> {},
 };
 
 export interface AppOptions {
@@ -505,6 +513,26 @@ export function createApp(options: AppOptions = {}): RelicApp {
         title = trimmed;
       }
     }
+    const rawOwner = body['owner_email'] ?? body['owner'];
+    let ownerEmail: string | undefined;
+    if (rawOwner !== undefined && rawOwner !== null) {
+      if (typeof rawOwner !== 'string' || !looksLikeEmail(rawOwner.trim())) {
+        return refuse('invalid_publish_metadata', {
+          relic_id: relicId,
+          detail: 'Invalid owner notification address.',
+        });
+      }
+      const normalizedOwner = rawOwner.trim();
+      const verified = await store.hasVerifiedIdentity(normalizedOwner);
+      if (!verified) {
+        return refuse('invalid_publish_metadata', {
+          relic_id: relicId,
+          detail:
+            'Owner notification address has no verified identity with the service. Sign in once to verify your address.',
+        });
+      }
+      ownerEmail = normalizedOwner;
+    }
 
     const declared = Number(body['declared_size_bytes']);
     if (!Number.isSafeInteger(declared) || declared < 0) {
@@ -564,6 +592,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       publishTokenHash: await sha256Hex(publishToken),
       mintsUsed: 0,
       title,
+      ownerEmail,
     });
 
     // The grant signs the object's exact byte length, so the upload has to be
@@ -714,6 +743,35 @@ export function createApp(options: AppOptions = {}): RelicApp {
         titleUpdate = { title: trimmed };
       }
     }
+    let ownerUpdate: { readonly ownerEmail: string | undefined } | undefined;
+    if ('owner_email' in body || 'owner' in body) {
+      const rawOwner = body['owner_email'] ?? body['owner'];
+      if (
+        rawOwner === null ||
+        (typeof rawOwner === 'string' && rawOwner.trim().length === 0)
+      ) {
+        ownerUpdate = { ownerEmail: undefined };
+      } else if (
+        typeof rawOwner !== 'string' ||
+        !looksLikeEmail(rawOwner.trim())
+      ) {
+        return refuse('invalid_publish_metadata', {
+          relic_id: relicId,
+          detail: 'Invalid owner notification address.',
+        });
+      } else {
+        const normalizedOwner = rawOwner.trim();
+        const verified = await store.hasVerifiedIdentity(normalizedOwner);
+        if (!verified) {
+          return refuse('invalid_publish_metadata', {
+            relic_id: relicId,
+            detail:
+              'Owner notification address has no verified identity with the service. Sign in once to verify your address.',
+          });
+        }
+        ownerUpdate = { ownerEmail: normalizedOwner };
+      }
+    }
 
     const declared = Number(body['declared_size_bytes']);
     if (!Number.isSafeInteger(declared) || declared < 0) {
@@ -754,7 +812,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
       relicId,
       rendererClass as RendererClass,
       declared,
-      titleUpdate
+      titleUpdate,
+      ownerUpdate
     );
     if (next === undefined) {
       return refuse('relic_not_found', { relic_id: relicId });
@@ -1348,6 +1407,19 @@ export function createApp(options: AppOptions = {}): RelicApp {
     if (ciphertext.length > config.commentCiphertextCapChars) {
       return refuse('invalid_comment', { relic_id: relicId });
     }
+    const rawAddresses = body['addresses'];
+    let addresses: string | undefined;
+    if (rawAddresses !== undefined && rawAddresses !== null) {
+      if (
+        typeof rawAddresses !== 'string' ||
+        rawAddresses.length === 0 ||
+        new TextEncoder().encode(rawAddresses).length >
+          COMMENT_ADDRESSES_LIMIT_BYTES
+      ) {
+        return refuse('invalid_comment', { relic_id: relicId });
+      }
+      addresses = rawAddresses;
+    }
 
     const commentId = newCommentId();
     await store.putComment({
@@ -1357,7 +1429,23 @@ export function createApp(options: AppOptions = {}): RelicApp {
       createdAt: now,
       ciphertext,
       version: commentVersion,
+      addresses,
     });
+
+    try {
+      await dispatchCommentNotifications({
+        relicId,
+        relicTitle: row.title,
+        ownerEmail: row.ownerEmail,
+        author,
+        addresses,
+        now,
+      });
+    } catch (error) {
+      console.error(
+        `relic: comment notification failed: ${(error as Error).message}`
+      );
+    }
 
     return json(
       {
@@ -1367,6 +1455,67 @@ export function createApp(options: AppOptions = {}): RelicApp {
       },
       201
     );
+  }
+  async function dispatchCommentNotifications(params: {
+    readonly relicId: string;
+    readonly relicTitle: string | undefined;
+    readonly ownerEmail: string | undefined;
+    readonly author: string;
+    readonly addresses: string | undefined;
+    readonly now: number;
+  }): Promise<void> {
+    const { relicId, relicTitle, ownerEmail, author, addresses, now } = params;
+
+    const notified = new Set<string>();
+
+    if (addresses !== undefined) {
+      const addressedComment = await store.getComment(relicId, addresses);
+      if (
+        addressedComment !== undefined &&
+        addressedComment.author !== 'publisher' &&
+        looksLikeEmail(addressedComment.author) &&
+        addressedComment.author.toLowerCase() !== author.toLowerCase()
+      ) {
+        const recipient = addressedComment.author;
+        notified.add(recipient.toLowerCase());
+
+        const verdict = limiter.check(
+          `notify ${relicId} ${recipient.toLowerCase()}`,
+          config.notificationRateLimit,
+          now
+        );
+        if (verdict.allowed) {
+          const mail = replyNotificationMail(relicTitle, author);
+          if (mailer.sendMail) {
+            await mailer.sendMail(recipient, mail);
+          } else {
+            await mailer.send(recipient, mail.text);
+          }
+        }
+      }
+    }
+
+    if (
+      ownerEmail !== undefined &&
+      author !== 'publisher' &&
+      ownerEmail.toLowerCase() !== author.toLowerCase() &&
+      !notified.has(ownerEmail.toLowerCase())
+    ) {
+      const recipient = ownerEmail;
+      const verdict = limiter.check(
+        `notify ${relicId} ${recipient.toLowerCase()}`,
+        config.notificationRateLimit,
+        now
+      );
+      if (verdict.allowed) {
+        const mail = commentNotificationMail(relicTitle, author);
+        if (mailer.sendMail) {
+          await mailer.sendMail(recipient, mail);
+        } else {
+          await mailer.send(recipient, mail.text);
+        }
+      }
+    }
   }
 
   /**
@@ -1522,6 +1671,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       createdAt: now,
       expiresAt: now + config.sessionTtlSeconds * 1000,
     });
+    await store.recordVerifiedIdentity(link.email, now);
 
     return new Response(null, {
       status: 303,

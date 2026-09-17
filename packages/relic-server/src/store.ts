@@ -55,6 +55,11 @@ export interface RelicRow {
    * blank card. A removal must take it with the row.
    */
   title?: string | undefined;
+  /**
+   * Verified email address of the relic's creator, if provided at publish/republish.
+   * Used to notify the creator when comments arrive.
+   */
+  ownerEmail?: string | undefined;
 }
 
 export interface Tombstone {
@@ -135,6 +140,12 @@ export interface CommentRow {
   readonly createdAt: number;
   readonly ciphertext: string;
   readonly version?: number | undefined;
+  /**
+   * Optional service-minted id of the comment this one answers.
+   * Provided in the clear as a routing hint for notifications.
+   * Never returned on public comment reads; the sealed copy in ciphertext is authoritative.
+   */
+  readonly addresses?: string | undefined;
 }
 
 /** Summary of an author's engagement with a relic. */
@@ -210,7 +221,8 @@ export interface RelicStore {
     id: string,
     rendererClass: RendererClass,
     declaredSizeBytes: number,
-    titleUpdate?: { readonly title: string | undefined }
+    titleUpdate?: { readonly title: string | undefined },
+    ownerUpdate?: { readonly ownerEmail: string | undefined }
   ): Promise<RelicRow | undefined>;
 
   getTombstone(id: string): Promise<Tombstone | undefined>;
@@ -260,6 +272,8 @@ export interface RelicStore {
   consumeAuthLink(tokenHash: string): Promise<AuthLinkRow | undefined>;
   putSession(row: SessionRow): Promise<void>;
   getSession(tokenHash: string): Promise<SessionRow | undefined>;
+  hasVerifiedIdentity(email: string): Promise<boolean>;
+  recordVerifiedIdentity(email: string, at?: number): Promise<void>;
 }
 
 export class MemoryStore implements RelicStore {
@@ -273,6 +287,7 @@ export class MemoryStore implements RelicStore {
   private readonly comments = new Map<string, CommentRow[]>();
   private readonly authLinks = new Map<string, AuthLinkRow>();
   private readonly sessions = new Map<string, SessionRow>();
+  private readonly verifiedEmails = new Set<string>();
 
   async getRelic(id: string): Promise<RelicRow | undefined> {
     return this.relics.get(id);
@@ -282,11 +297,14 @@ export class MemoryStore implements RelicStore {
     id: string,
     rendererClass: RendererClass,
     declaredSizeBytes: number,
-    titleUpdate?: { readonly title: string | undefined }
+    titleUpdate?: { readonly title: string | undefined },
+    ownerUpdate?: { readonly ownerEmail: string | undefined }
   ): Promise<RelicRow | undefined> {
     const row = this.relics.get(id);
     if (row === undefined) return undefined;
     const nextTitle = titleUpdate !== undefined ? titleUpdate.title : row.title;
+    const nextOwnerEmail =
+      ownerUpdate !== undefined ? ownerUpdate.ownerEmail : row.ownerEmail;
     const next: RelicRow = {
       ...row,
       version: row.version + 1,
@@ -296,6 +314,7 @@ export class MemoryStore implements RelicStore {
       objectLength: undefined,
       objectCrc32c: undefined,
       title: nextTitle,
+      ownerEmail: nextOwnerEmail,
     };
     this.relics.set(id, next);
     return next;
@@ -480,9 +499,23 @@ export class MemoryStore implements RelicStore {
 
   async putSession(row: SessionRow): Promise<void> {
     this.sessions.set(row.tokenHash, row);
+    this.verifiedEmails.add(row.email.toLowerCase().trim());
   }
 
   async getSession(tokenHash: string): Promise<SessionRow | undefined> {
     return this.sessions.get(tokenHash);
+  }
+
+  async recordVerifiedIdentity(email: string, _at?: number): Promise<void> {
+    this.verifiedEmails.add(email.toLowerCase().trim());
+  }
+
+  async hasVerifiedIdentity(email: string): Promise<boolean> {
+    const normalized = email.toLowerCase().trim();
+    if (this.verifiedEmails.has(normalized)) return true;
+    for (const session of this.sessions.values()) {
+      if (session.email.toLowerCase().trim() === normalized) return true;
+    }
+    return false;
   }
 }
