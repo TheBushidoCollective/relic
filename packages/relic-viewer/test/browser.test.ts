@@ -306,11 +306,28 @@ describe('the usercontent frame the render routes build', () => {
       // behaves as it would in a browser.
       this.tagName = tag.toUpperCase();
     }
+    get href(): string {
+      return this.attributes.get('href') ?? '';
+    }
+    set href(v: string) {
+      this.attributes.set('href', v);
+    }
+    get target(): string {
+      return this.attributes.get('target') ?? '';
+    }
+    set target(v: string) {
+      this.attributes.set('target', v);
+    }
+    get rel(): string {
+      return this.attributes.get('rel') ?? '';
+    }
+    set rel(v: string) {
+      this.attributes.set('rel', v);
+    }
 
     setAttribute(name: string, value: string): void {
       this.attributes.set(name, value);
     }
-
     appendChild(child: ElementStub): ElementStub {
       this.children.push(child);
       return child;
@@ -466,5 +483,41 @@ describe('the usercontent frame the render routes build', () => {
 
     expect(visible.length).toBeGreaterThan(0);
     expect(name).toContain(visible);
+  });
+
+  test('the bar carries the relics link targeting a new tab with rel="noopener"', () => {
+    buildBar(view('sandboxed-html', '<p>hi</p>'), 'aaaaaaaaaaaaaaaaaaaaaaaaaa');
+
+    const relicsLink = created.find((element) =>
+      element.className.split(' ').includes('action-relics')
+    );
+    if (relicsLink === undefined)
+      throw new Error('the bar built no relics link');
+
+    expect(relicsLink.tagName).toBe('A');
+    expect(relicsLink.attributes.get('href')).toBe('/dashboard');
+    expect(relicsLink.attributes.get('target')).toBe('_blank');
+    expect(relicsLink.attributes.get('rel')).toBe('noopener');
+
+    const ariaLabel = relicsLink.attributes.get('aria-label') ?? '';
+    const visible = relicsLink.children
+      .map((child) => child.textContent)
+      .join('')
+      .trim();
+    expect(visible).toBe('Relics');
+    expect(ariaLabel).toContain(visible);
+  });
+
+  test('stylesheet collapses relics link at narrow widths along with other actions', async () => {
+    const css = await Bun.file(
+      new URL('../src/styles.css', import.meta.url)
+    ).text();
+
+    // Below 34rem, actions collapse labels to icon (span hidden)
+    expect(css).toContain('.action span');
+    // Below 24rem, action-relics and action-comments leave the row to protect the 320px floor
+    expect(css).toMatch(
+      /@media\s*\(max-width:\s*24rem\)\s*\{[\s\S]*?\.action-relics[\s\S]*?display:\s*none/
+    );
   });
 });
