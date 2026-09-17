@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  COMMENT_ADDRESSES_LIMIT_BYTES,
   COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES,
   COMMENT_ANCHOR_MAX_PAGE,
   COMMENT_ANCHOR_MAX_SECONDS,
@@ -112,6 +113,7 @@ describe('the comment key', () => {
       body: 'still readable',
       display_name: null,
       anchor: null,
+      addresses: null,
     });
   });
 
@@ -145,7 +147,10 @@ describe('the envelope', () => {
     };
 
     const sealed = await encryptComment(key, plaintext);
-    expect(await decryptComment(key, sealed)).toEqual(plaintext);
+    expect(await decryptComment(key, sealed)).toEqual({
+      ...plaintext,
+      addresses: null,
+    });
   });
 
   test('round trips a null display name distinctly from an empty one', async () => {
@@ -215,6 +220,78 @@ describe('the envelope', () => {
   });
 });
 
+describe('a reply pointer', () => {
+  test('round trips the comment it answers', async () => {
+    const key = await deriveCommentKey(generateKey());
+    const reply = {
+      body: 'Fixed in this version.',
+      display_name: null,
+      addresses: 'QmaGBgQApZpTNl18ei_WBw',
+    };
+    const opened = await decryptComment(key, await encryptComment(key, reply));
+    expect(opened.addresses).toBe('QmaGBgQApZpTNl18ei_WBw');
+    expect(opened.body).toBe('Fixed in this version.');
+  });
+
+  test('an ordinary comment reads as answering nothing, not as unknown', async () => {
+    // Null rather than undefined, so a caller deciding whether a remark was
+    // taken up never has to tell "no pointer" from "field absent".
+    const key = await deriveCommentKey(generateKey());
+    const opened = await decryptComment(
+      key,
+      await encryptComment(key, { body: 'a remark', display_name: null })
+    );
+    expect(opened.addresses).toBeNull();
+  });
+
+  test('the pointer is sealed, so the envelope carries no clear copy', async () => {
+    // The service may be handed the same id in the clear to route a
+    // notification. This proves the authoritative copy is inside the AEAD:
+    // nothing about the id is legible in the stored value.
+    const key = await deriveCommentKey(generateKey());
+    const id = 'XkUPgIlmDOrGCp_20eZoeQ';
+    const sealed = await encryptComment(key, {
+      body: 'answered',
+      display_name: null,
+      addresses: id,
+    });
+    expect(sealed).not.toContain(id);
+  });
+
+  test('refuses a pointer that names no comment', async () => {
+    const key = await deriveCommentKey(generateKey());
+    await expect(
+      encryptComment(key, {
+        body: 'answered',
+        display_name: null,
+        addresses: '',
+      })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+  });
+
+  test('refuses a pointer over the cap, and names the cap', async () => {
+    const key = await deriveCommentKey(generateKey());
+    await expect(
+      encryptComment(key, {
+        body: 'answered',
+        display_name: null,
+        addresses: 'x'.repeat(COMMENT_ADDRESSES_LIMIT_BYTES + 1),
+      })
+    ).rejects.toBeInstanceOf(CommentTooLargeError);
+  });
+
+  test('refuses to seal the reader-only field', async () => {
+    const key = await deriveCommentKey(generateKey());
+    await expect(
+      encryptComment(key, {
+        body: 'hi',
+        display_name: null,
+        unsupported_fields: ['invented'],
+      })
+    ).rejects.toBeInstanceOf(MalformedCommentError);
+  });
+});
+
 describe('the caps', () => {
   test('a body at the cap is accepted and one byte over is refused', async () => {
     const key = await deriveCommentKey(generateKey());
@@ -281,16 +358,32 @@ describe('strict parsing', () => {
     return Buffer.from(framed).toString('base64url');
   }
 
-  test('refuses an unknown field rather than ignoring it', async () => {
+  test('refuses a non-string pointer on the way out of storage', async () => {
+    const key = await deriveCommentKey(generateKey());
+    const sealed = await sealRaw(
+      key,
+      JSON.stringify({ body: 'hi', display_name: null, addresses: 42 })
+    );
+    await expect(decryptComment(key, sealed)).rejects.toBeInstanceOf(
+      MalformedCommentError
+    );
+  });
+
+  test('reports an unknown field rather than refusing the comment', async () => {
+    // This reverses the rule the parser shipped with. Strictness was written
+    // to catch tampering and in practice caught version skew: the published
+    // client predated two anchor kinds and reported real comments as
+    // unreadable, which reads to a person as "altered in storage". The AEAD
+    // tag is what detects tampering. Strictness here only detected age.
     const key = await deriveCommentKey(generateKey());
     const sealed = await sealRaw(
       key,
       JSON.stringify({ body: 'hi', display_name: null, extra: true })
     );
 
-    await expect(decryptComment(key, sealed)).rejects.toBeInstanceOf(
-      MalformedCommentError
-    );
+    const opened = await decryptComment(key, sealed);
+    expect(opened.body).toBe('hi');
+    expect(opened.unsupported_fields).toEqual(['extra']);
   });
 
   test('round trips a text mark and a pin, and omits a null mark from the envelope', async () => {
@@ -305,12 +398,14 @@ describe('strict parsing', () => {
       display_name: null,
       anchor: { kind: 'pin' as const, x: 0.25, y: 0.8 },
     };
-    expect(await decryptComment(key, await encryptComment(key, text))).toEqual(
-      text
-    );
-    expect(await decryptComment(key, await encryptComment(key, pin))).toEqual(
-      pin
-    );
+    expect(await decryptComment(key, await encryptComment(key, text))).toEqual({
+      ...text,
+      addresses: null,
+    });
+    expect(await decryptComment(key, await encryptComment(key, pin))).toEqual({
+      ...pin,
+      addresses: null,
+    });
 
     const freeform = await encryptComment(key, {
       body: 'about the relic',

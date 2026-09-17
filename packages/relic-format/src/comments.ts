@@ -64,6 +64,13 @@ export const COMMENT_BODY_LIMIT_BYTES = 4096;
 export const COMMENT_DISPLAY_NAME_LIMIT_BYTES = 64;
 
 /**
+ * A comment id, and ids are minted by the service, so this is a sanity bound
+ * rather than a format claim: a reply pointing at something id-shaped is the
+ * most this package can check without learning the service's id scheme.
+ */
+export const COMMENT_ADDRESSES_LIMIT_BYTES = 64;
+
+/**
  * A rectangle in unit coordinates of whatever space the anchor carrying it
  * names. `x` and `y` are the top-left corner, `w` and `h` the extent, all in
  * 0 to 1. A zero-area rectangle is refused: a box nobody can see is a point
@@ -180,6 +187,29 @@ export interface CommentPlaintext {
   readonly display_name: string | null;
   /** Absent or null is a freeform comment, not a mark. */
   readonly anchor?: CommentAnchor | null;
+  /**
+   * The comment this one answers, by service-minted id.
+   *
+   * Present on a reply and on the acknowledgement a publisher writes when an
+   * update lands, which is what lets a reader see that a remark was taken up
+   * rather than passed over. Absent on an ordinary comment.
+   *
+   * **This copy is the authoritative one**, because it is sealed under the
+   * comment key and the AEAD tag covers it. A caller may also hand the same
+   * id to the service in the clear so it can route a notification to the
+   * person being answered, and that copy is a routing hint the operator can
+   * see and could forge. A reader that showed "addressed" on the strength of
+   * the clear copy would be repeating the operator's word for it, so nothing
+   * may resolve this from anywhere but here.
+   */
+  readonly addresses?: string | null;
+  /**
+   * Field names this build found in the sealed JSON and does not understand.
+   *
+   * Populated on read and refused on write, because it describes a gap in
+   * this reader rather than anything a writer gets to assert.
+   */
+  readonly unsupported_fields?: readonly string[];
 }
 
 /**
@@ -243,12 +273,37 @@ export async function encryptComment(
   if (plaintext.anchor != null) {
     assertWritableAnchor(plaintext.anchor);
   }
+  if (plaintext.addresses != null) {
+    const addressesBytes = new TextEncoder().encode(plaintext.addresses).length;
+    if (addressesBytes > COMMENT_ADDRESSES_LIMIT_BYTES) {
+      throw new CommentTooLargeError(
+        'addresses',
+        addressesBytes,
+        COMMENT_ADDRESSES_LIMIT_BYTES
+      );
+    }
+    if (plaintext.addresses.length === 0) {
+      throw new MalformedCommentError(
+        'addresses is present and empty, which points at no comment'
+      );
+    }
+  }
+  if (plaintext.unsupported_fields !== undefined) {
+    // It records what a reader could not understand. A writer asserting it
+    // would be claiming a gap on someone else's behalf.
+    throw new MalformedCommentError(
+      'unsupported_fields is read-only and cannot be sealed'
+    );
+  }
 
   const encoded = new TextEncoder().encode(
     JSON.stringify({
       body: plaintext.body,
       display_name: plaintext.display_name,
       ...(plaintext.anchor == null ? {} : { anchor: plaintext.anchor }),
+      ...(plaintext.addresses == null
+        ? {}
+        : { addresses: plaintext.addresses }),
     })
   );
   const nonce = crypto.getRandomValues(new Uint8Array(COMMENT_NONCE_BYTES));
@@ -319,14 +374,17 @@ export async function decryptComment(
   }
 
   const fields = parsed as Record<string, unknown>;
-  const unknown = Object.keys(fields).filter(
-    (key) => key !== 'body' && key !== 'display_name' && key !== 'anchor'
-  );
-  if (unknown.length > 0) {
-    throw new MalformedCommentError(
-      `comment carries unknown field(s): ${unknown.join(', ')}`
-    );
-  }
+  const known = new Set(['body', 'display_name', 'anchor', 'addresses']);
+  // Reported rather than refused, reversing the rule this parser shipped with.
+  //
+  // Refusing the whole comment on an unknown field was written to catch
+  // tampering, and in practice it caught version skew: the published client
+  // predated two anchor kinds and reported real comments as unreadable, which
+  // reads to a person as "altered in storage". The paragraph on the frozen
+  // anchor kinds already names that as a lie about tampering told by a version
+  // gap, and a top-level field is the same gap one level up. The AEAD tag is
+  // what detects tampering; strictness here only detected age.
+  const unsupported = Object.keys(fields).filter((key) => !known.has(key));
 
   const body = fields['body'];
   if (typeof body !== 'string') {
@@ -340,10 +398,23 @@ export async function decryptComment(
     );
   }
 
+  const addresses = fields['addresses'];
+  if (
+    addresses !== undefined &&
+    addresses !== null &&
+    (typeof addresses !== 'string' || addresses.length === 0)
+  ) {
+    throw new MalformedCommentError(
+      'comment addresses is present and is neither a non-empty string nor null'
+    );
+  }
+
   return {
     body,
     display_name: displayName,
     anchor: parseAnchor(fields['anchor']),
+    addresses: typeof addresses === 'string' ? addresses : null,
+    ...(unsupported.length > 0 ? { unsupported_fields: unsupported } : {}),
   };
 }
 
