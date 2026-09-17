@@ -189,6 +189,8 @@ const ICONS = {
   // A speech rectangle with a tail, drawn on the same 16-unit grid and with
   // the same single-path construction as the rest of the set.
   comment: 'M2 2h12v9H7.5L4 14v-3H2V2zm1 1v7h2v2.1L7.1 10H13V3H3z',
+  // Four 3x3 tiles on a 16-unit grid representing a collection/catalogue of relics.
+  grid: 'M2 2h4.5v4.5H2V2zm7.5 0H14v4.5H9.5V2zM2 9.5h4.5V14H2V9.5zm7.5 0H14V14H9.5V9.5z',
 } as const;
 
 function icon(path: string): SVGSVGElement {
@@ -572,6 +574,23 @@ export function buildBar(
   markerText.textContent = markerLabel;
   marker.appendChild(markerText);
   actions.appendChild(marker);
+
+  // Relics dashboard affordance in the taskbar. Opens in a new tab with noopener
+  // because navigating the current tab risks landing back on a page with no key
+  // in the URL (the viewer strips the fragment from the address bar upon load).
+  const relicsLink = document.createElement('a');
+  relicsLink.className = 'action action-relics';
+  relicsLink.href = `${SERVICE_ORIGIN}/dashboard`;
+  relicsLink.target = '_blank';
+  relicsLink.rel = 'noopener';
+  relicsLink.setAttribute('aria-label', 'Relics list');
+  relicsLink.title =
+    'Relics list. Open your saved and commented relics in a new tab.';
+  relicsLink.appendChild(icon(ICONS.grid));
+  const relicsText = document.createElement('span');
+  relicsText.textContent = 'Relics';
+  relicsLink.appendChild(relicsText);
+  actions.appendChild(relicsLink);
 
   // Comments is the eleventh element on the row and the sixth action, and it
   // is the first addition whose absence costs nothing, which is why it is the
@@ -5161,10 +5180,19 @@ export async function renderDashboard(deps: ViewerDeps): Promise<void> {
   mark.textContent = WORDMARK;
   bar.appendChild(mark);
 
+  const identity = document.createElement('div');
+  identity.className = 'identity';
   const title = document.createElement('div');
-  title.className = 'accession';
+  title.className = 'filename';
   title.textContent = 'Dashboard';
-  bar.appendChild(title);
+  const meta = document.createElement('div');
+  meta.className = 'identity-meta';
+  const accession = document.createElement('div');
+  accession.className = 'accession';
+  accession.textContent = 'CATALOGUE';
+  meta.appendChild(accession);
+  identity.append(title, meta);
+  bar.appendChild(identity);
 
   document.body.replaceChildren(bar);
 

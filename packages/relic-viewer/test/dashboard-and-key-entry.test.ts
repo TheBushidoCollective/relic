@@ -6,7 +6,7 @@ import {
   generateKey,
 } from '@relic/format';
 import { keyToMnemonic } from '@relic/format/mnemonic';
-import { boot, renderDashboard, renderDead } from '../src/main.ts';
+import { boot, buildBar, renderDashboard, renderDead } from '../src/main.ts';
 import type { KeyVault, VaultEntry } from '../src/vault.ts';
 import {
   buildCommentedDashboardRows,
@@ -15,6 +15,7 @@ import {
   type DeadView,
   isKeyEntryRecoverable,
   openRelicWithKey,
+  type ReadyView,
   resolveEnteredKey,
   type ViewerDeps,
 } from '../src/viewer.ts';
@@ -61,6 +62,8 @@ class ElementStub {
   name = '';
   type = '';
   href = '';
+  target = '';
+  rel = '';
   value = '';
   placeholder = '';
   required = false;
@@ -101,6 +104,8 @@ class ElementStub {
     this.attributes.set(name, value);
     if (name === 'id') this.id = value;
     if (name === 'href') this.href = value;
+    if (name === 'target') this.target = value;
+    if (name === 'rel') this.rel = value;
     if (name === 'type') this.type = value;
     if (name === 'class') this.className = value;
     if (name.startsWith('data-')) {
@@ -117,6 +122,9 @@ class ElementStub {
     if (name === 'type')
       return this.type || this.attributes.get('type') || null;
     if (name === 'id') return this.id || this.attributes.get('id') || null;
+    if (name === 'target')
+      return this.target || this.attributes.get('target') || null;
+    if (name === 'rel') return this.rel || this.attributes.get('rel') || null;
     return this.attributes.get(name) ?? null;
   }
 
@@ -1138,5 +1146,101 @@ describe('Dashboard rendering (DOM)', () => {
 
     await boot(root as unknown as HTMLElement, deps);
     expect(rootBody.querySelector('.stage-dashboard')).not.toBeNull();
+  });
+
+  test('dashboard renders all key management controls (export, import, forget)', async () => {
+    const key1 = generateKey();
+    const frag1 = encodeFragment(key1);
+    const vault = makeMockVault([
+      {
+        relicId: 'r_export',
+        fragment: frag1,
+        title: 'Export Test Relic',
+        expiresAt: null,
+      },
+    ]);
+
+    const deps: ViewerDeps = {
+      serviceOrigin: 'https://relic.example',
+      fetch: (async () =>
+        new Response(JSON.stringify({ email: null }), {
+          status: 200,
+        })) as unknown as typeof globalThis.fetch,
+      keyVault: vault,
+      takeFragment: () => '',
+      stripFragment: () => {},
+      locationHref: 'https://relic.example/dashboard',
+    };
+
+    await renderDashboard(deps);
+
+    // Export keys button
+    const exportBtn = rootBody.querySelector(
+      '.vault-export-btn'
+    ) as ElementStub;
+    expect(exportBtn).not.toBeNull();
+    expect(exportBtn.textContent).toBe('Export keys');
+
+    // Import keys button and toggle panel
+    const importToggleBtn = rootBody.querySelector(
+      '.vault-import-toggle-btn'
+    ) as ElementStub;
+    expect(importToggleBtn).not.toBeNull();
+    expect(importToggleBtn.textContent).toBe('Import keys');
+
+    const importPanel = rootBody.querySelector(
+      '.vault-import-panel'
+    ) as ElementStub;
+    expect(importPanel).not.toBeNull();
+    expect(importPanel.hidden).toBe(true);
+
+    importToggleBtn.click();
+    expect(importPanel.hidden).toBe(false);
+
+    const importSubmitBtn = rootBody.querySelector(
+      '.vault-import-submit-btn'
+    ) as ElementStub;
+    expect(importSubmitBtn).not.toBeNull();
+
+    // Forget button on relic row
+    const forgetBtn = rootBody.querySelector('.action-forget') as ElementStub;
+    expect(forgetBtn).not.toBeNull();
+    expect(forgetBtn.textContent).toBe('Forget');
+
+    // Header bar on dashboard uses consistent accession styling
+    const bar = rootBody.querySelector('.bar') as ElementStub;
+    expect(bar).not.toBeNull();
+    const filename = bar.querySelector('.filename') as ElementStub;
+    expect(filename?.textContent).toBe('Dashboard');
+    const accession = bar.querySelector('.accession') as ElementStub;
+    expect(accession?.textContent).toBe('CATALOGUE');
+  });
+
+  test('the bar carries the relics link targeting a new tab with rel="noopener"', () => {
+    const dummyView: ReadyView = {
+      filename: 'test.md',
+      declaredMimetype: 'text/markdown',
+      content: new TextEncoder().encode('# Test'),
+      route: 'markdown',
+      downgradeNotice: undefined,
+      shareUrl: 'https://relic.example/r1#key',
+      version: 1,
+      currentVersion: 1,
+    };
+    const bar = buildBar(dummyView, 'relic123') as unknown as ElementStub;
+    const relicsLink = bar.querySelector('.action-relics');
+    expect(relicsLink).not.toBeNull();
+    expect(relicsLink?.tagName).toBe('A');
+    expect(relicsLink?.href).toBe('/dashboard');
+    expect(relicsLink?.getAttribute('target')).toBe('_blank');
+    expect(relicsLink?.getAttribute('rel')).toBe('noopener');
+
+    const ariaLabel = relicsLink?.getAttribute('aria-label') ?? '';
+    const visible = (relicsLink?.children ?? [])
+      .map((c) => c.textContent)
+      .join('')
+      .trim();
+    expect(visible).toBe('Relics');
+    expect(ariaLabel).toContain(visible ?? '');
   });
 });
