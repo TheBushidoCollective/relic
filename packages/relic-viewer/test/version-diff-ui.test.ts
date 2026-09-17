@@ -37,7 +37,22 @@ class ElementStub {
   readonly tagName: string;
   className = '';
   textContent = '';
-  innerHTML = '';
+  private _innerHTML = '';
+  get innerHTML(): string {
+    return this._innerHTML;
+  }
+  set innerHTML(html: string) {
+    this._innerHTML = html;
+    this.textContent = html
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
   hidden = false;
   tabIndex = 0;
   type = '';
@@ -1264,5 +1279,69 @@ describe('comment version scoping', () => {
     }) as unknown as ElementStub;
     const countSpan = withClass(bar, 'action-count')[0];
     expect(countSpan?.textContent).toBe(String(taskbarCount));
+  });
+
+  test('version scoping: a reply whose target is filtered out is not shown as an orphan', async () => {
+    const { key, shareUrl, makeDeps } = await createCommentFixture();
+    const cipher = commentCipher(await deriveCommentKey(key));
+
+    const records = [
+      {
+        comment_id: 'c1',
+        author: 'alice@example.com',
+        created_at: '2026-09-16T10:00:00.000Z',
+        ciphertext: await cipher.seal({
+          body: 'comment on version 1',
+          display_name: null,
+          addresses: null,
+        }),
+        version: 1,
+      },
+      {
+        comment_id: 'c2',
+        author: 'bob@example.com',
+        created_at: '2026-09-16T11:00:00.000Z',
+        ciphertext: await cipher.seal({
+          body: 'reply on version 2',
+          display_name: null,
+          addresses: 'c1',
+        }),
+        version: 2,
+      },
+    ];
+
+    const deps = makeDeps(records);
+
+    // 1. Viewing version 1:
+    // Target comment c1 is shown. Reply c2 was written on v2, so c2 is filtered out.
+    // Target comment c1 shows that it was addressed in version 2 by reply!
+    const v1View = view('code', 1, undefined, 2, shareUrl);
+    let v1Count = -1;
+    const v1Thread = buildThread(v1View, RELIC_ID, deps, (count) => {
+      v1Count = count;
+    });
+    await v1Thread.ready;
+
+    const v1Element = v1Thread.element as unknown as ElementStub;
+    expect(textOf(v1Element)).toContain('comment on version 1');
+    expect(textOf(v1Element)).not.toContain('reply on version 2');
+    expect(textOf(v1Element)).toContain('Addressed by reply in version 2');
+    expect(v1Count).toBe(1);
+
+    // 2. Viewing version 2:
+    // Target comment c1 was on v1, so it is filtered out on v2.
+    // Reply c2 belongs to v2, BUT its target is filtered out, so c2 must not show as an orphan!
+    const v2View = view('code', 2, undefined, 2, shareUrl);
+    let v2Count = -1;
+    const v2Thread = buildThread(v2View, RELIC_ID, deps, (count) => {
+      v2Count = count;
+    });
+    await v2Thread.ready;
+
+    const v2Element = v2Thread.element as unknown as ElementStub;
+    expect(textOf(v2Element)).not.toContain('comment on version 1');
+    expect(textOf(v2Element)).not.toContain('reply on version 2');
+    expect(v2Count).toBe(0);
+    expect(textOf(v2Element)).toContain('No comments yet.');
   });
 });

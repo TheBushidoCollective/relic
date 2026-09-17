@@ -494,6 +494,12 @@ describe('reading comments back', () => {
     const structured = result['structuredContent'] as Record<string, unknown>;
     expect(structured['count']).toBe(2);
     expect(structured['unreadable_count']).toBe(0);
+    expect(structured['summary']).toEqual({
+      total: 2,
+      addressed: 0,
+      open: 2,
+      unreadable: 0,
+    });
     expect(structured['comments']).toEqual([
       {
         comment_id: 'c1',
@@ -502,8 +508,13 @@ describe('reading comments back', () => {
         display_name: null,
         body: 'First pass looks right.',
         anchor: null,
+        addresses: null,
         readable: true,
         unreadable_reason: null,
+        addressed: false,
+        addressed_by: null,
+        addressed_by_comment_id: null,
+        addressed_by_version: null,
       },
       {
         comment_id: 'c2',
@@ -512,8 +523,13 @@ describe('reading comments back', () => {
         display_name: 'Reviewer',
         body: 'Second thought: drop the appendix.',
         anchor: null,
+        addresses: null,
         readable: true,
         unreadable_reason: null,
+        addressed: false,
+        addressed_by: null,
+        addressed_by_comment_id: null,
+        addressed_by_version: null,
       },
     ]);
     const text = JSON.stringify(result['content']);
@@ -1745,5 +1761,102 @@ describe('comment anchor resolution against decrypted relic content', () => {
 
     const transcript = content[0]?.text ?? '';
     expect(transcript).toContain('expired');
+  });
+});
+describe('reply pointers and comment state', () => {
+  test('sends sealed addresses pointer and clear routing hint to service', async () => {
+    const relicId = await publishFixture();
+    const result = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Addressed in update.',
+      addresses: 'c1',
+    });
+
+    expect(result['isError']).toBe(false);
+    expect(posted).toHaveLength(1);
+    const request = posted[0];
+    expect(request?.['addresses']).toBe('c1');
+
+    const commentKey = await deriveCommentKey(
+      decodeKey(await storedKey(relicId))
+    );
+    const decrypted = await decryptComment(
+      commentKey,
+      String(request?.['ciphertext'])
+    );
+    expect(decrypted.addresses).toBe('c1');
+    expect(decrypted.body).toBe('Addressed in update.');
+  });
+
+  test('refuses empty addresses or over-cap addresses', async () => {
+    const relicId = await publishFixture();
+
+    const empty = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'A reply.',
+      addresses: '   ',
+    });
+    expect(empty['isError']).toBe(true);
+    expect(
+      (empty['structuredContent'] as Record<string, unknown>)['code']
+    ).toBe('local_comment_addresses_invalid');
+
+    const long = await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'A reply.',
+      addresses: 'x'.repeat(65),
+    });
+    expect(long['isError']).toBe(true);
+    expect((long['structuredContent'] as Record<string, unknown>)['code']).toBe(
+      'local_comment_addresses_too_long'
+    );
+  });
+
+  test('surfaces addressed status, addressed_by, and compact summary', async () => {
+    const relicId = await publishFixture();
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Please fix this heading.',
+    });
+
+    await callTool(COMMENT_TOOL_NAME, {
+      relic_id: relicId,
+      body: 'Heading has been revised.',
+      addresses: 'c1',
+    });
+
+    const read = await callTool(READ_COMMENTS_TOOL_NAME, {
+      relic_id: relicId,
+    });
+    expect(read['isError']).toBe(false);
+    const structured = read['structuredContent'] as Record<string, unknown>;
+    expect(structured['summary']).toEqual({
+      total: 2,
+      addressed: 1,
+      open: 0,
+      unreadable: 0,
+    });
+
+    const comments = structured['comments'] as Array<Record<string, unknown>>;
+    expect(comments).toHaveLength(2);
+    expect(comments[0]?.['comment_id']).toBe('c1');
+    expect(comments[0]?.['addressed']).toBe(true);
+    expect(comments[0]?.['addressed_by']).toEqual({
+      comment_id: 'c2',
+      version: null,
+    });
+
+    expect(comments[1]?.['comment_id']).toBe('c2');
+    expect(comments[1]?.['addresses']).toBe('c1');
+    expect(comments[1]?.['addressed']).toBe(false);
+    expect(comments[1]?.['addressed_by']).toBeNull();
+
+    const transcript = JSON.stringify(read['content']);
+    expect(transcript).toContain('[answers comment c1]');
+    expect(transcript).toContain('[addressed by comment c2]');
+    expect(transcript).toContain(
+      'Summary: 2 total, 1 addressed, 0 open, 0 unreadable.'
+    );
   });
 });

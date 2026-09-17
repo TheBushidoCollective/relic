@@ -53,8 +53,12 @@ import {
   isFrameSelectionMessage,
 } from './annotate-frame.ts';
 import {
+  type AddressedBy,
+  addressedBadgeLabel,
   type CommentCipher,
   type CommentEntry,
+  type CommentNode,
+  collectDisplayedEntries,
   commentCipher,
   commentTime,
   DELIVERY_DISCLOSURE,
@@ -71,8 +75,10 @@ import {
   type Refusal,
   readSession,
   requestMagicLink,
+  resolveAddressedMap,
   type SessionState,
   threadCountLabel,
+  threadEntries,
   unwrapTextQuotes,
   utf8Bytes,
   wrapTextQuote,
@@ -183,6 +189,8 @@ const ICONS = {
   // A speech rectangle with a tail, drawn on the same 16-unit grid and with
   // the same single-path construction as the rest of the set.
   comment: 'M2 2h12v9H7.5L4 14v-3H2V2zm1 1v7h2v2.1L7.1 10H13V3H3z',
+  // Four 3x3 tiles on a 16-unit grid representing a collection/catalogue of relics.
+  grid: 'M2 2h4.5v4.5H2V2zm7.5 0H14v4.5H9.5V2zM2 9.5h4.5V14H2V9.5zm7.5 0H14V14H9.5V9.5z',
 } as const;
 
 function icon(path: string): SVGSVGElement {
@@ -566,6 +574,23 @@ export function buildBar(
   markerText.textContent = markerLabel;
   marker.appendChild(markerText);
   actions.appendChild(marker);
+
+  // Relics dashboard affordance in the taskbar. Opens in a new tab with noopener
+  // because navigating the current tab risks landing back on a page with no key
+  // in the URL (the viewer strips the fragment from the address bar upon load).
+  const relicsLink = document.createElement('a');
+  relicsLink.className = 'action action-relics';
+  relicsLink.href = `${SERVICE_ORIGIN}/dashboard`;
+  relicsLink.target = '_blank';
+  relicsLink.rel = 'noopener';
+  relicsLink.setAttribute('aria-label', 'Relics list');
+  relicsLink.title =
+    'Relics list. Open your saved and commented relics in a new tab.';
+  relicsLink.appendChild(icon(ICONS.grid));
+  const relicsText = document.createElement('span');
+  relicsText.textContent = 'Relics';
+  relicsLink.appendChild(relicsText);
+  actions.appendChild(relicsLink);
 
   // Comments is the eleventh element on the row and the sixth action, and it
   // is the first addition whose absence costs nothing, which is why it is the
@@ -2554,11 +2579,17 @@ export function commentRow(
    * lands depends on what is currently rendered and only the paint pass
    * knows that.
    */
-  unplaceable = false
+  unplaceable = false,
+  addressed?: AddressedBy | null,
+  replies: HTMLElement[] = [],
+  isReply = false
 ): HTMLElement {
   const row = document.createElement('li');
   row.className =
     entry.kind === 'open' ? 'comment' : 'comment comment-undecryptable';
+  if (isReply) {
+    row.classList.add('comment-reply');
+  }
   if (entry.id !== null) row.dataset.commentId = entry.id;
 
   const head = document.createElement('div');
@@ -2600,6 +2631,24 @@ export function commentRow(
     head.appendChild(unversioned);
   }
 
+  const resolvedAddressed =
+    addressed ?? (entry.kind === 'open' ? entry.addressed : null);
+  if (resolvedAddressed !== null && resolvedAddressed !== undefined) {
+    const addressedBadge = document.createElement('span');
+    addressedBadge.className = 'comment-badge comment-badge-addressed';
+    addressedBadge.textContent = addressedBadgeLabel(resolvedAddressed);
+    addressedBadge.dataset.addressedKind = resolvedAddressed.kind;
+    if (
+      resolvedAddressed.version !== null &&
+      resolvedAddressed.version !== undefined
+    ) {
+      addressedBadge.dataset.addressedVersion = String(
+        resolvedAddressed.version
+      );
+    }
+    head.appendChild(addressedBadge);
+  }
+
   if (entry.createdAt !== null) {
     const time = document.createElement('time');
     time.className = 'comment-time';
@@ -2611,7 +2660,10 @@ export function commentRow(
   row.appendChild(head);
 
   if (entry.kind === 'open') {
-    row.appendChild(line('comment-body', entry.body));
+    const body = document.createElement('div');
+    body.className = 'comment-body';
+    body.innerHTML = renderMarkdown(entry.body);
+    row.appendChild(body);
   } else if (entry.kind === 'sealed') {
     row.appendChild(
       line(
@@ -2639,6 +2691,13 @@ export function commentRow(
   // about the whole relic, which is the wrong thing to conclude from it.
   if (unplaceable) {
     row.appendChild(line('comment-unplaceable', MARK_UNPLACEABLE_NOTE));
+  }
+
+  if (replies.length > 0) {
+    const repliesList = document.createElement('ol');
+    repliesList.className = 'comment-replies';
+    repliesList.append(...replies);
+    row.appendChild(repliesList);
   }
   return row;
 }
@@ -4499,15 +4558,25 @@ export function buildThread(
       return viewedVersion === 1;
     });
 
-    paintMarks(filteredEntries);
-    list.replaceChildren(
-      ...filteredEntries.map((entry) =>
-        commentRow(entry, entry.id !== null && unplaceable.has(entry.id))
-      )
-    );
-    updateThreadToggle(toggle, filteredEntries.length);
+    const addressedMap = resolveAddressedMap(state.entries);
+    const tree = threadEntries(filteredEntries);
+    const displayedEntries = collectDisplayedEntries(tree);
+
+    paintMarks(displayedEntries);
+
+    const renderNode = (node: CommentNode, isReply = false): HTMLElement => {
+      const replies = node.replies.map((child) => renderNode(child, true));
+      const isUnplaceable =
+        node.entry.id !== null && unplaceable.has(node.entry.id);
+      const addressed =
+        node.entry.id !== null ? addressedMap.get(node.entry.id) : null;
+      return commentRow(node.entry, isUnplaceable, addressed, replies, isReply);
+    };
+
+    list.replaceChildren(...tree.map((node) => renderNode(node)));
+    updateThreadToggle(toggle, displayedEntries.length);
     status.replaceChildren(
-      ...(filteredEntries.length === 0
+      ...(displayedEntries.length === 0
         ? [
             line(
               'thread-note',
@@ -4518,7 +4587,7 @@ export function buildThread(
           ]
         : [])
     );
-    onCount(filteredEntries.length);
+    onCount(displayedEntries.length);
   };
 
   /** The address form, for a reader this browser has not verified. */
@@ -5111,10 +5180,19 @@ export async function renderDashboard(deps: ViewerDeps): Promise<void> {
   mark.textContent = WORDMARK;
   bar.appendChild(mark);
 
+  const identity = document.createElement('div');
+  identity.className = 'identity';
   const title = document.createElement('div');
-  title.className = 'accession';
+  title.className = 'filename';
   title.textContent = 'Dashboard';
-  bar.appendChild(title);
+  const meta = document.createElement('div');
+  meta.className = 'identity-meta';
+  const accession = document.createElement('div');
+  accession.className = 'accession';
+  accession.textContent = 'CATALOGUE';
+  meta.appendChild(accession);
+  identity.append(title, meta);
+  bar.appendChild(identity);
 
   document.body.replaceChildren(bar);
 

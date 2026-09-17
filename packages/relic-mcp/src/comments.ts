@@ -29,6 +29,7 @@
 
 import {
   type AnchorRect,
+  COMMENT_ADDRESSES_LIMIT_BYTES,
   COMMENT_ANCHOR_CONTEXT_LIMIT_BYTES,
   COMMENT_ANCHOR_MAX_PAGE,
   COMMENT_ANCHOR_MAX_SECONDS,
@@ -55,6 +56,11 @@ import {
 } from './resolve-anchor.ts';
 import { loadPublishState, type PublishState } from './state.ts';
 
+export interface CommentAddressedBy {
+  readonly comment_id: string;
+  readonly version: number | null;
+}
+
 /** One comment as an agent reads it. */
 export interface CommentRecord {
   readonly comment_id: string;
@@ -80,14 +86,35 @@ export interface CommentRecord {
    * the encrypted envelope, so it arrives with the body or not at all.
    */
   readonly anchor: CommentAnchor | null;
+  /**
+   * The comment this one answers or acknowledges, by service-minted id.
+   * Taken from the sealed copy only.
+   */
+  readonly addresses: string | null;
   readonly readable: boolean;
   /** Null exactly when `readable` is true. */
   readonly unreadable_reason: string | null;
+  /**
+   * True if some other comment carries addresses equal to this comment's id,
+   * taken from the sealed copy only.
+   */
+  readonly addressed: boolean;
+  /** The comment that addressed this one, if any. */
+  readonly addressed_by: CommentAddressedBy | null;
+  readonly addressed_by_comment_id?: string | null;
+  readonly addressed_by_version?: number | null;
   /**
    * Resolved content for this comment's anchor when anchor resolution is
    * requested. Null when freeform or when resolution was not requested.
    */
   readonly resolved?: ResolvedAnchor | null;
+}
+
+export interface CommentsSummary {
+  readonly total: number;
+  readonly addressed: number;
+  readonly open: number;
+  readonly unreadable: number;
 }
 
 export interface ReadCommentsResult {
@@ -99,6 +126,7 @@ export interface ReadCommentsResult {
    * "nobody objected" when somebody did is the failure this member prevents.
    */
   readonly unreadable_count: number;
+  readonly summary: CommentsSummary;
   readonly comments: readonly CommentRecord[];
   readonly content_blocks?: readonly ContentBlock[];
 }
@@ -111,6 +139,66 @@ export interface CommentResult {
 }
 export interface ReadCommentsOptions {
   readonly resolve_anchors?: boolean;
+}
+
+/** First part of a comment body for refusal summaries, truncated if long. */
+export function previewCommentBody(body: string | null, maxChars = 80): string {
+  if (body === null || body === undefined) return '';
+  const trimmed = body.trim();
+  const firstLine = trimmed.split('\n')[0]?.trim() ?? '';
+  const text = firstLine.length > 0 ? firstLine : trimmed;
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 3)}...`;
+}
+
+/** Format the refusal message when republish is blocked by unaddressed comments. */
+export function formatUnaddressedRefusal(
+  relicId: string,
+  openComments: readonly CommentRecord[],
+  unreadableComments: readonly CommentRecord[] = []
+): string {
+  const parts: string[] = [];
+
+  if (openComments.length > 0 && unreadableComments.length > 0) {
+    parts.push(
+      `cannot republish relic ${relicId} while comments remain unaddressed. ` +
+        `${openComments.length} comment(s) are unanswered, and ${unreadableComments.length} comment(s) could not be decrypted. ` +
+        'Address unanswered comments either by replying with relic_comment or by passing addresses: [{ comment_id, note }] on republish.'
+    );
+  } else if (openComments.length > 0) {
+    parts.push(
+      `cannot republish relic ${relicId} while comments remain unaddressed. ` +
+        `${openComments.length} comment(s) are unanswered. ` +
+        'Address each open comment either by replying with relic_comment or by passing addresses: [{ comment_id, note }] on republish.'
+    );
+  } else {
+    parts.push(
+      `cannot republish relic ${relicId} because ${unreadableComments.length} comment(s) could not be decrypted. ` +
+        'A comment this client cannot read cannot be verified as addressed.'
+    );
+  }
+
+  if (openComments.length > 0) {
+    const list = openComments
+      .map(
+        (c) =>
+          `- [${c.comment_id}] from ${c.author} at ${c.created_at}: "${previewCommentBody(c.body)}"`
+      )
+      .join('\n');
+    parts.push(`Open comments (${openComments.length}):\n${list}`);
+  }
+
+  if (unreadableComments.length > 0) {
+    const list = unreadableComments
+      .map(
+        (c) =>
+          `- [${c.comment_id}] from ${c.author} at ${c.created_at}: unreadable (${c.unreadable_reason ?? "it did not decrypt under this relic's comment key"})`
+      )
+      .join('\n');
+    parts.push(`Unreadable comments (${unreadableComments.length}):\n${list}`);
+  }
+
+  return parts.join('\n\n');
 }
 
 export type CommentAnchorInput =
@@ -145,6 +233,11 @@ export interface CommentInput {
   readonly body: string;
   readonly display_name?: string | undefined;
   readonly anchor?: CommentAnchorInput | null | undefined;
+  /**
+   * Optional service-minted id of the comment this one answers or acknowledges.
+   * Sealed into the ciphertext and passed in the clear to the service for notification routing.
+   */
+  readonly addresses?: string | null | undefined;
 }
 
 export async function readComments(
@@ -171,8 +264,19 @@ export async function readComments(
   }
 
   const commentKey = await deriveCommentKey(decodeKey(state.key));
-  const comments: CommentRecord[] = [];
-  let unreadable = 0;
+  interface DecryptedCommentEntry {
+    comment_id: string;
+    author: string;
+    created_at: string;
+    display_name: string | null;
+    body: string | null;
+    anchor: CommentAnchor | null;
+    addresses: string | null;
+    version: number | null;
+    readable: boolean;
+    unreadable_reason: string | null;
+  }
+  const entries: DecryptedCommentEntry[] = [];
 
   for (const [index, entry] of listed.entries()) {
     const row =
@@ -188,16 +292,18 @@ export async function readComments(
     const createdAt =
       typeof row['created_at'] === 'string' ? row['created_at'] : 'unknown';
     const ciphertext = row['ciphertext'];
+    const version = typeof row['version'] === 'number' ? row['version'] : null;
 
     if (typeof ciphertext !== 'string') {
-      unreadable += 1;
-      comments.push({
+      entries.push({
         comment_id: commentId,
         author,
         created_at: createdAt,
         display_name: null,
         body: null,
         anchor: null,
+        addresses: null,
+        version,
         readable: false,
         unreadable_reason: 'the row carried no ciphertext',
       });
@@ -206,7 +312,7 @@ export async function readComments(
 
     try {
       const plaintext = await decryptComment(commentKey, ciphertext);
-      comments.push({
+      entries.push({
         comment_id: commentId,
         author,
         created_at: createdAt,
@@ -215,20 +321,23 @@ export async function readComments(
         // Absent and null both mean freeform. One shape crosses to the agent,
         // so a caller never has to distinguish two ways of saying no mark.
         anchor: plaintext.anchor ?? null,
+        addresses: plaintext.addresses ?? null,
+        version,
         readable: true,
         unreadable_reason: null,
       });
     } catch (error) {
       // One comment that will not open must not hide the ones that will, and
       // it must not vanish either. It comes back named, with the reason.
-      unreadable += 1;
-      comments.push({
+      entries.push({
         comment_id: commentId,
         author,
         created_at: createdAt,
         display_name: null,
         body: null,
         anchor: null,
+        addresses: null,
+        version,
         readable: false,
         unreadable_reason: `it did not decrypt under this relic's comment key: ${
           (error as Error).message
@@ -236,12 +345,74 @@ export async function readComments(
       });
     }
   }
+
+  // The sealed copy is authoritative. It sits inside the AEAD. A caller MAY
+  // also pass the same id to the service in the clear so the service can route
+  // a notification, and that clear copy is a routing hint the operator can see
+  // and could forge. Nothing user-facing may resolve "addressed" from the clear
+  // copy. We only inspect plaintext.addresses from the decrypted ciphertext.
+  const addressedByMap = new Map<
+    string,
+    { comment_id: string; version: number | null }
+  >();
+
+  for (const entry of entries) {
+    if (
+      entry.readable &&
+      entry.addresses !== null &&
+      entry.addresses !== entry.comment_id
+    ) {
+      if (!addressedByMap.has(entry.addresses)) {
+        addressedByMap.set(entry.addresses, {
+          comment_id: entry.comment_id,
+          version: entry.version,
+        });
+      }
+    }
+  }
+
+  const comments: CommentRecord[] = entries.map((entry) => {
+    const addressedBy = addressedByMap.get(entry.comment_id) ?? null;
+    const addressed = addressedBy !== null;
+    return {
+      comment_id: entry.comment_id,
+      author: entry.author,
+      created_at: entry.created_at,
+      display_name: entry.display_name,
+      body: entry.body,
+      anchor: entry.anchor,
+      addresses: entry.addresses,
+      readable: entry.readable,
+      unreadable_reason: entry.unreadable_reason,
+      addressed,
+      addressed_by: addressedBy,
+      addressed_by_comment_id: addressedBy?.comment_id ?? null,
+      addressed_by_version: addressedBy?.version ?? null,
+    };
+  });
+
+  const addressedCount = comments.filter((c) => c.addressed).length;
+  const unreadableCount = comments.filter((c) => !c.readable).length;
+  // A comment is open when it is readable, has not been addressed by another
+  // comment, and is not itself a reply or update acknowledgement.
+  const openCount = comments.filter(
+    (c) => c.readable && !c.addressed && c.addresses === null
+  ).length;
+
+  const summary: CommentsSummary = {
+    total: comments.length,
+    addressed: addressedCount,
+    open: openCount,
+    unreadable: unreadableCount,
+  };
+
   if (options?.resolve_anchors === true) {
     const resolved = await resolveAnchors(relicId, comments, deps);
     return {
       relic_id: relicId,
       count: comments.length,
-      unreadable_count: unreadable,
+      unreadable_count: unreadableCount,
+      summary,
       comments: resolved.comments,
       content_blocks: resolved.imageBlocks,
     };
@@ -250,7 +421,8 @@ export async function readComments(
   return {
     relic_id: relicId,
     count: comments.length,
-    unreadable_count: unreadable,
+    unreadable_count: unreadableCount,
+    summary,
     comments,
   };
 }
@@ -295,6 +467,31 @@ export async function postComment(
     }
   }
 
+  let addresses: string | null = null;
+  if (input.addresses !== undefined && input.addresses !== null) {
+    if (
+      typeof input.addresses !== 'string' ||
+      input.addresses.trim().length === 0
+    ) {
+      throw new PublishError(
+        'local_comment_addresses_invalid',
+        'addresses must be a non-empty string naming the comment being answered.'
+      );
+    }
+    const addressesBytes = new TextEncoder().encode(input.addresses).length;
+    if (addressesBytes > COMMENT_ADDRESSES_LIMIT_BYTES) {
+      throw new PublishError(
+        'local_comment_addresses_too_long',
+        `addresses is ${addressesBytes} bytes of UTF-8 and the limit is ${COMMENT_ADDRESSES_LIMIT_BYTES}.`,
+        {
+          addresses_bytes: addressesBytes,
+          limit_bytes: COMMENT_ADDRESSES_LIMIT_BYTES,
+        }
+      );
+    }
+    addresses = input.addresses;
+  }
+
   const anchor = validateAndNormalizeAnchor(input.anchor);
 
   const commentKey = await deriveCommentKey(decodeKey(state.key));
@@ -302,17 +499,23 @@ export async function postComment(
     body: input.body,
     display_name: displayName,
     anchor,
+    ...(addresses == null ? {} : { addresses }),
   });
 
   // The token travels in the body, where the republish grant already puts it,
   // so the two write paths authorize the same way and neither invents a
   // header the service has to learn.
+  // When addressing a comment, the pointer is also sent in the clear for
+  // notification routing.
   const posted = await postJson(
     deps,
     `${deps.serviceOrigin}/api/relics/${input.relic_id}/comments`,
-    { publish_token: state.publish_token, ciphertext }
+    {
+      publish_token: state.publish_token,
+      ciphertext,
+      ...(addresses == null ? {} : { addresses }),
+    }
   );
-
   return {
     relic_id: input.relic_id,
     comment_id: String(posted['comment_id']),

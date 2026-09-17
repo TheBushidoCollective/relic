@@ -880,6 +880,7 @@ describe('republish', () => {
       'filename',
       'title',
       'ttl_days',
+      'addresses',
     ]);
     expect(schema.required).toEqual(['relic_id', 'path']);
     expect(schema.additionalProperties).toBe(false);

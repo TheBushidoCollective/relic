@@ -24,6 +24,7 @@ import { MNEMONIC_WORDS } from '@relic/format/mnemonic';
 import {
   type CommentAnchorInput,
   type CommentRecord,
+  type CommentsSummary,
   describeAnchor,
   formatTimecode,
   postComment,
@@ -57,7 +58,7 @@ import {
   republishToolCall,
   ServerRefusal,
 } from './publish.ts';
-import { republish } from './republish.ts';
+import { type RepublishAddressEntry, republish } from './republish.ts';
 
 export type { JsonRpcRequest, JsonRpcResponse };
 export {
@@ -197,6 +198,14 @@ const MAX_TTL_DAYS = 3650;
 const VERSION_HISTORY_DISCLOSURE =
   "Anyone holding a relic's link can fetch every version it has ever held, " +
   'so republishing does not withdraw earlier content.';
+export const REPUBLISH_DISCIPLINE_DISCLOSURE =
+  " Before publishing, it reads the relic's comments and refuses if any are " +
+  'unaddressed. Address open comments either by replying with `relic_comment` ' +
+  'or by passing `addresses: [{ comment_id, note }]` here to acknowledge them ' +
+  'in the new version. Unreadable comments block republishing. This is workflow ' +
+  'discipline in the client, not a boundary: the machine holding the publish ' +
+  'token can call the HTTP API directly, and the service cannot enforce this ' +
+  'because it cannot read comments.';
 
 export const TOOL_DEFINITION = {
   name: TOOL_NAME,
@@ -300,7 +309,8 @@ export const REPUBLISH_TOOL_DEFINITION = {
     'encrypting under the same key so the existing share URL keeps working. ' +
     VERSION_HISTORY_DISCLOSURE +
     " Only possible from the machine that holds the relic's key and publish " +
-    'token; a relic that was taken down can never be revived.',
+    'token; a relic that was taken down can never be revived.' +
+    REPUBLISH_DISCIPLINE_DISCLOSURE,
   inputSchema: {
     type: 'object',
     properties: {
@@ -333,6 +343,30 @@ export const REPUBLISH_TOOL_DEFINITION = {
           'Optional. A lifetime in days, forwarded on the republish ' +
           "request. The service fixes a relic's lifetime at its first " +
           'publish, so treat this as reserved.',
+      },
+      addresses: {
+        type: 'array',
+        description:
+          'Optional. Acknowledgement notes for open comments being addressed by this update. ' +
+          'Each entry posts an acknowledgement comment stamped with the new version after it lands. ' +
+          'Every open comment on the relic must be addressed either by an entry here or by a prior reply.',
+        items: {
+          type: 'object',
+          properties: {
+            comment_id: {
+              type: 'string',
+              description: 'The id of the open comment being addressed.',
+            },
+            note: {
+              type: 'string',
+              description:
+                'Required explanation of what changed in this version to address the comment. ' +
+                'Cannot be empty or whitespace-only.',
+            },
+          },
+          required: ['comment_id', 'note'],
+          additionalProperties: false,
+        },
       },
     },
     required: ['relic_id', 'path'],
@@ -736,6 +770,10 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
     'on this machine. Use it before changing content somebody was asked to ' +
     'review, and after sharing a link, because a comment is the only way a ' +
     'reader can answer back. ' +
+    'Each comment reports whether it has been addressed, and a compact summary ' +
+    'gives total, addressed, open, and unreadable counts. Its output is the input ' +
+    'to `relic_republish`, which requires every open comment to be addressed before ' +
+    'a new version can land. ' +
     'Each comment can be a remark on the relic as a whole or an exact mark: ' +
     'a text quote with surrounding context, a stage pin, an artifact region, ' +
     'a timestamp or span in audio or video, or a page in a document. ' +
@@ -779,6 +817,18 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
         description:
           'How many of `count` did not decrypt. Above zero means part of the ' +
           'conversation is unread, not absent.',
+      },
+      summary: {
+        type: 'object',
+        description: 'Compact counts of comment states on this relic.',
+        properties: {
+          total: { type: 'integer', minimum: 0 },
+          addressed: { type: 'integer', minimum: 0 },
+          open: { type: 'integer', minimum: 0 },
+          unreadable: { type: 'integer', minimum: 0 },
+        },
+        required: ['total', 'addressed', 'open', 'unreadable'],
+        additionalProperties: false,
       },
       comments: {
         type: 'array',
@@ -843,6 +893,25 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             },
             readable: { type: 'boolean' },
             unreadable_reason: { type: ['string', 'null'] },
+            addresses: {
+              type: ['string', 'null'],
+              description:
+                'The comment id this comment replies to or acknowledges, if any.',
+            },
+            addressed: {
+              type: 'boolean',
+              description:
+                'Whether this comment has been addressed by a reply or update acknowledgement.',
+            },
+            addressed_by: {
+              type: ['object', 'null'],
+              description: 'The comment that addressed this one, if addressed.',
+              properties: {
+                comment_id: { type: 'string' },
+                version: { type: ['integer', 'null'] },
+              },
+              required: ['comment_id'],
+            },
             resolved: {
               type: ['object', 'null'],
               description:
@@ -858,12 +927,15 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             'anchor',
             'readable',
             'unreadable_reason',
+            'addresses',
+            'addressed',
+            'addressed_by',
           ],
           additionalProperties: false,
         },
       },
     },
-    required: ['relic_id', 'count', 'unreadable_count', 'comments'],
+    required: ['relic_id', 'count', 'unreadable_count', 'summary', 'comments'],
     additionalProperties: false,
   },
 } as const;
@@ -904,6 +976,13 @@ export const COMMENT_TOOL_DEFINITION = {
           'Optional. A name shown beside the comment, up to 64 bytes of ' +
           'UTF-8. It aliases the attribution for presentation and never ' +
           'replaces it.',
+      },
+      addresses: {
+        type: 'string',
+        description:
+          'Optional. The service-minted id of the comment this one answers or acknowledges. ' +
+          'Writing this marks that comment addressed so the relic can be republished. ' +
+          'The pointer is sealed into the encrypted comment and also passed to the service in the clear for notification routing.',
       },
       anchor: {
         type: 'object',
@@ -1710,10 +1789,29 @@ async function callRepublish(
         'omitted to leave the lifetime as the first publish set it'
     );
   }
+  const rawAddresses = args['addresses'];
+  let addresses: readonly RepublishAddressEntry[] | undefined;
+  if (rawAddresses !== undefined) {
+    if (!Array.isArray(rawAddresses)) {
+      return errorResponse(
+        id,
+        ERROR_CODES.invalidParams,
+        '`addresses` must be an array of { comment_id, note } objects or omitted'
+      );
+    }
+    addresses = rawAddresses as readonly RepublishAddressEntry[];
+  }
 
   try {
     const result = await republish(
-      { relic_id: relicId, path, filename, title, ttl_days: ttlDays.days },
+      {
+        relic_id: relicId,
+        path,
+        filename,
+        title,
+        ttl_days: ttlDays.days,
+        addresses,
+      },
       deps
     );
     return {
@@ -1856,6 +1954,16 @@ async function callComment(
     );
   }
 
+  const rawAddresses = args['addresses'];
+  if (rawAddresses !== undefined && typeof rawAddresses !== 'string') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`addresses` must be a string or omitted'
+    );
+  }
+  const addresses = typeof rawAddresses === 'string' ? rawAddresses : undefined;
+
   try {
     const result = await postComment(
       {
@@ -1863,6 +1971,7 @@ async function callComment(
         body,
         display_name: displayName,
         anchor: rawAnchor as CommentAnchorInput | null | undefined,
+        addresses,
       },
       deps
     );
@@ -1970,6 +2079,7 @@ function commentTranscript(result: {
   readonly relic_id: string;
   readonly count: number;
   readonly unreadable_count: number;
+  readonly summary: CommentsSummary;
   readonly comments: readonly CommentRecord[];
 }): string {
   if (result.count === 0) {
@@ -1989,7 +2099,18 @@ function commentTranscript(result: {
     // would be the same defect this fixed, one layer up.
     const mark = markLine(comment.anchor);
     const resolution = resolutionLine(comment.resolved);
-    return `${comment.created_at} ${who}:\n${mark}${resolution}${comment.body}`;
+    const replyNote =
+      comment.addresses !== null
+        ? `[answers comment ${comment.addresses}]\n`
+        : '';
+    const addressedNote = comment.addressed
+      ? `[addressed by comment ${comment.addressed_by?.comment_id ?? 'unknown'}${
+          comment.addressed_by?.version != null
+            ? ` in v${comment.addressed_by.version}`
+            : ''
+        }]\n`
+      : '';
+    return `${comment.created_at} ${who}:\n${mark}${resolution}${replyNote}${addressedNote}${comment.body}`;
   });
 
   const header =
@@ -2000,7 +2121,9 @@ function commentTranscript(result: {
         'unreadable rather than dropped, so treat this conversation as ' +
         'partially unread.';
 
-  return `${header}\n\n${lines.join('\n\n')}`;
+  const summaryLine = `Summary: ${result.summary.total} total, ${result.summary.addressed} addressed, ${result.summary.open} open, ${result.summary.unreadable} unreadable.`;
+
+  return `${header}\n${summaryLine}\n\n${lines.join('\n\n')}`;
 }
 
 /**
