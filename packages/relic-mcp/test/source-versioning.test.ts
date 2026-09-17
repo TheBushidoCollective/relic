@@ -68,6 +68,7 @@ function grantFetch(): typeof globalThis.fetch {
       return Response.json(grant('next'));
     }
     if (url.pathname.endsWith('/complete')) return Response.json({});
+    if (url.pathname.endsWith('/comments')) return Response.json([]);
     return new Response(null, { status: 404 });
   }) as typeof globalThis.fetch;
 }

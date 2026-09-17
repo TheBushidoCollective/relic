@@ -78,8 +78,16 @@ export type ClientCode =
   | 'local_comment_anchor_time_span_invalid'
   | 'local_comment_anchor_page_missing'
   | 'local_comment_anchor_page_out_of_range'
+  | 'local_comment_addresses_invalid'
+  | 'local_comment_addresses_too_long'
+  | 'unaddressed_comments'
+  | 'empty_acknowledgement_note'
+  | 'invalid_acknowledgement_comment_id'
+  | 'duplicate_acknowledgement'
+  | 'unknown_comment_id'
+  | 'unreadable_comment_cannot_be_addressed'
+  | 'invalid_acknowledgements'
   | 'app_response_unusable';
-
 export class PublishError extends Error {
   override readonly name = 'PublishError';
   constructor(

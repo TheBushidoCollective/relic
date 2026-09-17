@@ -20,6 +20,12 @@ import {
 } from '@relic/format';
 import { keyToMnemonic } from '@relic/format/mnemonic';
 import {
+  type CommentResult,
+  formatUnaddressedRefusal,
+  postComment,
+  readComments,
+} from './comments.ts';
+import {
   guessMimetype,
   type PublishDeps,
   PublishError,
@@ -33,6 +39,11 @@ import {
   type PublishState,
   savePublishState,
 } from './state.ts';
+
+export interface RepublishAddressEntry {
+  readonly comment_id: string;
+  readonly note: string;
+}
 
 export interface RepublishInput {
   readonly relic_id: string;
@@ -51,6 +62,13 @@ export interface RepublishInput {
    * change if that ever shifts.
    */
   readonly ttl_days?: number | undefined;
+  /**
+   * Optional acknowledgement notes for open comments being addressed by this
+   * update. Each entry posts an acknowledgement comment stamped with the new
+   * version after it lands. Every open comment on the relic must be addressed
+   * either by an entry here or by a prior reply.
+   */
+  readonly addresses?: readonly RepublishAddressEntry[] | undefined;
 }
 
 export interface RepublishResult {
@@ -74,6 +92,10 @@ export interface RepublishResult {
   readonly report_url: string;
   readonly disclosure_url: string;
   readonly key_phrase: string;
+  /**
+   * Acknowledgement comments posted for comments addressed by this update.
+   */
+  readonly acknowledgements?: readonly CommentResult[] | undefined;
   /**
    * Deliberately no `url` member. The share URL is unchanged by a new
    * version, and reprinting it would reprint the key for no new benefit;
@@ -117,6 +139,107 @@ export async function republish(
     // would send someone hunting the wrong machine.
     if (error instanceof PublishError) throw error;
     throw new PublishError('local_state_unreadable', (error as Error).message);
+  }
+  // Validate addresses entries up front before any network or file reads.
+  const addressesEntries = input.addresses;
+  if (addressesEntries !== undefined) {
+    if (!Array.isArray(addressesEntries)) {
+      throw new PublishError(
+        'invalid_acknowledgements',
+        'addresses must be an array of { comment_id, note } entries.'
+      );
+    }
+    const seen = new Set<string>();
+    for (const entry of addressesEntries) {
+      if (
+        typeof entry !== 'object' ||
+        entry === null ||
+        typeof entry.comment_id !== 'string' ||
+        entry.comment_id.trim().length === 0
+      ) {
+        throw new PublishError(
+          'invalid_acknowledgement_comment_id',
+          'acknowledgement comment_id must be a non-empty string.'
+        );
+      }
+      if (typeof entry.note !== 'string' || entry.note.trim().length === 0) {
+        throw new PublishError(
+          'empty_acknowledgement_note',
+          `acknowledgement note for comment ${entry.comment_id} cannot be empty or whitespace-only: it must say what was done to address the comment.`
+        );
+      }
+      if (seen.has(entry.comment_id)) {
+        throw new PublishError(
+          'duplicate_acknowledgement',
+          `duplicate acknowledgement entry for comment ${entry.comment_id}.`
+        );
+      }
+      seen.add(entry.comment_id);
+    }
+  }
+
+  // The comment gate: before publishing a new version, read the relic's
+  // comments, decrypt them locally, and verify every comment has been
+  // addressed. Unaddressed or unreadable comments refuse the republish.
+  const commentResult = await readComments(input.relic_id, deps);
+  const unreadableComments = commentResult.comments.filter((c) => !c.readable);
+  const openComments = commentResult.comments.filter(
+    (c) => c.readable && !c.addressed && c.addresses === null
+  );
+
+  if (addressesEntries && addressesEntries.length > 0) {
+    for (const entry of addressesEntries) {
+      const match = commentResult.comments.find(
+        (c) => c.comment_id === entry.comment_id
+      );
+      if (!match) {
+        throw new PublishError(
+          'unknown_comment_id',
+          `comment ${entry.comment_id} does not exist on relic ${input.relic_id}. The comment ids can only come from having read the relic's comments.`
+        );
+      }
+      if (!match.readable) {
+        throw new PublishError(
+          'unreadable_comment_cannot_be_addressed',
+          `comment ${entry.comment_id} cannot be addressed because it could not be decrypted.`
+        );
+      }
+    }
+  }
+
+  const addressesSet = new Set(
+    addressesEntries?.map((e) => e.comment_id) ?? []
+  );
+  const remainingOpen = openComments.filter(
+    (c) => !addressesSet.has(c.comment_id)
+  );
+
+  if (unreadableComments.length > 0 || remainingOpen.length > 0) {
+    throw new PublishError(
+      'unaddressed_comments',
+      formatUnaddressedRefusal(
+        input.relic_id,
+        remainingOpen,
+        unreadableComments
+      ),
+      {
+        relic_id: input.relic_id,
+        open_count: remainingOpen.length,
+        unreadable_count: unreadableComments.length,
+        open_comments: remainingOpen.map((c) => ({
+          comment_id: c.comment_id,
+          author: c.author,
+          created_at: c.created_at,
+          body: c.body,
+        })),
+        unreadable_comments: unreadableComments.map((c) => ({
+          comment_id: c.comment_id,
+          author: c.author,
+          created_at: c.created_at,
+          unreadable_reason: c.unreadable_reason,
+        })),
+      }
+    );
   }
 
   const source = await readSource(input.path, deps.files);
@@ -189,6 +312,23 @@ export async function republish(
     );
   }
 
+  // After the new version lands, post an acknowledgement comment for each
+  // addressed entry, so the acknowledgement is stamped with the new version.
+  const acknowledgements: CommentResult[] = [];
+  if (addressesEntries && addressesEntries.length > 0) {
+    for (const entry of addressesEntries) {
+      const ack = await postComment(
+        {
+          relic_id: input.relic_id,
+          body: entry.note,
+          addresses: entry.comment_id,
+        },
+        deps
+      );
+      acknowledgements.push(ack);
+    }
+  }
+
   return {
     relic_id: input.relic_id,
     version,
@@ -203,5 +343,6 @@ export async function republish(
     report_url: String(grant['report_url']),
     disclosure_url: String(grant['disclosure_url']),
     key_phrase: keyToMnemonic(decodeKey(state.key)).join(' '),
+    ...(acknowledgements.length > 0 ? { acknowledgements } : {}),
   };
 }
