@@ -7,12 +7,14 @@ import {
 } from '@relic/format';
 import {
   authRequestBody,
+  type CommentEntry,
   type CommentRecord,
   commentCipher,
   commentRefusal,
   keySurvivesNavigation,
   loadThread,
   MAX_BODY_BYTES,
+  PUBLISHER_AUTHOR,
   plainLabel,
   postComment,
   requestMagicLink,
@@ -22,6 +24,7 @@ import {
   buildBar,
   buildRelicRow,
   buildStageWrap,
+  buildThread,
   clampThreadWidth,
   commentRow,
   displayNameInput,
@@ -46,6 +49,22 @@ class ElementStub {
   readonly tagName: string;
   className = '';
   textContent = '';
+  private _innerHTML = '';
+  get innerHTML(): string {
+    return this._innerHTML;
+  }
+  set innerHTML(html: string) {
+    this._innerHTML = html;
+    this.textContent = html
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
   id = '';
   hidden = false;
   tabIndex = 0;
@@ -109,6 +128,12 @@ function installDom(): void {
     },
     addEventListener: () => {},
     visibilityState: 'visible',
+    documentElement: {
+      style: {
+        setProperty: () => {},
+        getPropertyValue: () => '',
+      },
+    },
   };
   (globalThis as { window?: unknown }).window = {
     addEventListener: () => {},
@@ -318,10 +343,21 @@ function problem(code: string, status: number): Response {
 async function sealed(
   body: string,
   displayName: string | null = null,
+  key: Uint8Array = KEY_BYTES,
+  addresses: string | null = null
+): Promise<string> {
+  const cipher = commentCipher(await deriveCommentKey(key));
+  return cipher.seal({ body, display_name: displayName, addresses });
+}
+
+async function sealedWithAddresses(
+  body: string,
+  addresses: string | null = null,
+  displayName: string | null = null,
   key: Uint8Array = KEY_BYTES
 ): Promise<string> {
   const cipher = commentCipher(await deriveCommentKey(key));
-  return cipher.seal({ body, display_name: displayName });
+  return cipher.seal({ body, display_name: displayName, addresses });
 }
 
 async function record(
@@ -338,7 +374,7 @@ async function record(
 describe('the comment key', () => {
   test('cannot be read back out by a script on this origin', async () => {
     // Independence from the container key is proven where it is derived, in
-    // `relic-format`'s own tests. What matters on this side of the boundary is
+    // relic-format's own tests. What matters on this side of the boundary is
     // that the viewer holds a key object and not key bytes: a sanitizer
     // bypass or a stray same-origin script finds nothing to export.
     const commentKey = await deriveCommentKey(KEY_BYTES);
@@ -1034,5 +1070,342 @@ describe('the disclosure, at the point of commenting', () => {
     expect(row).toContain('Download');
     expect(row).toContain('Report');
     expect(row).toContain('notes.md');
+  });
+});
+describe('comment markdown rendering', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('markdown comment body renders to structure rather than a raw string', () => {
+    const entry: CommentEntry = {
+      kind: 'open',
+      id: 'c1',
+      author: 'ada@example.com',
+      createdAt: '2026-08-20T09:15:00.000Z',
+      body: '# Main Header\n\nA paragraph with **bold** and `code` and [link](https://example.com).',
+      displayName: null,
+      anchor: null,
+    };
+    const row = commentRow(entry) as unknown as ElementStub;
+    const body = withClass(row, 'comment-body')[0];
+    if (!body) throw new Error('no comment body');
+    expect(body.innerHTML).toContain('<h1>Main Header</h1>');
+    expect(body.innerHTML).toContain('<p>');
+    expect(body.innerHTML).toContain('<strong>bold</strong>');
+    expect(body.innerHTML).toContain('<code>code</code>');
+    expect(body.innerHTML).toContain('<a href="https://example.com"');
+    expect(body.innerHTML).not.toContain('# Main Header');
+    expect(body.innerHTML).not.toContain('**bold**');
+  });
+});
+
+describe('hostile input in comment body is neutralized', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('raw HTML tags in comment body are escaped, not rendered as elements', () => {
+    const entry: CommentEntry = {
+      kind: 'open',
+      id: 'c1',
+      author: 'evil@example.com',
+      createdAt: '2026-08-20T09:15:00.000Z',
+      body: '<script>alert("pwned")</script><iframe src="https://evil.example"></iframe>',
+      displayName: null,
+      anchor: null,
+    };
+    const row = commentRow(entry) as unknown as ElementStub;
+    const body = withClass(row, 'comment-body')[0];
+    if (!body) throw new Error('no comment body');
+    expect(body.innerHTML).toContain(
+      '&lt;script&gt;alert(&quot;pwned&quot;)&lt;/script&gt;'
+    );
+    expect(body.innerHTML).toContain('&lt;iframe');
+    expect(body.innerHTML).not.toContain('<script>');
+    expect(body.innerHTML).not.toContain('<iframe');
+  });
+
+  test('javascript: URLs in markdown links are refused and not rendered as links', () => {
+    const entry: CommentEntry = {
+      kind: 'open',
+      id: 'c1',
+      author: 'evil@example.com',
+      createdAt: '2026-08-20T09:15:00.000Z',
+      body: '[click here](javascript:alert(location.hash))',
+      displayName: null,
+      anchor: null,
+    };
+    const row = commentRow(entry) as unknown as ElementStub;
+    const body = withClass(row, 'comment-body')[0];
+    if (!body) throw new Error('no comment body');
+    expect(body.innerHTML).not.toContain('<a href=');
+    expect(body.innerHTML).not.toContain('href="javascript:');
+    expect(textOf(body)).toContain('click here');
+  });
+
+  test('data: URLs in markdown links are refused and not rendered as links', () => {
+    const entry: CommentEntry = {
+      kind: 'open',
+      id: 'c1',
+      author: 'evil@example.com',
+      createdAt: '2026-08-20T09:15:00.000Z',
+      body: '[data link](data:text/html,<script>alert(1)</script>)',
+      displayName: null,
+      anchor: null,
+    };
+    const row = commentRow(entry) as unknown as ElementStub;
+    const body = withClass(row, 'comment-body')[0];
+    if (!body) throw new Error('no comment body');
+    expect(body.innerHTML).not.toContain('<a href=');
+    expect(body.innerHTML).not.toContain('href="data:');
+  });
+
+  test('onerror-style attributes in raw markup are neutralized by escaping', () => {
+    const entry: CommentEntry = {
+      kind: 'open',
+      id: 'c1',
+      author: 'evil@example.com',
+      createdAt: '2026-08-20T09:15:00.000Z',
+      body: '<img src="x" onerror="alert(document.domain)">\n\n<svg/onload=alert(1)>',
+      displayName: null,
+      anchor: null,
+    };
+    const row = commentRow(entry) as unknown as ElementStub;
+    const body = withClass(row, 'comment-body')[0];
+    if (!body) throw new Error('no comment body');
+    expect(body.innerHTML).not.toContain('<img');
+    expect(body.innerHTML).not.toContain('<svg');
+    expect(body.innerHTML).toContain('&lt;img');
+    expect(body.innerHTML).toContain('&lt;svg');
+  });
+
+  test('markdown images do not emit img tags and do not execute javascript URLs', () => {
+    const entry: CommentEntry = {
+      kind: 'open',
+      id: 'c1',
+      author: 'evil@example.com',
+      createdAt: '2026-08-20T09:15:00.000Z',
+      body: '![alt text](javascript:alert(1))\n\n![safe photo](https://example.com/pic.png)',
+      displayName: null,
+      anchor: null,
+    };
+    const row = commentRow(entry) as unknown as ElementStub;
+    const body = withClass(row, 'comment-body')[0];
+    if (!body) throw new Error('no comment body');
+    expect(body.innerHTML).not.toContain('<img');
+    expect(body.innerHTML).toContain('safe photo');
+    expect(body.innerHTML).not.toContain('href="javascript:');
+  });
+});
+
+describe('reply threading under target', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('a reply renders under its target comment inside comment-replies', async () => {
+    const targetCiphertext = await sealedWithAddresses('Target comment', null);
+    const replyCiphertext = await sealedWithAddresses('Reply comment', 'c1');
+
+    const records: CommentRecord[] = [
+      {
+        comment_id: 'c1',
+        author: 'alice@example.com',
+        created_at: '2026-08-20T09:15:00.000Z',
+        ciphertext: targetCiphertext,
+        version: 1,
+      },
+      {
+        comment_id: 'c2',
+        author: 'bob@example.com',
+        created_at: '2026-08-20T09:20:00.000Z',
+        ciphertext: replyCiphertext,
+        version: 1,
+      },
+    ];
+
+    const deps = stubDeps(() => json(records));
+    const readyView = view({ version: 1, currentVersion: 1 });
+    const thread = buildThread(readyView, RELIC_ID, deps, () => {});
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+    const list = withClass(threadElement, 'thread-list')[0];
+    if (!list) throw new Error('no thread list');
+
+    // Only target is a direct child of the top-level list
+    const topLevelComments = list.children.filter(
+      (c) => c.dataset.commentId === 'c1'
+    );
+    expect(topLevelComments).toHaveLength(1);
+    const orphanDirectComments = list.children.filter(
+      (c) => c.dataset.commentId === 'c2'
+    );
+    expect(orphanDirectComments).toHaveLength(0);
+
+    // Target comment contains the replies list with the reply
+    const targetRow = topLevelComments[0];
+    if (!targetRow) throw new Error('no target row');
+    const repliesLists = withClass(targetRow, 'comment-replies');
+    expect(repliesLists).toHaveLength(1);
+    const firstRepliesList = repliesLists[0];
+    if (!firstRepliesList) throw new Error('no replies list');
+    const replyRow = withClass(firstRepliesList, 'comment-reply')[0];
+    if (!replyRow) throw new Error('no reply row');
+    expect(replyRow.dataset.commentId).toBe('c2');
+    expect(textOf(replyRow)).toContain('Reply comment');
+  });
+});
+
+describe('addressed badges and authority', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('the addressed badge names whether the answer was a reply or an update and which version carried it', async () => {
+    // Comment 1 is answered by an update in version 2
+    const c1Ciphertext = await sealedWithAddresses('Need this fixed in v2');
+    const c2Ciphertext = await sealedWithAddresses(
+      'Fixed in this update',
+      'c1'
+    );
+
+    // Comment 3 is answered by a reply in version 1
+    const c3Ciphertext = await sealedWithAddresses('Can you clarify this?');
+    const c4Ciphertext = await sealedWithAddresses(
+      'Here is clarification',
+      'c3'
+    );
+
+    const records: CommentRecord[] = [
+      {
+        comment_id: 'c1',
+        author: 'alice@example.com',
+        created_at: '2026-08-20T09:00:00.000Z',
+        ciphertext: c1Ciphertext,
+        version: 1,
+      },
+      {
+        comment_id: 'c2',
+        author: PUBLISHER_AUTHOR,
+        created_at: '2026-08-20T10:00:00.000Z',
+        ciphertext: c2Ciphertext,
+        version: 2,
+      },
+      {
+        comment_id: 'c3',
+        author: 'charlie@example.com',
+        created_at: '2026-08-20T09:10:00.000Z',
+        ciphertext: c3Ciphertext,
+        version: 1,
+      },
+      {
+        comment_id: 'c4',
+        author: 'bob@example.com',
+        created_at: '2026-08-20T09:15:00.000Z',
+        ciphertext: c4Ciphertext,
+        version: 1,
+      },
+    ];
+
+    const deps = stubDeps(() => json(records));
+    // View version 1 on multi-version relic
+    const readyView = view({ version: 1, currentVersion: 2 });
+    const thread = buildThread(readyView, RELIC_ID, deps, () => {});
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+
+    // Comment c1 should have an update badge naming version 2
+    const c1Row = descendants(threadElement).find(
+      (el) => el.dataset.commentId === 'c1'
+    );
+    if (!c1Row) throw new Error('c1 row not found');
+    const c1Badges = withClass(c1Row, 'comment-badge-addressed');
+    expect(c1Badges).toHaveLength(1);
+    const c1Badge = c1Badges[0];
+    if (!c1Badge) throw new Error('no c1 badge');
+    expect(textOf(c1Badge)).toBe('Addressed by update in version 2');
+    expect(c1Badge.dataset.addressedKind).toBe('update');
+    expect(c1Badge.dataset.addressedVersion).toBe('2');
+    // Comment c3 should have a reply badge naming version 1
+    const c3Row = descendants(threadElement).find(
+      (el) => el.dataset.commentId === 'c3'
+    );
+    if (!c3Row) throw new Error('c3 row not found');
+    const c3Badges = withClass(c3Row, 'comment-badge-addressed');
+    expect(c3Badges).toHaveLength(1);
+    const c3Badge = c3Badges[0];
+    if (!c3Badge) throw new Error('no c3 badge');
+    expect(textOf(c3Badge)).toBe('Addressed by reply in version 1');
+    expect(c3Badge.dataset.addressedKind).toBe('reply');
+    expect(c3Badge.dataset.addressedVersion).toBe('1');
+  });
+
+  test('an unanswered comment carries no addressed badge', async () => {
+    const c1Ciphertext = await sealedWithAddresses('Unanswered comment', null);
+    const records: CommentRecord[] = [
+      {
+        comment_id: 'c1',
+        author: 'alice@example.com',
+        created_at: '2026-08-20T09:00:00.000Z',
+        ciphertext: c1Ciphertext,
+        version: 1,
+      },
+    ];
+
+    const deps = stubDeps(() => json(records));
+    const readyView = view({ version: 1, currentVersion: 1 });
+    const thread = buildThread(readyView, RELIC_ID, deps, () => {});
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+    const c1Row = descendants(threadElement).find(
+      (el) => el.dataset.commentId === 'c1'
+    );
+    if (!c1Row) throw new Error('c1 row not found');
+    expect(withClass(c1Row, 'comment-badge-addressed')).toHaveLength(0);
+    expect(textOf(c1Row)).not.toContain('Addressed');
+  });
+
+  test('the sealed pointer is authoritative: a clear hint claiming an answer when sealed copy does not is shown unanswered', async () => {
+    // Comment A: target
+    const cACiphertext = await sealedWithAddresses('Target comment', null);
+    // Comment B: sealed copy answers nothing (addresses: null)!
+    const cBCiphertext = await sealedWithAddresses('Forged clear hint', null);
+
+    const records: CommentRecord[] = [
+      {
+        comment_id: 'cA',
+        author: 'alice@example.com',
+        created_at: '2026-08-20T09:00:00.000Z',
+        ciphertext: cACiphertext,
+        version: 1,
+      },
+      {
+        comment_id: 'cB',
+        author: 'forger@example.com',
+        created_at: '2026-08-20T09:05:00.000Z',
+        ciphertext: cBCiphertext,
+        version: 1,
+        // The server claims in the clear that cB addresses cA:
+        addresses: 'cA',
+      },
+    ];
+
+    const deps = stubDeps(() => json(records));
+    const readyView = view({ version: 1, currentVersion: 1 });
+    const thread = buildThread(readyView, RELIC_ID, deps, () => {});
+    await thread.ready;
+
+    const threadElement = thread.element as unknown as ElementStub;
+
+    // cA must remain visibly unanswered
+    const cARow = descendants(threadElement).find(
+      (el) => el.dataset.commentId === 'cA'
+    );
+    if (!cARow) throw new Error('cA row not found');
+    expect(withClass(cARow, 'comment-badge-addressed')).toHaveLength(0);
+    expect(textOf(cARow)).not.toContain('Addressed');
+
+    // And cB must not be threaded under cA because its sealed copy did not address cA
+    expect(withClass(cARow, 'comment-replies')).toHaveLength(0);
   });
 });

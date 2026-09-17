@@ -57,6 +57,8 @@ export interface CommentRecord {
   readonly created_at: string;
   readonly ciphertext: string;
   readonly version?: number | null;
+  /** Server-supplied clear routing hint. Never authoritative. */
+  readonly addresses?: string | null;
 }
 
 /**
@@ -82,6 +84,11 @@ export type CommentEntry =
       readonly displayName: string | null;
       readonly anchor: CommentAnchor | null;
       readonly version?: number | null;
+      /** The comment id this one answers, decrypted from the sealed copy only. */
+      readonly addresses?: string | null;
+      /** The clear routing hint supplied by the server, if any. Never authoritative. */
+      readonly clearAddresses?: string | null;
+      readonly addressed?: AddressedBy | null;
     }
   | {
       readonly kind: 'sealed';
@@ -89,6 +96,8 @@ export type CommentEntry =
       readonly author: string;
       readonly createdAt: string;
       readonly version?: number | null;
+      readonly clearAddresses?: string | null;
+      readonly addressed?: AddressedBy | null;
     }
   | {
       /** Whatever the row did carry. Any of it may be absent. */
@@ -97,6 +106,8 @@ export type CommentEntry =
       readonly author: string | null;
       readonly createdAt: string | null;
       readonly version?: number | null;
+      readonly clearAddresses?: string | null;
+      readonly addressed?: AddressedBy | null;
     };
 
 /** The literal author the contract uses for a publish-token comment. */
@@ -387,6 +398,7 @@ function unreadableEntry(record: unknown): CommentEntry {
     author: stringField(record, 'author'),
     createdAt: stringField(record, 'created_at'),
     version,
+    clearAddresses: stringField(record, 'addresses'),
   };
 }
 
@@ -510,6 +522,7 @@ export async function openEntry(
   cipher: CommentCipher
 ): Promise<CommentEntry> {
   const version = typeof record.version === 'number' ? record.version : null;
+  const clearAddresses = stringField(record, 'addresses');
   try {
     const plaintext = await cipher.open(record.ciphertext);
     return {
@@ -524,6 +537,8 @@ export async function openEntry(
           : null,
       anchor: plaintext.anchor ?? null,
       version,
+      addresses: plaintext.addresses ?? null,
+      clearAddresses,
     };
   } catch (error) {
     // `format.md` 3.13 gives a decrypt failure no cause, and a malformed
@@ -542,6 +557,7 @@ export async function openEntry(
       author: record.author,
       createdAt: record.created_at,
       version,
+      clearAddresses,
     };
   }
 }
@@ -626,6 +642,9 @@ export async function postComment(
       body: JSON.stringify({
         ciphertext,
         ...(typeof version === 'number' ? { version } : {}),
+        ...(typeof draft.addresses === 'string' && draft.addresses.length > 0
+          ? { addresses: draft.addresses }
+          : {}),
       }),
     });
   } catch {
@@ -928,4 +947,148 @@ export function wrapTextQuoteWithContext(
   }
 
   return markedAny;
+}
+
+export interface AddressedBy {
+  readonly kind: 'update' | 'reply';
+  readonly version: number | null;
+}
+
+/**
+ * Determines whether an answer is an update or a reply.
+ *
+ * An update is an answer from the publisher whose version is newer than the
+ * target comment or where the target comment predates versioning. All other
+ * answers are replies.
+ */
+export function answerKind(
+  target: CommentEntry | undefined,
+  answering: CommentEntry
+): 'update' | 'reply' {
+  if (answering.author === PUBLISHER_AUTHOR) {
+    if (
+      target !== undefined &&
+      target.version !== null &&
+      target.version !== undefined &&
+      answering.version !== null &&
+      answering.version !== undefined
+    ) {
+      return answering.version > target.version ? 'update' : 'reply';
+    }
+    return 'update';
+  }
+  return 'reply';
+}
+
+export function addressedBadgeLabel(addressed: AddressedBy): string {
+  if (addressed.version !== null && addressed.version !== undefined) {
+    return `Addressed by ${addressed.kind} in version ${addressed.version}`;
+  }
+  return `Addressed by ${addressed.kind}`;
+}
+
+/**
+ * Resolves which comments in a thread have been answered.
+ *
+ * The sealed copy is the only authoritative source. The clear copy supplied
+ * by the server is an operator-visible routing hint and must never be what
+ * decides whether a remark is addressed.
+ */
+export function resolveAddressedMap(
+  entries: readonly CommentEntry[]
+): Map<string, AddressedBy> {
+  const map = new Map<string, AddressedBy>();
+  const idToEntry = new Map<string, CommentEntry>();
+  for (const entry of entries) {
+    if (entry.id !== null) {
+      idToEntry.set(entry.id, entry);
+    }
+  }
+  for (const entry of entries) {
+    if (entry.kind !== 'open') continue;
+    // Authoritative sealed pointer only:
+    const targetId = entry.addresses;
+    if (typeof targetId !== 'string' || targetId.length === 0) continue;
+
+    const target = idToEntry.get(targetId);
+    const kind = answerKind(target, entry);
+    const version = typeof entry.version === 'number' ? entry.version : null;
+    const candidate: AddressedBy = { kind, version };
+
+    const existing = map.get(targetId);
+    if (existing === undefined) {
+      map.set(targetId, candidate);
+    } else {
+      if (existing.kind !== 'update' && candidate.kind === 'update') {
+        map.set(targetId, candidate);
+      } else if (
+        existing.kind === candidate.kind &&
+        (candidate.version ?? 0) >= (existing.version ?? 0)
+      ) {
+        map.set(targetId, candidate);
+      }
+    }
+  }
+
+  return map;
+}
+
+export interface CommentNode {
+  readonly entry: CommentEntry;
+  readonly replies: CommentNode[];
+}
+
+/**
+ * Structures flat comments into top-level comments and nested replies.
+ *
+ * Replies whose target is filtered out or missing are omitted so they never
+ * read as orphans on the page.
+ */
+export function threadEntries(entries: readonly CommentEntry[]): CommentNode[] {
+  const nodesById = new Map<
+    string,
+    { entry: CommentEntry; replies: CommentNode[] }
+  >();
+  for (const entry of entries) {
+    if (entry.id !== null) {
+      nodesById.set(entry.id, { entry, replies: [] });
+    }
+  }
+
+  const roots: CommentNode[] = [];
+  for (const entry of entries) {
+    if (entry.id === null) {
+      roots.push({ entry, replies: [] });
+      continue;
+    }
+    const node = nodesById.get(entry.id);
+    if (node === undefined) continue;
+    // Authoritative sealed pointer only:
+    const targetId = entry.kind === 'open' ? entry.addresses : null;
+
+    if (typeof targetId === 'string' && targetId.length > 0) {
+      const parentNode = nodesById.get(targetId);
+      if (parentNode !== undefined) {
+        parentNode.replies.push(node);
+      }
+      // Target missing or filtered out: omit to prevent orphan display.
+    } else {
+      roots.push(node);
+    }
+  }
+
+  return roots;
+}
+
+export function collectDisplayedEntries(
+  nodes: readonly CommentNode[]
+): CommentEntry[] {
+  const out: CommentEntry[] = [];
+  for (const node of nodes) {
+    out.push(node.entry);
+    if (node.replies.length > 0) {
+      out.push(...collectDisplayedEntries(node.replies));
+    }
+  }
+  return out;
 }
