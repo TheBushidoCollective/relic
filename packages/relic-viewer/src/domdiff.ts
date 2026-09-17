@@ -91,27 +91,70 @@ interface Collector {
   removals: number;
   /** Counted separately from `changes`, which stops at the list cap. */
   changedCount: number;
+  /** Sequence shared by the two mark arrays, unique inside one diff. */
+  nextSyncId: number;
 }
 
-function mark(into: Mark[], path: NodePath, kind: MarkKind): void {
+function mark(
+  into: Mark[],
+  path: NodePath,
+  kind: MarkKind,
+  syncId?: string
+): void {
   const key = path.join('.');
   // One element, one mark. A changed heading whose text also moved would
-  // otherwise be marked twice and outlined twice.
-  if (into.some((existing) => existing.path.join('.') === key)) return;
-  into.push({ path, kind });
+  // otherwise be marked twice and outlined twice. If that earlier mark had no
+  // counterpart and this pass finds one, enrich rather than duplicate it.
+  const at = into.findIndex((existing) => existing.path.join('.') === key);
+  if (at !== -1) {
+    const existing = into[at];
+    if (
+      existing !== undefined &&
+      existing.syncId === undefined &&
+      syncId !== undefined
+    ) {
+      into[at] = { ...existing, syncId };
+    }
+    return;
+  }
+  into.push({ path, kind, ...(syncId === undefined ? {} : { syncId }) });
+}
+
+/** Give the two nodes one identity only when the diff actually paired them. */
+function markPair(
+  into: Collector,
+  beforePath: NodePath,
+  afterPath: NodePath,
+  beforeKind: MarkKind = 'changed',
+  afterKind: MarkKind = 'changed'
+): void {
+  const syncId = `d${into.nextSyncId}`;
+  into.nextSyncId += 1;
+  mark(into.removed, beforePath, beforeKind, syncId);
+  mark(into.added, afterPath, afterKind, syncId);
 }
 
 function countNodes(node: TreeNode): number {
   return 1 + node.children.reduce((sum, child) => sum + countNodes(child), 0);
 }
 
-function collectRemoved(node: TreeNode, path: NodePath, into: Collector): void {
-  mark(into.removed, nearestElement(node, path), 'removed');
+function collectRemoved(
+  node: TreeNode,
+  path: NodePath,
+  into: Collector,
+  syncId?: string
+): void {
+  mark(into.removed, nearestElement(node, path), 'removed', syncId);
   into.removals += countNodes(node);
 }
 
-function collectAdded(node: TreeNode, path: NodePath, into: Collector): void {
-  mark(into.added, nearestElement(node, path), 'added');
+function collectAdded(
+  node: TreeNode,
+  path: NodePath,
+  into: Collector,
+  syncId?: string
+): void {
+  mark(into.added, nearestElement(node, path), 'added', syncId);
   into.additions += countNodes(node);
 }
 
@@ -125,8 +168,7 @@ function compare(
 ): void {
   if (before.tag === '#text' && after.tag === '#text') {
     if (before.text === after.text) return;
-    mark(into.removed, beforePath.slice(0, -1), 'changed');
-    mark(into.added, afterPath.slice(0, -1), 'changed');
+    markPair(into, beforePath.slice(0, -1), afterPath.slice(0, -1));
     into.changedCount += 1;
     if (into.changes.length < MAX_LISTED_CHANGES) {
       into.changes.push({
@@ -140,16 +182,17 @@ function compare(
   }
 
   if (before.tag !== after.tag) {
-    collectRemoved(before, beforePath, into);
-    collectAdded(after, afterPath, into);
+    const syncId = `d${into.nextSyncId}`;
+    into.nextSyncId += 1;
+    collectRemoved(before, beforePath, into, syncId);
+    collectAdded(after, afterPath, into, syncId);
     return;
   }
 
   const beforeAttrs = serialiseAttrs(before);
   const afterAttrs = serialiseAttrs(after);
   if (beforeAttrs !== afterAttrs) {
-    mark(into.removed, beforePath, 'changed');
-    mark(into.added, afterPath, 'changed');
+    markPair(into, beforePath, afterPath);
     into.changedCount += 1;
     if (into.changes.length < MAX_LISTED_CHANGES) {
       into.changes.push({
@@ -302,6 +345,7 @@ export function diffTrees(before: TreeNode, after: TreeNode): TreeDiff {
     additions: 0,
     removals: 0,
     changedCount: 0,
+    nextSyncId: 0,
   };
   compare(before, after, [], [], '#root', into);
 

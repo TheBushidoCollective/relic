@@ -49,6 +49,10 @@ class NodeStub {
     this.attrs[name] = value;
     if (name === 'data-relic-diff') this.marks.push(value);
   }
+
+  removeAttribute(name: string): void {
+    delete this.attrs[name];
+  }
 }
 
 class TextStub {
@@ -183,8 +187,12 @@ describe('comparing two rendered documents', () => {
     expect(result.changed).toBe(true);
     // The mark lands on the element, because an attribute cannot be set on a
     // text node.
-    expect(result.removedMarks).toEqual([{ path: [0], kind: 'changed' }]);
-    expect(result.addedMarks).toEqual([{ path: [0], kind: 'changed' }]);
+    expect(result.removedMarks).toEqual([
+      { path: [0], kind: 'changed', syncId: 'd0' },
+    ]);
+    expect(result.addedMarks).toEqual([
+      { path: [0], kind: 'changed', syncId: 'd0' },
+    ]);
     expect(result.summary).toBe('1 changed.');
     expect(result.changes).toEqual([
       {
@@ -227,7 +235,36 @@ describe('comparing two rendered documents', () => {
     const result = diffTrees(before, after);
     expect(result.additions).toBe(0);
     expect(result.removals).toBe(0);
-    expect(result.addedMarks).toEqual([{ path: [1], kind: 'changed' }]);
+    expect(result.addedMarks).toEqual([
+      { path: [1], kind: 'changed', syncId: 'd0' },
+    ]);
+  });
+
+  test('paired changed nodes carry the same landmark id and one-sided changes do not', () => {
+    const before = element(
+      'body',
+      element('p', text('before')),
+      element('p', text('kept'))
+    );
+    const after = element(
+      'body',
+      element('p', text('after')),
+      element('p', text('kept')),
+      element('p', text('added only'))
+    );
+
+    const result = diffTrees(before, after);
+    const changedBefore = result.removedMarks.find(
+      (mark) => mark.kind === 'changed'
+    );
+    const changedAfter = result.addedMarks.find(
+      (mark) => mark.kind === 'changed'
+    );
+    const addedOnly = result.addedMarks.find((mark) => mark.kind === 'added');
+
+    expect(changedBefore?.syncId).toBeDefined();
+    expect(changedAfter?.syncId).toBe(changedBefore?.syncId);
+    expect(addedOnly?.syncId).toBeUndefined();
   });
 
   test('the change list stops while the counts stay exact', () => {
@@ -250,8 +287,24 @@ describe('marking a document from a path', () => {
     const child = new NodeStub('p');
     const root = new NodeStub('body', [new NodeStub('h1'), child]);
 
-    expect(applyMarks(root, [{ path: [1], kind: 'added' }])).toBe(1);
+    expect(applyMarks(root, [{ path: [1], kind: 'added', syncId: 'd3' }])).toBe(
+      1
+    );
     expect(child.marks).toEqual(['added']);
+    expect(child.attrs['data-relic-sync-id']).toBe('d3');
+  });
+
+  test('clears authored landmark ids before applying the diff-owned ids', () => {
+    const unmarked = new NodeStub('p');
+    const changed = new NodeStub('p');
+    unmarked.attrs['data-relic-sync-id'] = 'd0';
+    changed.attrs['data-relic-sync-id'] = 'd999';
+    const root = new NodeStub('body', [unmarked, changed]);
+
+    applyMarks(root, [{ path: [1], kind: 'changed', syncId: 'd4' }]);
+
+    expect(unmarked.attrs['data-relic-sync-id']).toBeUndefined();
+    expect(changed.attrs['data-relic-sync-id']).toBe('d4');
   });
 
   test('skips a path that no longer resolves instead of throwing', () => {
@@ -311,7 +364,7 @@ describe('validating what crosses the frame boundary', () => {
         type: 'relic:annotate',
         marks: [
           { path: [0, 2], kind: 'added' },
-          { path: [], kind: 'changed' },
+          { path: [], kind: 'changed', syncId: 'd0' },
         ],
       })
     ).toBe(true);
@@ -341,6 +394,20 @@ describe('validating what crosses the frame boundary', () => {
       {
         type: 'relic:annotate',
         marks: [{ path: [0], kind: '<script>alert(1)</script>' }],
+      },
+    ],
+    [
+      'an arbitrary landmark id',
+      {
+        type: 'relic:annotate',
+        marks: [{ path: [0], kind: 'changed', syncId: '<script>' }],
+      },
+    ],
+    [
+      'a non-string landmark id',
+      {
+        type: 'relic:annotate',
+        marks: [{ path: [0], kind: 'changed', syncId: 7 }],
       },
     ],
     ['the wrong type', { type: 'relic:render', marks: [] }],

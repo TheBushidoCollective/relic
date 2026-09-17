@@ -32,6 +32,8 @@ export type MarkKind = 'added' | 'removed' | 'changed';
 export interface Mark {
   readonly path: NodePath;
   readonly kind: MarkKind;
+  /** Same value on the two changed nodes one tree diff paired. */
+  readonly syncId?: string;
 }
 
 /** Frame to parent: what this frame actually rendered. */
@@ -159,6 +161,7 @@ interface NodeLike {
   readonly childNodes?: unknown;
   getAttribute?: (name: string) => unknown;
   setAttribute?: (name: string, value: string) => void;
+  removeAttribute?: (name: string) => void;
 }
 
 const ELEMENT_NODE = 1;
@@ -289,6 +292,18 @@ export function captureTree(root: unknown): TreeNode {
 export function applyMarks(root: unknown, marks: readonly Mark[]): number {
   let applied = 0;
 
+  // A relic is untrusted and may have authored this attribute itself. Clear
+  // every copy before painting the ids produced by our own diff; otherwise an
+  // author could steer comparison scrolling to an unrelated element simply
+  // by guessing `d0`.
+  const clearAuthoredSyncIds = (value: unknown): void => {
+    const node = asNode(value);
+    if (node === undefined) return;
+    node.removeAttribute?.('data-relic-sync-id');
+    for (const child of childrenOf(node)) clearAuthoredSyncIds(child);
+  };
+  clearAuthoredSyncIds(root);
+
   for (const mark of marks) {
     let node = asNode(root);
     for (const index of mark.path) {
@@ -299,6 +314,9 @@ export function applyMarks(root: unknown, marks: readonly Mark[]): number {
     if (node.nodeType !== ELEMENT_NODE) continue;
     if (typeof node.setAttribute !== 'function') continue;
     node.setAttribute('data-relic-diff', mark.kind);
+    if (mark.syncId !== undefined) {
+      node.setAttribute('data-relic-sync-id', mark.syncId);
+    }
     applied += 1;
   }
 
@@ -350,6 +368,13 @@ export function isAnnotateMessage(data: unknown): data is AnnotateMessage {
     if (typeof entry !== 'object' || entry === null) return false;
     const mark = entry as Record<string, unknown>;
     if (MARK_KINDS[String(mark['kind'])] !== true) return false;
+    const syncId = mark['syncId'];
+    if (
+      syncId !== undefined &&
+      (typeof syncId !== 'string' || !/^d[0-9]+$/.test(syncId))
+    ) {
+      return false;
+    }
     const path = mark['path'];
     if (!Array.isArray(path)) return false;
     for (const index of path) {

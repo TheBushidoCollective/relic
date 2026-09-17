@@ -13,21 +13,22 @@
  * So the contract lives here, where both ends can import it and neither end
  * drags the other in. Same reason `sw-cache.ts` exists.
  *
- * The fraction is a position along the scrollable range rather than a pixel
- * offset, because the two documents being compared have different heights and
- * a pixel offset would read section 12 against section 3.
+ * A position keeps the proportional fraction as its fallback and may carry a
+ * paired changed node as the exact reference. Different document heights make
+ * fraction better than pixels at the ends; different content above a change
+ * makes the paired node better where it exists.
  */
 
-/** Shell to frame: put yourself at this fraction of your scroll range. */
-export interface SetScrollMessage {
+import type { ScrollLandmark, ScrollPosition } from './scroll-landmark.ts';
+
+/** Shell to frame: put yourself at this paired mark, or at the fallback fraction. */
+export interface SetScrollMessage extends ScrollPosition {
   readonly type: 'relic:set-scroll';
-  readonly fraction: number;
 }
 
-/** Frame to shell: a reader scrolled me to this fraction. */
-export interface FrameScrollMessage {
+/** Frame to shell: this is what the reader currently has at the top. */
+export interface FrameScrollMessage extends ScrollPosition {
   readonly type: 'relic:frame-scroll';
-  readonly fraction: number;
 }
 
 /**
@@ -35,16 +36,29 @@ export interface FrameScrollMessage {
  * reaching `scrollTop` is silently ignored by the DOM, which would leave a
  * pane stuck with no error anywhere.
  */
-function isFractionMessage(data: unknown, type: string): boolean {
+function isLandmark(value: unknown): value is ScrollLandmark {
+  if (typeof value !== 'object' || value === null) return false;
+  const mark = value as Record<string, unknown>;
   return (
-    typeof data === 'object' &&
-    data !== null &&
-    'type' in data &&
-    'fraction' in data &&
-    (data as { type: unknown }).type === type &&
-    typeof (data as { fraction: unknown }).fraction === 'number' &&
-    Number.isFinite((data as { fraction: number }).fraction)
+    typeof mark['id'] === 'string' &&
+    /^d[0-9]+$/.test(mark['id']) &&
+    typeof mark['top'] === 'number' &&
+    Number.isFinite(mark['top'])
   );
+}
+
+function isFractionMessage(data: unknown, type: string): boolean {
+  if (typeof data !== 'object' || data === null) return false;
+  const message = data as Record<string, unknown>;
+  if (message['type'] !== type) return false;
+  if (
+    typeof message['fraction'] !== 'number' ||
+    !Number.isFinite(message['fraction'])
+  ) {
+    return false;
+  }
+  const landmark = message['landmark'];
+  return landmark === undefined || isLandmark(landmark);
 }
 
 export function isSetScrollMessage(data: unknown): data is SetScrollMessage {
