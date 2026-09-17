@@ -42,6 +42,12 @@ export interface ResendMailerOptions {
   readonly log?: (message: string) => void;
 }
 
+export interface OutboundMail {
+  readonly subject: string;
+  readonly text: string;
+  readonly html: string;
+}
+
 /**
  * The body of the sign-in mail.
  *
@@ -53,11 +59,7 @@ export interface ResendMailerOptions {
  * like a newsletter, because a message that looks like an announcement is a
  * message a spam filter treats like one.
  */
-export function signInMail(link: string): {
-  readonly subject: string;
-  readonly text: string;
-  readonly html: string;
-} {
+export function signInMail(link: string): OutboundMail {
   const subject = 'Your Relic sign-in link';
   const text = [
     'Open this link to comment on the relic you were reading:',
@@ -80,6 +82,67 @@ export function signInMail(link: string): {
   return { subject, text, html };
 }
 
+/**
+ * Notification sent to a relic creator when a comment arrives.
+ *
+ * The service holds ciphertext it cannot read and never holds the key, so this
+ * message names the relic title and who commented, but cannot quote the comment
+ * or provide a direct decryption link.
+ */
+export function commentNotificationMail(
+  title: string | undefined,
+  commenter: string
+): OutboundMail {
+  const subject = title
+    ? `New comment on "${title}"`
+    : 'New comment on your relic';
+  const text = [
+    title
+      ? `${commenter} left a comment on "${title}".`
+      : `${commenter} left a comment on your relic.`,
+    '',
+    'Open the link you hold for this relic to read and answer the comment.',
+    '',
+    'Relic does not store the decryption key on its servers, so comments cannot be read from this email.',
+  ].join('\n');
+  const safeCommenter = escapeHtml(commenter);
+  const safeTitle = title ? escapeHtml(title) : undefined;
+  const html = [
+    `<p>${safeCommenter} left a comment on ${safeTitle ? `<strong>${safeTitle}</strong>` : 'your relic'}.</p>`,
+    '<p>Open the link you hold for this relic to read and answer the comment.</p>',
+    '<p>Relic does not store the decryption key on its servers, so comments cannot be read from this email.</p>',
+  ].join('');
+  return { subject, text, html };
+}
+
+/**
+ * Notification sent to a commenter when their comment is answered.
+ */
+export function replyNotificationMail(
+  title: string | undefined,
+  replier: string
+): OutboundMail {
+  const subject = title
+    ? `Your comment on "${title}" was answered`
+    : 'Your comment on a relic was answered';
+  const text = [
+    title
+      ? `${replier} answered your comment on "${title}".`
+      : `${replier} answered your comment on a relic.`,
+    '',
+    'Open the link you hold for this relic to read the reply.',
+    '',
+    'Relic does not store the decryption key on its servers, so comments cannot be read from this email.',
+  ].join('\n');
+  const safeReplier = escapeHtml(replier);
+  const safeTitle = title ? escapeHtml(title) : undefined;
+  const html = [
+    `<p>${safeReplier} answered your comment on ${safeTitle ? `<strong>${safeTitle}</strong>` : 'a relic'}.</p>`,
+    '<p>Open the link you hold for this relic to read the reply.</p>',
+    '<p>Relic does not store the decryption key on its servers, so comments cannot be read from this email.</p>',
+  ].join('');
+  return { subject, text, html };
+}
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -140,48 +203,54 @@ export function quotaWarning(
 export function resendMailer(options: ResendMailerOptions): Mailer {
   const call = options.fetch ?? globalThis.fetch;
 
+  async function post(to: string, mail: OutboundMail): Promise<void> {
+    const response = await call(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${options.apiKey}`,
+        'user-agent': USER_AGENT,
+      },
+      body: JSON.stringify({
+        from: options.from,
+        to,
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
+      }),
+    });
+
+    if (response.ok) {
+      // An accepted send is not a delivered one, and this is the only place
+      // the difference is visible before a reader reports it.
+      const warning = quotaWarning(response.headers);
+      if (warning !== undefined) (options.log ?? console.error)(warning);
+      return;
+    }
+
+    // The body is the only place the reason lives. A status alone cannot
+    // tell an unverified domain from a suspended key, and those are
+    // different jobs for whoever reads the log.
+    let code = 'unknown';
+    let detail = '';
+    try {
+      const body = (await response.json()) as Record<string, unknown>;
+      if (typeof body['name'] === 'string') code = body['name'];
+      else if (typeof body['code'] === 'string') code = body['code'];
+      if (typeof body['message'] === 'string') detail = body['message'];
+    } catch {
+      // A refusal with an unreadable body is still a refusal, and the status
+      // is worth more than nothing.
+    }
+    throw new MailRefusedError(response.status, code, detail);
+  }
+
   return {
     async send(email: string, link: string): Promise<void> {
-      const mail = signInMail(link);
-      const response = await call(ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${options.apiKey}`,
-          'user-agent': USER_AGENT,
-        },
-        body: JSON.stringify({
-          from: options.from,
-          to: email,
-          subject: mail.subject,
-          text: mail.text,
-          html: mail.html,
-        }),
-      });
-
-      if (response.ok) {
-        // An accepted send is not a delivered one, and this is the only place
-        // the difference is visible before a reader reports it.
-        const warning = quotaWarning(response.headers);
-        if (warning !== undefined) (options.log ?? console.error)(warning);
-        return;
-      }
-
-      // The body is the only place the reason lives. A status alone cannot
-      // tell an unverified domain from a suspended key, and those are
-      // different jobs for whoever reads the log.
-      let code = 'unknown';
-      let detail = '';
-      try {
-        const body = (await response.json()) as Record<string, unknown>;
-        if (typeof body['name'] === 'string') code = body['name'];
-        else if (typeof body['code'] === 'string') code = body['code'];
-        if (typeof body['message'] === 'string') detail = body['message'];
-      } catch {
-        // A refusal with an unreadable body is still a refusal, and the status
-        // is worth more than nothing.
-      }
-      throw new MailRefusedError(response.status, code, detail);
+      return post(email, signInMail(link));
+    },
+    async sendMail(email: string, mail: OutboundMail): Promise<void> {
+      return post(email, mail);
     },
   };
 }

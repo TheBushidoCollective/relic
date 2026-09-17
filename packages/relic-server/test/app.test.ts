@@ -17,6 +17,7 @@ import {
 } from '../src/app.ts';
 import { memoryAssets } from '../src/assets.ts';
 import { sha256Hex } from '../src/gcs.ts';
+import { MailRefusedError, type OutboundMail } from '../src/mail.ts';
 import { ciphertextHash, MemoryStorage } from '../src/storage.ts';
 import { MemoryStore } from '../src/store.ts';
 
@@ -59,6 +60,8 @@ async function publish(
     size?: number;
     ttlDays?: number;
     title?: string;
+    ownerEmail?: string;
+    owner?: string;
   } = {}
 ): Promise<{ id: string; key: Uint8Array; grant: Record<string, unknown> }> {
   const challengeResponse = await app.fetch(
@@ -84,6 +87,10 @@ async function publish(
         declared_ciphertext_bytes: encryptedSize(options.size ?? 12),
         ...(options.ttlDays === undefined ? {} : { ttl_days: options.ttlDays }),
         ...(options.title === undefined ? {} : { title: options.title }),
+        ...(options.ownerEmail === undefined
+          ? {}
+          : { owner_email: options.ownerEmail }),
+        ...(options.owner === undefined ? {} : { owner: options.owner }),
       }),
     })
   );
@@ -3110,5 +3117,392 @@ describe('GET /dashboard', () => {
   test('non-GET methods on /dashboard return 405 Method Not Allowed', async () => {
     const response = await app.fetch(req('/dashboard', { method: 'POST' }));
     expect(response.status).toBe(405);
+  });
+});
+
+describe('comment notifications', () => {
+  let sentMails: Array<{ email: string; mail: OutboundMail }>;
+  let notifMailer: Mailer;
+
+  async function createSession(
+    email = 'reader@example.com',
+    expiresAt = now + 3600 * 1000
+  ): Promise<string> {
+    const token = `token-${Math.random()}`;
+    const tokenHash = await sha256Hex(token);
+    await app.store.putSession({
+      tokenHash,
+      email,
+      createdAt: now,
+      expiresAt,
+    });
+    return `relic_session=${token}`;
+  }
+
+  beforeEach(() => {
+    sentMails = [];
+    notifMailer = {
+      async send(email, link) {
+        sentMails.push({
+          email,
+          mail: { subject: 'link', text: link, html: link },
+        });
+      },
+      async sendMail(email, mail) {
+        sentMails.push({ email, mail });
+      },
+    };
+    app = build({ mailer: notifMailer });
+  });
+
+  test('a comment on a relic with a verified owner address mails the owner', async () => {
+    await createSession('owner@example.com');
+    const { id } = await publish({
+      title: 'Roadmap',
+      ownerEmail: 'owner@example.com',
+    });
+    const commenterSession = await createSession('commenter@example.com');
+
+    const response = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: commenterSession },
+        body: JSON.stringify({ ciphertext: 'YWJjZA' }),
+      })
+    );
+    expect(response.status).toBe(201);
+    expect(sentMails).toHaveLength(1);
+    expect(sentMails[0]?.email).toBe('owner@example.com');
+    expect(sentMails[0]?.mail.subject).toBe('New comment on "Roadmap"');
+    expect(sentMails[0]?.mail.text).toContain(
+      'commenter@example.com left a comment on "Roadmap".'
+    );
+    expect(sentMails[0]?.mail.text).toContain(
+      'Open the link you hold for this relic to read and answer the comment.'
+    );
+  });
+
+  test('with no owner address, nothing is sent and the POST still succeeds', async () => {
+    const { id } = await publish();
+    const commenterSession = await createSession('commenter@example.com');
+
+    const response = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: commenterSession },
+        body: JSON.stringify({ ciphertext: 'YWJjZA' }),
+      })
+    );
+    expect(response.status).toBe(201);
+    expect(sentMails).toHaveLength(0);
+  });
+
+  test('a comment carrying a clear addresses mails the addressed comment author', async () => {
+    const { id } = await publish({ title: 'Spec doc' });
+    const alice = await createSession('alice@example.com');
+    const bob = await createSession('bob@example.com');
+
+    const c1Response = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: alice },
+        body: JSON.stringify({ ciphertext: 'YWxpY2Ux' }),
+      })
+    );
+    expect(c1Response.status).toBe(201);
+    const { comment_id: c1Id } = (await c1Response.json()) as {
+      comment_id: string;
+    };
+    sentMails = [];
+
+    const c2Response = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: bob },
+        body: JSON.stringify({
+          ciphertext: 'Ym9iMQ',
+          addresses: c1Id,
+        }),
+      })
+    );
+    expect(c2Response.status).toBe(201);
+    expect(sentMails).toHaveLength(1);
+    expect(sentMails[0]?.email).toBe('alice@example.com');
+    expect(sentMails[0]?.mail.subject).toBe(
+      'Your comment on "Spec doc" was answered'
+    );
+    expect(sentMails[0]?.mail.text).toContain(
+      'bob@example.com answered your comment on "Spec doc".'
+    );
+    expect(sentMails[0]?.mail.text).toContain(
+      'Open the link you hold for this relic to read the reply.'
+    );
+  });
+
+  test('the triggering author is never mailed about their own comment', async () => {
+    await createSession('owner@example.com');
+    const { id, grant } = await publish({
+      title: 'Solo',
+      ownerEmail: 'owner@example.com',
+    });
+    const ownerCookie = await createSession('owner@example.com');
+
+    // Case 1: Owner comments on their own relic
+    const c1 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: ownerCookie },
+        body: JSON.stringify({ ciphertext: 'b3duZXI' }),
+      })
+    );
+    expect(c1.status).toBe(201);
+    expect(sentMails).toHaveLength(0);
+
+    // Case 2: Publisher comments with publish token on relic with ownerEmail
+    const c2 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ciphertext: 'cHVibGlzaGVy',
+          publish_token: grant['publish_token'],
+        }),
+      })
+    );
+    expect(c2.status).toBe(201);
+    expect(sentMails).toHaveLength(0);
+
+    // Case 3: Author addresses their own earlier comment
+    const alice = await createSession('alice@example.com');
+    const c3 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: alice },
+        body: JSON.stringify({ ciphertext: 'YWxpY2Ux' }),
+      })
+    );
+    const { comment_id: aliceC1Id } = (await c3.json()) as {
+      comment_id: string;
+    };
+    sentMails = [];
+
+    const c4 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: alice },
+        body: JSON.stringify({
+          ciphertext: 'YWxpY2Uy',
+          addresses: aliceC1Id,
+        }),
+      })
+    );
+    expect(c4.status).toBe(201);
+    expect(sentMails.some((m) => m.email === 'alice@example.com')).toBe(false);
+  });
+
+  test('the window collapses repeats and the cap holds', async () => {
+    await createSession('owner@example.com');
+    const { id } = await publish({
+      title: 'Active Thread',
+      ownerEmail: 'owner@example.com',
+    });
+    const commenter = await createSession('commenter@example.com');
+
+    // First comment at t=0: sends notification #1
+    const res1 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: commenter },
+        body: JSON.stringify({ ciphertext: 'Y29tbWVudDE' }),
+      })
+    );
+    expect(res1.status).toBe(201);
+    expect(sentMails).toHaveLength(1);
+
+    // Second comment 5 seconds later (well within 10-minute window): collapsed
+    now += 5000;
+    const res2 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: commenter },
+        body: JSON.stringify({ ciphertext: 'Y29tbWVudDI' }),
+      })
+    );
+    expect(res2.status).toBe(201);
+    expect(sentMails).toHaveLength(1);
+
+    // Third comment 10 seconds later: still collapsed
+    now += 10_000;
+    const res3 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: commenter },
+        body: JSON.stringify({ ciphertext: 'Y29tbWVudDM' }),
+      })
+    );
+    expect(res3.status).toBe(201);
+    expect(sentMails).toHaveLength(1);
+
+    // Advance time past the 10-minute window (600s + 1s = 601s)
+    now += 601_000;
+    const res4 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: commenter },
+        body: JSON.stringify({ ciphertext: 'Y29tbWVudDQ' }),
+      })
+    );
+    expect(res4.status).toBe(201);
+    expect(sentMails).toHaveLength(2);
+  });
+
+  test('an unverified owner address is refused at publish with a message naming sign-in', async () => {
+    const challengeRes = await app.fetch(
+      req('/api/challenge', { method: 'POST' })
+    );
+    const { challenge_nonce } = (await challengeRes.json()) as {
+      challenge_nonce: string;
+    };
+    const id = generateRelicId();
+
+    const refused = await app.fetch(
+      req('/api/grant', {
+        method: 'POST',
+        body: JSON.stringify({
+          challenge_nonce,
+          relic_id: id,
+          renderer_class: 'markdown',
+          publishing_client: 'relic-mcp/0.1.0 (test)',
+          declared_size_bytes: 12,
+          declared_ciphertext_bytes: encryptedSize(12),
+          owner_email: 'unverified@example.com',
+        }),
+      })
+    );
+    expect(refused.status).toBe(400);
+    const body = (await refused.json()) as { code: string; detail?: string };
+    expect(body.code).toBe('invalid_publish_metadata');
+    expect(body.detail?.toLowerCase()).toContain('sign in');
+
+    // Republish attempt with unverified address
+    const { id: validId, grant } = await publish();
+    const token = grant['publish_token'] as string;
+    const republishRefused = await app.fetch(
+      req(`/api/relics/${validId}/republish`, {
+        method: 'POST',
+        body: JSON.stringify({
+          publish_token: token,
+          renderer_class: 'markdown',
+          declared_size_bytes: 12,
+          declared_ciphertext_bytes: encryptedSize(12),
+          owner_email: 'unverified@example.com',
+        }),
+      })
+    );
+    expect(republishRefused.status).toBe(400);
+    const republishBody = (await republishRefused.json()) as {
+      code: string;
+      detail?: string;
+    };
+    expect(republishBody.code).toBe('invalid_publish_metadata');
+    expect(republishBody.detail?.toLowerCase()).toContain('sign in');
+  });
+
+  test('a provider refusal leaves the POST at its normal status', async () => {
+    const failingMailer: Mailer = {
+      async send() {
+        throw new MailRefusedError(
+          403,
+          'validation_error',
+          'domain unverified'
+        );
+      },
+      async sendMail() {
+        throw new MailRefusedError(
+          403,
+          'validation_error',
+          'domain unverified'
+        );
+      },
+    };
+    app = build({ mailer: failingMailer });
+
+    await createSession('owner@example.com');
+    const { id } = await publish({
+      title: 'Robust',
+      ownerEmail: 'owner@example.com',
+    });
+    const commenter = await createSession('commenter@example.com');
+
+    const response = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: commenter },
+        body: JSON.stringify({ ciphertext: 'YWJjZA' }),
+      })
+    );
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      comment_id: string;
+      author: string;
+    };
+    expect(body.author).toBe('commenter@example.com');
+    expect(await app.store.listComments(id)).toHaveLength(1);
+  });
+
+  test('the rendered body carries no body text, no fragment, and no key', async () => {
+    const rawKey = generateKey();
+    const commentKey = await deriveCommentKey(rawKey);
+    const commentBodyText = 'very-confidential-remark-inside-aead';
+    const sealed = await encryptComment(commentKey, {
+      body: commentBodyText,
+      display_name: 'Reporter',
+      anchor: null,
+      addresses: null,
+    });
+    await createSession('owner@example.com');
+    const { id } = await publish({
+      title: 'Confidential Plan',
+      ownerEmail: 'owner@example.com',
+    });
+    const alice = await createSession('alice@example.com');
+    const bob = await createSession('bob@example.com');
+
+    // Alice comments, triggering owner notification
+    const res1 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: alice },
+        body: JSON.stringify({ ciphertext: sealed }),
+      })
+    );
+    expect(res1.status).toBe(201);
+    const { comment_id: c1Id } = (await res1.json()) as {
+      comment_id: string;
+    };
+
+    // Bob replies, triggering reply notification to Alice
+    const res2 = await app.fetch(
+      req(`/api/relics/${id}/comments`, {
+        method: 'POST',
+        headers: { cookie: bob },
+        body: JSON.stringify({
+          ciphertext: sealed,
+          addresses: c1Id,
+        }),
+      })
+    );
+    expect(res2.status).toBe(201);
+
+    expect(sentMails.length).toBeGreaterThanOrEqual(2);
+    for (const { mail } of sentMails) {
+      expect(mail.text).not.toContain(commentBodyText);
+      expect(mail.html).not.toContain(commentBodyText);
+      expect(mail.text).not.toContain('#');
+      expect(mail.html).not.toContain('#');
+      expect(mail.text).not.toContain(rawKey.toString());
+      expect(mail.html).not.toContain(rawKey.toString());
+      expect(mail.text).not.toContain('fragment');
+      expect(mail.html).not.toContain('fragment');
+    }
   });
 });

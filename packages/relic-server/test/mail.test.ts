@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  commentNotificationMail,
   MailRefusedError,
   mailerFromEnv,
   quotaWarning,
+  replyNotificationMail,
   resendMailer,
   signInMail,
 } from '../src/mail.ts';
@@ -117,6 +119,97 @@ describe('the sign-in mail', () => {
     expect(mail.html).toContain('&quot;');
   });
 });
+describe('the comment notification mail', () => {
+  test('names the title and commenter when title is present', () => {
+    const mail = commentNotificationMail(
+      'Q3 Strategy Brief',
+      'ada@example.com'
+    );
+    expect(mail.subject).toBe('New comment on "Q3 Strategy Brief"');
+    expect(mail.text).toContain(
+      'ada@example.com left a comment on "Q3 Strategy Brief".'
+    );
+    expect(mail.text).toContain(
+      'Open the link you hold for this relic to read and answer the comment.'
+    );
+    expect(mail.text).toContain('Relic does not store the decryption key');
+    expect(mail.html).toContain('ada@example.com');
+    expect(mail.html).toContain('<strong>Q3 Strategy Brief</strong>');
+    expect(mail.html).toContain('Relic does not store the decryption key');
+  });
+
+  test('uses fallback phrasing when title is absent', () => {
+    const mail = commentNotificationMail(undefined, 'ada@example.com');
+    expect(mail.subject).toBe('New comment on your relic');
+    expect(mail.text).toContain(
+      'ada@example.com left a comment on your relic.'
+    );
+    expect(mail.html).toContain('your relic');
+  });
+
+  test('escapes HTML in title and commenter', () => {
+    const mail = commentNotificationMail(
+      '<script>alert("xss")</script>',
+      'b"o&b<x>@example.com'
+    );
+    expect(mail.html).not.toContain('<script>');
+    expect(mail.html).toContain('&lt;script&gt;');
+    expect(mail.html).toContain('&amp;');
+    expect(mail.html).toContain('&quot;');
+  });
+
+  test('carries no comment body, no fragment, and no key', () => {
+    const mail = commentNotificationMail('Notes', 'ada@example.com');
+    expect(mail.text).not.toContain('#');
+    expect(mail.html).not.toContain('#');
+    expect(mail.text).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+});
+
+describe('the reply notification mail', () => {
+  test('names the title and replier when title is present', () => {
+    const mail = replyNotificationMail('Q3 Strategy Brief', 'publisher');
+    expect(mail.subject).toBe(
+      'Your comment on "Q3 Strategy Brief" was answered'
+    );
+    expect(mail.text).toContain(
+      'publisher answered your comment on "Q3 Strategy Brief".'
+    );
+    expect(mail.text).toContain(
+      'Open the link you hold for this relic to read the reply.'
+    );
+    expect(mail.html).toContain('publisher');
+    expect(mail.html).toContain('<strong>Q3 Strategy Brief</strong>');
+  });
+
+  test('uses fallback phrasing when title is absent', () => {
+    const mail = replyNotificationMail(undefined, 'bob@example.com');
+    expect(mail.subject).toBe('Your comment on a relic was answered');
+    expect(mail.text).toContain(
+      'bob@example.com answered your comment on a relic.'
+    );
+    expect(mail.html).toContain('a relic');
+  });
+
+  test('escapes HTML in title and replier', () => {
+    const mail = replyNotificationMail(
+      '<img src=x onerror=1>',
+      'bob<script>@example.com'
+    );
+    expect(mail.html).not.toContain('<img');
+    expect(mail.html).not.toContain('<script>');
+    expect(mail.html).toContain('&lt;img');
+  });
+
+  test('carries no comment body, no fragment, and no key', () => {
+    const mail = replyNotificationMail('Notes', 'bob@example.com');
+    expect(mail.text).not.toContain('#');
+    expect(mail.html).not.toContain('#');
+    expect(mail.text).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+});
 
 describe('sending through Resend', () => {
   test('the request is the documented one', async () => {
@@ -199,6 +292,24 @@ describe('sending through Resend', () => {
       expect(error.status).toBe(502);
       expect(error.code).toBe('unknown');
     });
+  });
+  test('sendMail sends custom outbound mail through the wire', async () => {
+    const wire = recorder(accepted());
+    const mailer = resendMailer({
+      apiKey: 're_test_key',
+      from: 'Relic <no-reply@relik.link>',
+      fetch: wire.fetch,
+    });
+    const notification = commentNotificationMail('Report', 'ada@example.com');
+    await mailer.sendMail?.('creator@example.com', notification);
+
+    const call = wire.calls[0];
+    if (call === undefined) throw new Error('nothing was sent');
+    expect(call.url).toBe('https://api.resend.com/emails');
+    const body = JSON.parse(String(call.init.body)) as Record<string, unknown>;
+    expect(body['to']).toBe('creator@example.com');
+    expect(body['subject']).toBe('New comment on "Report"');
+    expect(String(body['text'])).toContain('ada@example.com left a comment');
   });
 });
 
