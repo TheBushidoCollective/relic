@@ -7,15 +7,18 @@
  * and under the swipe, where the panes are overlaid and clipped, the revealed
  * strip shows a different part of the document than the strip it covers.
  *
- * The mapping is proportional rather than pixel for pixel, because the two
- * sides are different documents. A version that gained a section is taller
- * than the one it is compared against, so mirroring pixels runs one pane out
- * of scroll while the other still has room, and the ends never line up.
- * Proportional keeps the top at the top and the bottom at the bottom, which
- * is the best correspondence available: the tree diff reports which nodes
- * changed, not a line-by-line alignment between the two renders, so there is
- * nothing to anchor a smarter mapping to.
+ * The tree diff now supplies the smarter mapping this originally said did not
+ * exist: one id shared by the two changed nodes it paired. Where a paired mark
+ * is visible, that exact content lands at the same viewport top on both sides.
+ * Between paired regions the mapping stays proportional rather than pixel for
+ * pixel, because the two sides are different documents. A version that gained
+ * a section is taller than the one it is compared against, so mirroring pixels
+ * runs one pane out of scroll while the other still has room. Proportional is
+ * also the fallback near either end, where putting a landmark at the requested
+ * top can be physically impossible and the start and end invariants win.
  */
+
+import type { ScrollLandmark, ScrollPosition } from './scroll-landmark.ts';
 
 /** A scroll container, narrowed to what syncing actually reads and writes. */
 export interface Scroller {
@@ -24,6 +27,14 @@ export interface Scroller {
   readonly clientHeight: number;
   addEventListener(type: 'scroll', listener: () => void): void;
   removeEventListener(type: 'scroll', listener: () => void): void;
+}
+
+/** Optional content-aware mapping layered over the proportional fallback. */
+export interface LandmarkSync<T extends Scroller> {
+  /** Nearest paired mark in the pane the reader moved. */
+  read(pane: T): ScrollLandmark | undefined;
+  /** True when this pane had the same mark and handled the position. */
+  apply(pane: T, landmark: ScrollLandmark): boolean;
 }
 
 /** How far down its own travel a scroller sits, or null when it cannot move. */
@@ -62,8 +73,8 @@ const SETTLED_PIXELS = 1;
  * ignored while it does, and writes are coalesced to one per frame because a
  * scroll gesture fires far more often than a browser paints.
  */
-export function syncScrollers(
-  panes: readonly Scroller[],
+export function syncScrollers<T extends Scroller>(
+  panes: readonly T[],
   schedule: (run: () => void) => void = (run) => {
     if (
       typeof window !== 'undefined' &&
@@ -75,11 +86,12 @@ export function syncScrollers(
     } else {
       setTimeout(run, 0);
     }
-  }
+  },
+  landmarks?: LandmarkSync<T>
 ): () => void {
   if (panes.length < 2) return () => {};
 
-  let driver: Scroller | undefined;
+  let driver: T | undefined;
   let queued = false;
 
   const follow = (): void => {
@@ -95,9 +107,19 @@ export function syncScrollers(
       const fraction = scrollFraction(leader);
       if (fraction === null) return;
       const bounded = Math.min(Math.max(fraction, 0), 1);
+      const landmark = landmarks?.read(leader);
 
       for (const pane of panes) {
         if (pane === leader) continue;
+        // A paired changed node is the exact correspondence the visual diff
+        // already established. A missing pair is not an error: additions,
+        // deletions and stretches between changes use the fraction below.
+        if (
+          landmark !== undefined &&
+          landmarks?.apply(pane, landmark) === true
+        ) {
+          continue;
+        }
         const travel = pane.scrollHeight - pane.clientHeight;
         if (!(travel > 0)) continue;
         const target = Math.round(bounded * travel);
@@ -139,7 +161,7 @@ export function syncScrollers(
  * and commands across an opaque origin boundary.
  */
 export interface FrameScroller {
-  setScrollFraction(fraction: number): void;
+  setScrollPosition(position: ScrollPosition): void;
   addEventListener(type: string, listener: (event: Event) => void): void;
   removeEventListener(type: string, listener: (event: Event) => void): void;
 }
@@ -153,12 +175,30 @@ export interface FrameScroller {
  */
 const SETTLED_FRACTION = 0.001;
 
+function positionsMatch(
+  first: ScrollPosition,
+  second: ScrollPosition,
+  tolerance = 1
+): boolean {
+  if (
+    first.landmark !== undefined &&
+    second.landmark !== undefined &&
+    first.landmark.id === second.landmark.id
+  ) {
+    return Math.abs(first.landmark.top - second.landmark.top) <= tolerance;
+  }
+  return (
+    Math.abs(first.fraction - second.fraction) < SETTLED_FRACTION * tolerance
+  );
+}
+
 /**
  * Bind sandboxed frame scrollers so that scrolling any one moves the other
- * to the same relative position. Returns a teardown that unbinds every listener.
+ * to the same paired content position, with relative fraction as the fallback.
+ * Returns a teardown that unbinds every listener.
  *
- * Like `syncScrollers`, this maintains proportional mapping and guards against
- * reciprocal feedback. Because postMessage is asynchronous across the opaque
+ * Like `syncScrollers`, this prefers paired content, retains proportional
+ * mapping as the fallback, and guards against reciprocal feedback. Because postMessage is asynchronous across the opaque
  * frame boundary, the feedback guard tracks both the active driver during frame
  * scheduling and the expected echo fraction sent to each follower.
  */
@@ -180,55 +220,58 @@ export function syncFrameScrollers(
   if (panes.length < 2) return () => {};
 
   let driver: FrameScroller | undefined;
-  let latestFraction: number | null = null;
+  let latestPosition: ScrollPosition | null = null;
   let queued = false;
-  const expectedEchoes = new Map<FrameScroller, number>();
+  const expectedEchoes = new Map<FrameScroller, ScrollPosition>();
 
   const follow = (): void => {
     queued = false;
     const leader = driver;
-    const fraction = latestFraction;
-    if (leader === undefined || fraction === null) return;
+    const position = latestPosition;
+    if (leader === undefined || position === null) return;
 
     try {
-      const bounded = Math.min(Math.max(fraction, 0), 1);
+      const bounded: ScrollPosition = {
+        fraction: Math.min(Math.max(position.fraction, 0), 1),
+        ...(position.landmark === undefined
+          ? {}
+          : { landmark: position.landmark }),
+      };
 
       for (const pane of panes) {
         if (pane === leader) continue;
         const lastSent = expectedEchoes.get(pane);
-        if (
-          lastSent !== undefined &&
-          Math.abs(lastSent - bounded) < SETTLED_FRACTION
-        ) {
+        if (lastSent !== undefined && positionsMatch(lastSent, bounded))
           continue;
-        }
         expectedEchoes.set(pane, bounded);
-        pane.setScrollFraction(bounded);
+        pane.setScrollPosition(bounded);
       }
     } finally {
       driver = undefined;
-      latestFraction = null;
+      latestPosition = null;
     }
   };
 
   const bound = panes.map((pane) => {
     const listener = (event: Event): void => {
-      const frac = (event as CustomEvent<{ fraction?: number }>).detail
-        ?.fraction;
+      const detail = (event as CustomEvent<Partial<ScrollPosition>>).detail;
+      const frac = detail?.fraction;
       if (typeof frac !== 'number' || !Number.isFinite(frac)) return;
+      const landmark = detail.landmark;
+      const position: ScrollPosition = {
+        fraction: frac,
+        ...(landmark === undefined ? {} : { landmark }),
+      };
 
       // An echo from a programmatic write to this follower is not a reader gesture.
       const expected = expectedEchoes.get(pane);
-      if (
-        expected !== undefined &&
-        Math.abs(frac - expected) < SETTLED_FRACTION * 5
-      ) {
+      if (expected !== undefined && positionsMatch(expected, position, 5)) {
         expectedEchoes.delete(pane);
         return;
       }
       expectedEchoes.delete(pane);
       driver = pane;
-      latestFraction = frac;
+      latestPosition = position;
       if (queued) return;
       queued = true;
       schedule(follow);

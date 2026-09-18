@@ -16,10 +16,17 @@ import {
 import { renderCodeComparison, renderRenderedComparison } from '../src/main.ts';
 import {
   applyDocumentScrollFraction,
+  applyDocumentScrollPosition,
   createSandboxHandler,
   documentScrollFraction,
+  documentScrollPosition,
   setupFrameInteraction,
 } from '../src/sandbox.ts';
+import {
+  landmarkScrollDelta,
+  nearestScrollLandmark,
+  type ScrollLandmark,
+} from '../src/scroll-landmark.ts';
 import {
   applyScrollFraction,
   type FrameScroller,
@@ -71,17 +78,25 @@ class FrameScrollerStub implements FrameScroller {
   private fraction = 0;
   private readonly listeners: ((event: Event) => void)[] = [];
   readonly writes: number[] = [];
+  readonly positionWrites: {
+    fraction: number;
+    landmark?: { id: string; top: number };
+  }[] = [];
 
   get currentFraction(): number {
     return this.fraction;
   }
 
-  setScrollFraction(fraction: number): void {
-    this.fraction = fraction;
-    this.writes.push(fraction);
+  setScrollPosition(position: {
+    fraction: number;
+    landmark?: { id: string; top: number };
+  }): void {
+    this.fraction = position.fraction;
+    this.writes.push(position.fraction);
+    this.positionWrites.push(position);
   }
 
-  emitScroll(fraction: number): void {
+  emitScroll(fraction: number, landmark?: { id: string; top: number }): void {
     this.fraction = fraction;
     // A plain object rather than `new CustomEvent`. Bun's test runtime has no
     // DOM: this passed locally only because another test file registers DOM
@@ -90,7 +105,7 @@ class FrameScrollerStub implements FrameScroller {
     // `detail` and nothing else, so the shape is the whole contract.
     const event = {
       type: 'relic:frame-scroll',
-      detail: { fraction },
+      detail: { fraction, ...(landmark === undefined ? {} : { landmark }) },
     } as unknown as Event;
     for (const listener of [...this.listeners]) listener(event);
   }
@@ -429,6 +444,37 @@ describe('applyScrollFraction', () => {
   });
 });
 
+describe('paired scroll landmarks', () => {
+  const node = (id: string, top: number, height = 40) => ({
+    getAttribute: (name: string) => (name === 'data-relic-sync-id' ? id : null),
+    getBoundingClientRect: () => ({ top, bottom: top + height }),
+  });
+
+  test('selects the paired mark nearest the viewport top', () => {
+    const root = {
+      querySelectorAll: () => [
+        node('d0', -180, 30),
+        node('d1', 96, 50),
+        node('d2', 600, 40),
+      ],
+    };
+    expect(nearestScrollLandmark(root)).toEqual({ id: 'd1', top: 96 });
+  });
+
+  test('a tall container crossing the top does not beat a nearer node top', () => {
+    const root = {
+      querySelectorAll: () => [node('d0', -180, 420), node('d1', 20, 40)],
+    };
+    expect(nearestScrollLandmark(root)).toEqual({ id: 'd1', top: 20 });
+  });
+
+  test('computes the correction from the follower mark, not page height', () => {
+    const root = { querySelectorAll: () => [node('d7', 148, 80)] };
+    expect(landmarkScrollDelta(root, { id: 'd7', top: 103 })).toBe(45);
+    expect(landmarkScrollDelta(root, { id: 'missing', top: 103 })).toBeNull();
+  });
+});
+
 describe('syncScrollers', () => {
   test('scrolling one pane moves the other to the same relative position', () => {
     const frames = manualFrames();
@@ -561,7 +607,76 @@ describe('syncScrollers', () => {
   });
 });
 
+describe('content-aware pane syncing', () => {
+  test('a paired changed node outranks the proportional page fraction', () => {
+    const frames = manualFrames();
+    const left = new ScrollerStub(4000, 1000);
+    const right = new ScrollerStub(6000, 1000);
+    const handled: ScrollLandmark[] = [];
+    syncScrollers([left, right], frames.schedule, {
+      read: () => ({ id: 'd2', top: 84 }),
+      apply: (pane, landmark) => {
+        if (pane !== right) return false;
+        handled.push(landmark);
+        pane.scrollTop = 2316;
+        return true;
+      },
+    });
+
+    left.scrollTop = 1500;
+    frames.flush();
+
+    expect(handled).toEqual([{ id: 'd2', top: 84 }]);
+    expect(right.scrollTop).toBe(2316);
+    // Pure proportional mapping would have put this 184px lower.
+    expect(right.scrollTop).not.toBe(2500);
+  });
+
+  test('missing paired mark falls back to proportional mapping', () => {
+    const frames = manualFrames();
+    const left = new ScrollerStub(4000, 1000);
+    const right = new ScrollerStub(6000, 1000);
+    syncScrollers([left, right], frames.schedule, {
+      read: () => ({ id: 'd9', top: 40 }),
+      apply: () => false,
+    });
+
+    left.scrollTop = 1500;
+    frames.flush();
+    expect(right.scrollTop).toBe(2500);
+  });
+});
+
 describe('syncFrameScrollers', () => {
+  test('forwards the paired landmark with its exact viewport top', () => {
+    const frames = manualFrames();
+    const left = new FrameScrollerStub();
+    const right = new FrameScrollerStub();
+    syncFrameScrollers([left, right], frames.schedule);
+
+    left.emitScroll(0.5, { id: 'd3', top: 112 });
+    frames.flush();
+
+    expect(right.positionWrites).toEqual([
+      { fraction: 0.5, landmark: { id: 'd3', top: 112 } },
+    ]);
+  });
+
+  test('an asynchronous landmark echo does not drive the leader back', () => {
+    const frames = manualFrames();
+    const left = new FrameScrollerStub();
+    const right = new FrameScrollerStub();
+    syncFrameScrollers([left, right], frames.schedule);
+
+    left.emitScroll(0.4, { id: 'd1', top: 90 });
+    frames.flush();
+    right.emitScroll(0.63, { id: 'd1', top: 91 });
+    frames.flush();
+
+    expect(left.positionWrites).toHaveLength(0);
+    expect(right.positionWrites).toHaveLength(1);
+  });
+
   test('scrolling one frame moves the other to the same relative fraction', () => {
     const frames = manualFrames();
     const left = new FrameScrollerStub();
@@ -682,6 +797,27 @@ describe('frame scroll message contract', () => {
     expect(isSetScrollMessage({ type: 'relic:set-scroll', fraction: 1 })).toBe(
       true
     );
+    expect(
+      isSetScrollMessage({
+        type: 'relic:set-scroll',
+        fraction: 0.42,
+        landmark: { id: 'd4', top: 116 },
+      })
+    ).toBe(true);
+    expect(
+      isSetScrollMessage({
+        type: 'relic:set-scroll',
+        fraction: 0.42,
+        landmark: { id: '<script>', top: 116 },
+      })
+    ).toBe(false);
+    expect(
+      isSetScrollMessage({
+        type: 'relic:set-scroll',
+        fraction: 0.42,
+        landmark: { id: 'd4', top: Number.NaN },
+      })
+    ).toBe(false);
 
     expect(isSetScrollMessage(null)).toBe(false);
     expect(isSetScrollMessage(undefined)).toBe(false);
@@ -712,6 +848,20 @@ describe('frame scroll message contract', () => {
     expect(
       isFrameScrollMessage({ type: 'relic:frame-scroll', fraction: 0 })
     ).toBe(true);
+    expect(
+      isFrameScrollMessage({
+        type: 'relic:frame-scroll',
+        fraction: 0.25,
+        landmark: { id: 'd1', top: -18 },
+      })
+    ).toBe(true);
+    expect(
+      isFrameScrollMessage({
+        type: 'relic:frame-scroll',
+        fraction: 0.25,
+        landmark: { id: 'bad', top: -18 },
+      })
+    ).toBe(false);
 
     expect(isFrameScrollMessage(null)).toBe(false);
     expect(isFrameScrollMessage(undefined)).toBe(false);
@@ -726,7 +876,9 @@ describe('frame scroll message contract', () => {
   });
 
   test('sandbox handler processes valid set-scroll message and applies fraction', () => {
-    let receivedFraction = 0;
+    let received:
+      | { fraction: number; landmark?: { id: string; top: number } }
+      | undefined;
     const handle = createSandboxHandler(
       () => {},
       () => {},
@@ -739,16 +891,23 @@ describe('frame scroll message contract', () => {
         onClearMarks: () => {},
         onRevealMark: () => {},
         onPairMark: () => {},
-        onSetScroll: (f) => {
-          receivedFraction = f;
+        onSetScroll: (position) => {
+          received = position;
         },
       }
     );
 
     handle({ type: 'relic:render', html: '<p>ok</p>' });
-    const accepted = handle({ type: 'relic:set-scroll', fraction: 0.75 });
+    const accepted = handle({
+      type: 'relic:set-scroll',
+      fraction: 0.75,
+      landmark: { id: 'd2', top: 88 },
+    });
     expect(accepted).toBe(true);
-    expect(receivedFraction).toBe(0.75);
+    expect(received).toEqual({
+      fraction: 0.75,
+      landmark: { id: 'd2', top: 88 },
+    });
   });
 
   test('sandbox handler rejects malformed set-scroll messages without invoking setScroll', () => {
@@ -805,6 +964,57 @@ describe('frame scroll message contract', () => {
       body: { scrollHeight: 800, scrollTop: 0 },
     } as unknown as Document;
     expect(documentScrollFraction(flatDoc, win)).toBeNull();
+  });
+
+  test('document scroll position aligns the paired mark before fraction', () => {
+    let scrolledTo = 500;
+    const changed = {
+      getAttribute: (name: string) =>
+        name === 'data-relic-sync-id' ? 'd6' : null,
+      getBoundingClientRect: () => ({ top: 170, bottom: 230 }),
+    };
+    const doc = {
+      scrollingElement: {
+        scrollHeight: 4000,
+        clientHeight: 1000,
+        scrollTop: 500,
+      },
+      documentElement: {
+        scrollHeight: 4000,
+        clientHeight: 1000,
+        scrollTop: 500,
+      },
+      body: { scrollHeight: 4000, scrollTop: 500 },
+      querySelectorAll: () => [changed],
+    } as unknown as Document;
+    const win = {
+      innerHeight: 1000,
+      scrollY: 500,
+      scrollTo: (options: { top: number }) => {
+        scrolledTo = options.top;
+      },
+    } as unknown as Window;
+
+    expect(documentScrollPosition(doc, win)).toEqual({
+      fraction: 1 / 6,
+      landmark: { id: 'd6', top: 170 },
+    });
+
+    applyDocumentScrollPosition(doc, win, {
+      fraction: 0.9,
+      landmark: { id: 'd6', top: 112 },
+    });
+    // Exact landmark correction: 500 + (170 - 112). Fraction fallback would
+    // have jumped to 2700 instead.
+    expect(scrolledTo).toBe(558);
+
+    applyDocumentScrollPosition(doc, win, {
+      fraction: 0.9,
+      landmark: { id: 'd6', top: 1000 },
+    });
+    // Putting a mark currently at 170px down at 1000px would need a negative
+    // scroll position. That is impossible, so the ends-safe fallback wins.
+    expect(scrolledTo).toBe(2700);
   });
 
   test('applyDocumentScrollFraction positions document at fraction', () => {
@@ -880,7 +1090,7 @@ describe('frame scroll message contract', () => {
 
     // Programmatic onSetScroll sets position and suppresses echo while timer is pending
     posted.length = 0;
-    interaction.onSetScroll?.(0.75);
+    interaction.onSetScroll?.({ fraction: 0.75 });
     for (const listener of listeners['scroll'] ?? []) listener();
     expect(posted).toHaveLength(0);
 

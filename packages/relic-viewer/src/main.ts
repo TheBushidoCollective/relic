@@ -34,6 +34,11 @@ import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
 import { isFrameScrollMessage } from './frame-scroll.ts';
 import { createMediaPlayer } from './media-player.ts';
+import {
+  landmarkScrollDelta,
+  nearestScrollLandmark,
+  type ScrollPosition,
+} from './scroll-landmark.ts';
 import { syncFrameScrollers, syncScrollers } from './scroll-sync.ts';
 import { localStorageKeyVault } from './vault.ts';
 
@@ -795,7 +800,7 @@ interface FrameHandle {
    * channel is structurally incapable of changing what the document says.
    */
   annotate(marks: readonly Mark[]): void;
-  setScroll(fraction: number): void;
+  setScroll(position: ScrollPosition): void;
 }
 
 /**
@@ -908,8 +913,8 @@ function sandboxFrame(
   return {
     frame,
     annotate: (marks) => post({ type: 'relic:annotate', marks }),
-    setScroll: (fraction: number) =>
-      post({ type: 'relic:set-scroll', fraction }),
+    setScroll: (position: ScrollPosition) =>
+      post({ type: 'relic:set-scroll', ...position }),
   };
 }
 
@@ -1379,7 +1384,37 @@ interface ComparisonPane {
   /** Resolves with the pane's captured tree, or never when it cannot render. */
   readonly tree: Promise<TreeNode>;
   annotate(marks: readonly Mark[]): void;
-  readonly setScroll?: (fraction: number) => void;
+  readonly setScroll?: (position: ScrollPosition) => void;
+}
+
+/** Paired changed node nearest the top of one same-origin pane. */
+function paneScrollLandmark(pane: HTMLElement) {
+  if (typeof pane.getBoundingClientRect !== 'function') return undefined;
+  return nearestScrollLandmark(pane, pane.getBoundingClientRect().top);
+}
+
+/** Align one same-origin pane on the exact paired node, when it has it. */
+function applyPaneScrollLandmark(
+  pane: HTMLElement,
+  landmark: NonNullable<ReturnType<typeof paneScrollLandmark>>
+): boolean {
+  if (typeof pane.getBoundingClientRect !== 'function') return false;
+  const delta = landmarkScrollDelta(
+    pane,
+    landmark,
+    pane.getBoundingClientRect().top
+  );
+  if (delta === null) return false;
+  const travel = pane.scrollHeight - pane.clientHeight;
+  if (!(travel > 0)) return true;
+  const exactTarget = pane.scrollTop + delta;
+  // Near either end the requested viewport top can be physically impossible.
+  // Returning false chooses the proportional fallback, which preserves the
+  // invariant that both documents still meet at their start and end.
+  if (exactTarget < 0 || exactTarget > travel) return false;
+  const target = Math.round(exactTarget);
+  if (Math.abs(pane.scrollTop - target) > 1) pane.scrollTop = target;
+  return true;
 }
 
 /** How long to wait for a frame that renders nothing at all. */
@@ -1515,18 +1550,21 @@ export function renderRenderedComparison(
 
   // The listeners live on the panes, so they go when the stage does.
   if (mode === 'markdown') {
-    syncScrollers([beforePane, afterPane]);
+    syncScrollers([beforePane, afterPane], undefined, {
+      read: paneScrollLandmark,
+      apply: applyPaneScrollLandmark,
+    });
   } else if (before.setScroll !== undefined && after.setScroll !== undefined) {
     syncFrameScrollers([
       {
-        setScrollFraction: before.setScroll,
+        setScrollPosition: before.setScroll,
         addEventListener: (type, listener) =>
           before.element.addEventListener(type, listener),
         removeEventListener: (type, listener) =>
           before.element.removeEventListener(type, listener),
       },
       {
-        setScrollFraction: after.setScroll,
+        setScrollPosition: after.setScroll,
         addEventListener: (type, listener) =>
           after.element.addEventListener(type, listener),
         removeEventListener: (type, listener) =>

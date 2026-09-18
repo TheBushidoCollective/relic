@@ -65,6 +65,11 @@ import {
   isAnnotateMessage,
   type Mark,
 } from './rendered-tree.ts';
+import {
+  landmarkScrollDelta,
+  nearestScrollLandmark,
+  type ScrollPosition,
+} from './scroll-landmark.ts';
 
 export interface RenderMessage {
   readonly type: 'relic:render';
@@ -106,7 +111,7 @@ export interface FrameInteractionHandler {
   onClearMarks(): void;
   onRevealMark(msg: RevealMarkMessage): void;
   onPairMark(id: string, active: boolean): void;
-  onSetScroll?(fraction: number): void;
+  onSetScroll?(position: ScrollPosition): void;
 }
 
 export interface FrameInteraction extends FrameInteractionHandler {
@@ -435,6 +440,78 @@ export function documentScrollFraction(
 }
 
 /** Put the document in a window at a fraction of its travel. */
+function documentScrollTop(doc: Document, win: Window): number {
+  const el = doc.scrollingElement ?? doc.documentElement;
+  return win.scrollY || el?.scrollTop || doc.body?.scrollTop || 0;
+}
+
+function applyDocumentScrollTop(
+  doc: Document,
+  win: Window,
+  target: number
+): void {
+  const el = doc.scrollingElement ?? doc.documentElement;
+  if (!el) return;
+  const scrollHeight = Math.max(
+    el.scrollHeight ?? 0,
+    doc.body?.scrollHeight ?? 0
+  );
+  const clientHeight = win.innerHeight || el.clientHeight || 0;
+  const travel = Math.max(scrollHeight - clientHeight, 0);
+  const bounded = Math.round(Math.min(Math.max(target, 0), travel));
+  const current = documentScrollTop(doc, win);
+  if (Math.abs(current - bounded) <= 1) return;
+  if (typeof win.scrollTo === 'function') {
+    try {
+      win.scrollTo({ top: bounded, behavior: 'instant' as ScrollBehavior });
+    } catch {
+      win.scrollTo(0, bounded);
+    }
+  }
+  if (el.scrollTop !== bounded) el.scrollTop = bounded;
+  if (doc.body && doc.body.scrollTop !== bounded) doc.body.scrollTop = bounded;
+}
+
+/** The frame's exact paired reference plus the proportional fallback. */
+export function documentScrollPosition(
+  doc: Document,
+  win: Window
+): ScrollPosition | null {
+  const fraction = documentScrollFraction(doc, win);
+  if (fraction === null) return null;
+  const landmark = nearestScrollLandmark(doc);
+  return {
+    fraction,
+    ...(landmark === undefined ? {} : { landmark }),
+  };
+}
+
+/** Put a document at a paired mark when it has one, otherwise by fraction. */
+export function applyDocumentScrollPosition(
+  doc: Document,
+  win: Window,
+  position: ScrollPosition
+): void {
+  if (position.landmark !== undefined) {
+    const delta = landmarkScrollDelta(doc, position.landmark);
+    if (delta !== null) {
+      const el = doc.scrollingElement ?? doc.documentElement;
+      const scrollHeight = Math.max(
+        el?.scrollHeight ?? 0,
+        doc.body?.scrollHeight ?? 0
+      );
+      const clientHeight = win.innerHeight || el?.clientHeight || 0;
+      const travel = Math.max(scrollHeight - clientHeight, 0);
+      const exactTarget = documentScrollTop(doc, win) + delta;
+      if (exactTarget >= 0 && exactTarget <= travel) {
+        applyDocumentScrollTop(doc, win, exactTarget);
+        return;
+      }
+    }
+  }
+  applyDocumentScrollFraction(doc, win, position.fraction);
+}
+
 export function applyDocumentScrollFraction(
   doc: Document,
   win: Window,
@@ -450,19 +527,7 @@ export function applyDocumentScrollFraction(
   const travel = scrollHeight - clientHeight;
   if (!(travel > 0)) return;
   const bounded = Math.min(Math.max(fraction, 0), 1);
-  const target = Math.round(bounded * travel);
-  const current = win.scrollY || el.scrollTop || doc.body?.scrollTop || 0;
-  if (Math.abs(current - target) > 1) {
-    if (typeof win.scrollTo === 'function') {
-      try {
-        win.scrollTo({ top: target, behavior: 'instant' as ScrollBehavior });
-      } catch {
-        win.scrollTo(0, target);
-      }
-    }
-    if (el && el.scrollTop !== target) el.scrollTop = target;
-    if (doc.body && doc.body.scrollTop !== target) doc.body.scrollTop = target;
-  }
+  applyDocumentScrollTop(doc, win, bounded * travel);
 }
 
 export function setupFrameInteraction(
@@ -479,9 +544,9 @@ export function setupFrameInteraction(
 
   const handleScroll = (): void => {
     if (suppressScroll) return;
-    const fraction = documentScrollFraction(doc, win);
-    if (fraction === null) return;
-    postOutward({ type: 'relic:frame-scroll', fraction });
+    const position = documentScrollPosition(doc, win);
+    if (position === null) return;
+    postOutward({ type: 'relic:frame-scroll', ...position });
   };
 
   // Guarded because this function is called with a stub window in the frame
@@ -683,10 +748,10 @@ export function setupFrameInteraction(
       }
     },
 
-    onSetScroll(fraction: number) {
+    onSetScroll(position: ScrollPosition) {
       suppressScroll = true;
       clearTimeout(scrollResetTimer);
-      applyDocumentScrollFraction(doc, win, fraction);
+      applyDocumentScrollPosition(doc, win, position);
       scrollResetTimer = win.setTimeout(() => {
         suppressScroll = false;
       }, 50) as unknown as number;
@@ -766,7 +831,10 @@ export function createSandboxHandler(
     }
 
     if (isSetScrollMessage(data)) {
-      interaction?.onSetScroll?.(data.fraction);
+      interaction?.onSetScroll?.({
+        fraction: data.fraction,
+        ...(data.landmark === undefined ? {} : { landmark: data.landmark }),
+      });
       return true;
     }
     return false;
