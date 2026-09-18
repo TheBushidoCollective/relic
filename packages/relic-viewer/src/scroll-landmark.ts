@@ -47,9 +47,11 @@ const LANDMARK_ATTRIBUTE = 'data-relic-sync-id';
 /**
  * Pick the paired mark nearest the viewport's top edge.
  *
- * A mark crossing the edge has distance zero. Otherwise the nearest edge wins,
- * which keeps the preceding change as the reference until the following one
- * is genuinely closer instead of jumping simply because it entered the DOM.
+ * Distance is measured to the node's **top**, which is also the coordinate the
+ * follower aligns. Measuring to the nearest box edge let a tall changed
+ * container spanning the viewport dominate a specific changed sentence whose
+ * top sat just below it; the coordinate used to choose and the coordinate used
+ * to align must be the same.
  */
 export function nearestScrollLandmark(
   root: LandmarkRoot,
@@ -66,14 +68,8 @@ export function nearestScrollLandmark(
     if (id === null || id.length === 0) continue;
     const rect = node.getBoundingClientRect();
     const top = rect.top - viewportTop;
-    const bottom = rect.bottom - viewportTop;
-    const distance = top > 0 ? top : bottom < 0 ? -bottom : 0;
-    if (
-      best === undefined ||
-      distance < best.distance ||
-      (distance === best.distance &&
-        Math.abs(top) < Math.abs(best.landmark.top))
-    ) {
+    const distance = Math.abs(top);
+    if (best === undefined || distance < best.distance) {
       best = { landmark: { id, top }, distance };
     }
   }

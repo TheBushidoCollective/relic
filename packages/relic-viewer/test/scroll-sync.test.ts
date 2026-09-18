@@ -461,11 +461,11 @@ describe('paired scroll landmarks', () => {
     expect(nearestScrollLandmark(root)).toEqual({ id: 'd1', top: 96 });
   });
 
-  test('a mark crossing the viewport top is the exact reference', () => {
+  test('a tall container crossing the top does not beat a nearer node top', () => {
     const root = {
-      querySelectorAll: () => [node('d0', -12, 40), node('d1', 20, 40)],
+      querySelectorAll: () => [node('d0', -180, 420), node('d1', 20, 40)],
     };
-    expect(nearestScrollLandmark(root)).toEqual({ id: 'd0', top: -12 });
+    expect(nearestScrollLandmark(root)).toEqual({ id: 'd1', top: 20 });
   });
 
   test('computes the correction from the follower mark, not page height', () => {
