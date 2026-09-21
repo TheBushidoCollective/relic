@@ -59,6 +59,33 @@ export interface CommentRecord {
   readonly version?: number | null;
   /** Server-supplied clear routing hint. Never authoritative. */
   readonly addresses?: string | null;
+  /**
+   * When the author last replaced the body, or absent if never.
+   *
+   * The service holds one ciphertext per comment, so an edit overwrites and
+   * no earlier text survives anywhere. What the reader is owed in exchange
+   * is the fact that it happened, which is why this is stamped in the clear
+   * beside the author and the creation time the service already holds.
+   */
+  readonly edited_at?: string | null;
+  /** When the comment was marked resolved, and by which address. */
+  readonly resolved_at?: string | null;
+  readonly resolved_by?: string | null;
+}
+
+/**
+ * A comment marked done, and by whom.
+ *
+ * Operator-visible, unlike everything else a comment carries. Resolution is
+ * a state the service has to hold rather than a sentence somebody wrote: it
+ * decides whether a republish is blocked and whether a mark goes quiet, and
+ * both of those are answers the service gives before anything is decrypted.
+ * So the operator learns that a comment was settled and by which address,
+ * and still cannot read a word of what either party said.
+ */
+export interface Resolution {
+  readonly at: string;
+  readonly by: string;
 }
 
 /**
@@ -89,6 +116,10 @@ export type CommentEntry =
       /** The clear routing hint supplied by the server, if any. Never authoritative. */
       readonly clearAddresses?: string | null;
       readonly addressed?: AddressedBy | null;
+      /** Set once the author replaced the body. */
+      readonly editedAt?: string | null;
+      /** Set once somebody marked it done. */
+      readonly resolution?: Resolution | null;
     }
   | {
       readonly kind: 'sealed';
@@ -98,6 +129,10 @@ export type CommentEntry =
       readonly version?: number | null;
       readonly clearAddresses?: string | null;
       readonly addressed?: AddressedBy | null;
+      /** Set once the author replaced the body. */
+      readonly editedAt?: string | null;
+      /** Set once somebody marked it done. */
+      readonly resolution?: Resolution | null;
     }
   | {
       /** Whatever the row did carry. Any of it may be absent. */
@@ -108,6 +143,10 @@ export type CommentEntry =
       readonly version?: number | null;
       readonly clearAddresses?: string | null;
       readonly addressed?: AddressedBy | null;
+      /** Set once the author replaced the body. */
+      readonly editedAt?: string | null;
+      /** Set once somebody marked it done. */
+      readonly resolution?: Resolution | null;
     };
 
 /** The literal author the contract uses for a publish-token comment. */
@@ -280,10 +319,12 @@ export function commentRefusal(code: string): Refusal {
     case 'comment_forbidden':
       return {
         code,
-        headline: 'That comment is not yours to delete',
+        headline: 'That comment is not yours to change',
         detail:
-          'A comment can be removed by whoever wrote it, and by the ' +
-          'operator through the abuse surface. Nothing else.',
+          'A comment is edited, resolved and removed by whoever wrote it. ' +
+          'The publisher of a relic can resolve anything on it with the ' +
+          'token they published with, and the operator can remove the relic ' +
+          'entirely. Nothing else moves a comment.',
         retryable: false,
       };
     case 'comment_not_found':
@@ -291,6 +332,15 @@ export function commentRefusal(code: string): Refusal {
         code,
         headline: 'That comment is already gone',
         detail: 'Somebody removed it, possibly in another tab.',
+        retryable: false,
+      };
+    case 'nothing_to_change':
+      return {
+        code,
+        headline: 'That change was empty',
+        detail:
+          'A change carries new text, a resolution, or both. An empty one ' +
+          'is refused rather than stamped as an edit that altered nothing.',
         retryable: false,
       };
     case 'service_paused':
@@ -379,6 +429,21 @@ function stringField(value: unknown, name: string): string | null {
 }
 
 /**
+ * The resolution off a row, or null.
+ *
+ * Both halves are required together. A row claiming to be resolved by
+ * nobody, or at no time, is a half-written state, and showing a comment as
+ * settled on the strength of one field would be repeating a claim the row
+ * does not actually make.
+ */
+function resolutionOf(record: unknown): Resolution | null {
+  const at = stringField(record, 'resolved_at');
+  const by = stringField(record, 'resolved_by');
+  if (at === null || by === null) return null;
+  return { at, by };
+}
+
+/**
  * A row this page cannot read, reported with whatever it did carry.
  *
  * It counts in the total, which is the point: the reader is told the thread
@@ -399,6 +464,8 @@ function unreadableEntry(record: unknown): CommentEntry {
     createdAt: stringField(record, 'created_at'),
     version,
     clearAddresses: stringField(record, 'addresses'),
+    editedAt: stringField(record, 'edited_at'),
+    resolution: resolutionOf(record),
   };
 }
 
@@ -523,6 +590,8 @@ export async function openEntry(
 ): Promise<CommentEntry> {
   const version = typeof record.version === 'number' ? record.version : null;
   const clearAddresses = stringField(record, 'addresses');
+  const editedAt = stringField(record, 'edited_at');
+  const resolution = resolutionOf(record);
   try {
     const plaintext = await cipher.open(record.ciphertext);
     return {
@@ -539,6 +608,8 @@ export async function openEntry(
       version,
       addresses: plaintext.addresses ?? null,
       clearAddresses,
+      editedAt,
+      resolution,
     };
   } catch (error) {
     // `format.md` 3.13 gives a decrypt failure no cause, and a malformed
@@ -558,6 +629,8 @@ export async function openEntry(
       createdAt: record.created_at,
       version,
       clearAddresses,
+      editedAt,
+      resolution,
     };
   }
 }
@@ -603,6 +676,27 @@ export async function loadThread(
 }
 
 /**
+ * What is wrong with a draft, before anything is encrypted.
+ *
+ * Shared by posting and editing rather than written twice, because two
+ * copies of a cap drift and the reader meets the difference as one path
+ * refusing what the other accepted.
+ */
+function draftRefusal(draft: CommentPlaintext): Refusal | undefined {
+  if (draft.body.trim().length === 0) return commentRefusal('empty_body');
+  if (utf8Bytes(draft.body) > MAX_BODY_BYTES) {
+    return commentRefusal('body_too_large');
+  }
+  if (
+    draft.display_name !== null &&
+    utf8Bytes(draft.display_name) > MAX_DISPLAY_NAME_BYTES
+  ) {
+    return commentRefusal('display_name_too_long');
+  }
+  return undefined;
+}
+
+/**
  * Post one comment.
  *
  * The plaintext is capped here, before encryption, because the cap is on what
@@ -617,21 +711,8 @@ export async function postComment(
   cipher: CommentCipher,
   version?: number
 ): Promise<PostResult> {
-  if (draft.body.trim().length === 0) {
-    return { kind: 'refused', refusal: commentRefusal('empty_body') };
-  }
-  if (utf8Bytes(draft.body) > MAX_BODY_BYTES) {
-    return { kind: 'refused', refusal: commentRefusal('body_too_large') };
-  }
-  if (
-    draft.display_name !== null &&
-    utf8Bytes(draft.display_name) > MAX_DISPLAY_NAME_BYTES
-  ) {
-    return {
-      kind: 'refused',
-      refusal: commentRefusal('display_name_too_long'),
-    };
-  }
+  const invalid = draftRefusal(draft);
+  if (invalid !== undefined) return { kind: 'refused', refusal: invalid };
 
   const ciphertext = await cipher.seal(draft);
   let response: Response;
@@ -672,6 +753,159 @@ export async function postComment(
   // `created_at` here would put a number on the page that no row holds.
   return { kind: 'posted', author: body.author };
 }
+
+/** One comment's own URL, for the writes that address a single row. */
+function commentUrl(
+  origin: string,
+  relicId: string,
+  commentId: string
+): string {
+  return `${commentsUrl(origin, relicId)}/${encodeURIComponent(commentId)}`;
+}
+
+export type EditResult =
+  | { readonly kind: 'edited' }
+  | { readonly kind: 'refused'; readonly refusal: Refusal };
+
+/**
+ * Replace the text of a comment already posted.
+ *
+ * The whole plaintext is re-sealed, so the caller hands back the anchor it
+ * already had: an edit changes what a remark says and never where it points.
+ * Moving a mark under an existing conversation would leave every reply
+ * answering something the reader can no longer see.
+ *
+ * There is no history. The service holds one ciphertext per comment and this
+ * overwrites it, which is why the row carries `edited_at` and the thread
+ * says so: the honest thing on offer is not the old text, it is the fact
+ * that the text on screen is not the text that was posted.
+ */
+export async function editComment(
+  relicId: string,
+  commentId: string,
+  draft: CommentPlaintext,
+  deps: ViewerDeps,
+  cipher: CommentCipher
+): Promise<EditResult> {
+  const invalid = draftRefusal(draft);
+  if (invalid !== undefined) return { kind: 'refused', refusal: invalid };
+
+  const ciphertext = await cipher.seal(draft);
+  let response: Response;
+  try {
+    response = await deps.fetch(
+      commentUrl(deps.serviceOrigin, relicId, commentId),
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ciphertext }),
+      }
+    );
+  } catch {
+    return { kind: 'refused', refusal: commentRefusal('network') };
+  }
+  if (!response.ok) {
+    return { kind: 'refused', refusal: await refusalFrom(response) };
+  }
+  return { kind: 'edited' };
+}
+
+export type ResolveResult =
+  | { readonly kind: 'changed' }
+  | { readonly kind: 'refused'; readonly refusal: Refusal };
+
+/**
+ * Mark a comment settled, or open it again.
+ *
+ * Unlike the body, this is not encrypted, and it cannot be: it decides
+ * whether a republish is blocked and the service answers that before any
+ * key exists on its side. The disclosure is the price, and it is stated at
+ * the control rather than buried here.
+ */
+export async function setCommentResolved(
+  relicId: string,
+  commentId: string,
+  resolved: boolean,
+  deps: ViewerDeps
+): Promise<ResolveResult> {
+  let response: Response;
+  try {
+    response = await deps.fetch(
+      commentUrl(deps.serviceOrigin, relicId, commentId),
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolved }),
+      }
+    );
+  } catch {
+    return { kind: 'refused', refusal: commentRefusal('network') };
+  }
+  if (!response.ok) {
+    return { kind: 'refused', refusal: await refusalFrom(response) };
+  }
+  return { kind: 'changed' };
+}
+
+/**
+ * Whether this reader may replace this comment's text.
+ *
+ * The page's copy of the service's rule, and it decides only whether the
+ * control is offered. The service decides whether the write lands. Offering
+ * it to everybody would not make an edit possible, it would make a refusal
+ * surprising, and a reader who cannot act on a button has been told
+ * something untrue about their own standing.
+ *
+ * A sealed comment is excluded because there is nothing to edit: this page
+ * cannot open the text, so it cannot hand back a sealed copy of it either.
+ */
+export function canEditComment(
+  entry: CommentEntry,
+  session: SessionState
+): boolean {
+  if (entry.kind !== 'open') return false;
+  if (session.kind !== 'verified') return false;
+  return entry.author === session.email;
+}
+
+/**
+ * Whether this reader may settle this comment.
+ *
+ * The same authorship rule, and deliberately not a publisher rule. The
+ * service does let a publish token resolve anything on its own relic, but a
+ * publish token lives on the machine that published and never in a browser,
+ * so a page cannot hold one and must not pretend otherwise. The publisher's
+ * route is their agent.
+ *
+ * A sealed comment is included: settling a remark you wrote does not require
+ * this browser to be able to read it back.
+ */
+export function canResolveComment(
+  entry: CommentEntry,
+  session: SessionState
+): boolean {
+  if (entry.kind === 'unreadable') return false;
+  if (session.kind !== 'verified') return false;
+  return entry.author === session.email;
+}
+
+/** Said beside a comment whose text was replaced after it was posted. */
+export const EDITED_LABEL = 'edited';
+
+/** Said on a comment somebody marked settled. */
+export function resolvedLabel(resolution: Resolution): string {
+  return `Resolved by ${plainLabel(resolution.by)}`;
+}
+
+/**
+ * The disclosure carried by the resolve control.
+ *
+ * Every other thing a comment holds is sealed, so the one that is not has to
+ * say so where it is used rather than in a document nobody opens.
+ */
+export const RESOLUTION_DISCLOSURE =
+  'Resolving is not encrypted: Relic records that this comment was settled ' +
+  'and which address settled it, though not a word of what it says.';
 
 /**
  * How a comment's time reads.

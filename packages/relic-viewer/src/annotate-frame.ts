@@ -125,11 +125,75 @@ export function isValidAnchorRect(data: unknown): data is AnchorRect {
 // Outward messages (Frame -> Parent)
 // ---------------------------------------------------------------------------
 
+/**
+ * A box in the frame's own client coordinates.
+ *
+ * The parent positions its own popover over the frame, so the frame reports
+ * where a thing is and never what was said about it. That split is the whole
+ * reason this type exists: a comment's plaintext must not cross into an
+ * origin that runs the relic's code, and geometry is the only part of the
+ * conversation that has to.
+ *
+ * `left` and `top` may be negative, because a mark scrolled above the frame's
+ * viewport still has a position. The magnitude is bounded because these
+ * numbers are written onto style properties on the other side.
+ */
+export interface FrameRect {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** Far past any real viewport, and short of anything that breaks layout. */
+export const FRAME_RECT_LIMIT_PX = 100_000;
+
+export function isFrameRect(data: unknown): data is FrameRect {
+  if (typeof data !== 'object' || data === null) return false;
+  const rect = data as Record<string, unknown>;
+  for (const key of ['left', 'top', 'width', 'height']) {
+    const value = rect[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+    if (Math.abs(value) > FRAME_RECT_LIMIT_PX) return false;
+  }
+  const width = rect.width as number;
+  const height = rect.height as number;
+  return width >= 0 && height >= 0;
+}
+
+/**
+ * Longest selection the frame hands over for copying.
+ *
+ * The quote stored on a mark is capped at 512 bytes because a selection is
+ * not a document. Copying has no such excuse: a reader who selected four
+ * paragraphs and pressed Copy wants four paragraphs, and handing back the
+ * first 512 bytes would be a silent lie about what they copied. This cap is
+ * a transport bound rather than an editorial one, and a selection past it
+ * arrives flagged so the parent can decline to offer Copy instead of
+ * offering a truncated one.
+ */
+export const FRAME_SELECTION_TEXT_LIMIT_BYTES = 64 * 1024;
+
 export interface FrameSelectionMessage {
   readonly type: 'relic:frame-selection';
   readonly exact: string;
   readonly prefix?: string;
   readonly suffix?: string;
+  /**
+   * Where the selection sits in the frame, so the parent can offer its
+   * actions over the words rather than in a sidebar the reader is not
+   * looking at. Optional, because a selection that cannot be measured is
+   * still a selection worth aiming a comment at.
+   */
+  readonly rect?: FrameRect;
+  /**
+   * The selected text in full, for Copy. Distinct from `exact`, which is the
+   * capped quote that goes on the mark: copying the mark's quote would hand
+   * back less than was selected without saying so.
+   */
+  readonly text?: string;
+  /** The selection ran past the transport cap, so `text` is not all of it. */
+  readonly truncated?: boolean;
 }
 
 export function isFrameSelectionMessage(
@@ -161,7 +225,39 @@ export function isFrameSelectionMessage(
   ) {
     return false;
   }
+  if (msg.rect !== undefined && !isFrameRect(msg.rect)) return false;
+  if (
+    msg.text !== undefined &&
+    (typeof msg.text !== 'string' ||
+      new TextEncoder().encode(msg.text).length >
+        FRAME_SELECTION_TEXT_LIMIT_BYTES)
+  ) {
+    return false;
+  }
+  if (msg.truncated !== undefined && typeof msg.truncated !== 'boolean') {
+    return false;
+  }
   return true;
+}
+
+/**
+ * The selection went away inside the frame.
+ *
+ * Its own message rather than an empty selection, because "there is nothing
+ * selected" and "here is a selection of nothing" are different claims, and
+ * the parent has an open popover to take down on exactly one of them.
+ */
+export interface FrameSelectionClearedMessage {
+  readonly type: 'relic:frame-selection-cleared';
+}
+
+export function isFrameSelectionClearedMessage(
+  data: unknown
+): data is FrameSelectionClearedMessage {
+  if (typeof data !== 'object' || data === null) return false;
+  return (
+    (data as Record<string, unknown>).type === 'relic:frame-selection-cleared'
+  );
 }
 
 export interface FramePointMessage {
@@ -197,6 +293,8 @@ export function isFrameRegionMessage(
 export interface FrameMarkClickMessage {
   readonly type: 'relic:frame-mark-click';
   readonly id: string;
+  /** Where the mark is, so the comment opens on it rather than beside it. */
+  readonly rect?: FrameRect;
 }
 
 export function isFrameMarkClickMessage(
@@ -212,12 +310,67 @@ export function isFrameMarkClickMessage(
   ) {
     return false;
   }
+  if (msg.rect !== undefined && !isFrameRect(msg.rect)) return false;
+  return true;
+}
+
+/**
+ * The pointer entered or left a mark inside the frame.
+ *
+ * `id` is null on leave. Hover is reported rather than inferred from
+ * coordinates on this side, because the frame is the only place that knows
+ * which of its own nodes the pointer is over.
+ */
+export interface FrameMarkHoverMessage {
+  readonly type: 'relic:frame-mark-hover';
+  readonly id: string | null;
+  readonly rect?: FrameRect;
+}
+
+export function isFrameMarkHoverMessage(
+  data: unknown
+): data is FrameMarkHoverMessage {
+  if (typeof data !== 'object' || data === null) return false;
+  const msg = data as Record<string, unknown>;
+  if (msg.type !== 'relic:frame-mark-hover') return false;
+  if (msg.id !== null) {
+    if (
+      typeof msg.id !== 'string' ||
+      msg.id.length === 0 ||
+      msg.id.length > 256
+    ) {
+      return false;
+    }
+  }
+  if (msg.rect !== undefined && !isFrameRect(msg.rect)) return false;
   return true;
 }
 
 // ---------------------------------------------------------------------------
 // Inward messages (Parent -> Frame)
 // ---------------------------------------------------------------------------
+
+/**
+ * Which mark the reader is presently looking at, or null for none.
+ *
+ * Sent when a row in the thread is clicked, so the thing a comment covers is
+ * lit inside the frame too. Without it, clicking a comment about text in a
+ * sandboxed relic scrolls to a mark that looks like every other mark.
+ */
+export interface ActiveMarkMessage {
+  readonly type: 'relic:active-mark';
+  readonly id: string | null;
+}
+
+export function isActiveMarkMessage(data: unknown): data is ActiveMarkMessage {
+  if (typeof data !== 'object' || data === null) return false;
+  const msg = data as Record<string, unknown>;
+  if (msg.type !== 'relic:active-mark') return false;
+  if (msg.id === null) return true;
+  return (
+    typeof msg.id === 'string' && msg.id.length > 0 && msg.id.length <= 256
+  );
+}
 
 export interface ArmPointingMessage {
   readonly type: 'relic:arm-pointing';
