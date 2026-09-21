@@ -1270,6 +1270,49 @@ describe('frame mark geometry and selection reporting', () => {
     expect(cleared).toHaveLength(1);
   });
 
+  test('quiet-marks settles the named marks and reopening puts them back', () => {
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      () => {}
+    );
+
+    const rootA = makeElement('p', {}, 'first quote here');
+    const rootB = makeElement('p', {}, 'second quote here');
+    mockDoc.body.appendChild(rootA);
+    mockDoc.body.appendChild(rootB);
+    wrapFrameQuote(
+      rootA as unknown as HTMLElement,
+      'first quote',
+      '',
+      '',
+      'c-a'
+    );
+    wrapFrameQuote(
+      rootB as unknown as HTMLElement,
+      'second quote',
+      '',
+      '',
+      'c-b'
+    );
+    const markA = mockDoc.body.querySelector(
+      '[data-comment-id="c-a"]'
+    ) as unknown as { classList: MockClassList };
+    const markB = mockDoc.body.querySelector(
+      '[data-comment-id="c-b"]'
+    ) as unknown as { classList: MockClassList };
+
+    interaction.onQuietMarks(['c-b']);
+    expect(markA.classList.contains('is-resolved')).toBe(false);
+    expect(markB.classList.contains('is-resolved')).toBe(true);
+
+    // The whole list every time, so undoing a resolution is expressible. A
+    // message that only ever added would leave a reopened comment looking
+    // closed inside the frame while the thread said otherwise.
+    interaction.onQuietMarks([]);
+    expect(markB.classList.contains('is-resolved')).toBe(false);
+  });
+
   test('active-mark lights the matching mark and null clears every mark', () => {
     const interaction = setupFrameInteraction(
       mockDoc as unknown as Document,

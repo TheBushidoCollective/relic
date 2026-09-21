@@ -372,6 +372,30 @@ export function isActiveMarkMessage(data: unknown): data is ActiveMarkMessage {
   );
 }
 
+/**
+ * Which marks are settled, so they can go quiet inside the frame.
+ *
+ * The whole list every time rather than one id at a time, because a
+ * resolution can be undone and a message that only ever added would leave a
+ * reopened comment looking closed. This origin knows which comments are
+ * settled and the frame owns the marks, so the fact has to cross and the
+ * text does not.
+ */
+export interface QuietMarksMessage {
+  readonly type: 'relic:quiet-marks';
+  readonly ids: readonly string[];
+}
+
+export function isQuietMarksMessage(data: unknown): data is QuietMarksMessage {
+  if (typeof data !== 'object' || data === null) return false;
+  const msg = data as Record<string, unknown>;
+  if (msg.type !== 'relic:quiet-marks') return false;
+  if (!Array.isArray(msg.ids)) return false;
+  return msg.ids.every(
+    (id) => typeof id === 'string' && id.length > 0 && id.length <= 256
+  );
+}
+
 export interface ArmPointingMessage {
   readonly type: 'relic:arm-pointing';
   readonly armed: boolean;

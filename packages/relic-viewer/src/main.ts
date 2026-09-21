@@ -4703,15 +4703,26 @@ export function buildThread(
     // only one pass sees both. A settled remark stays visible and goes
     // quiet: hiding it would make the page claim a conversation that did
     // not happen.
+    const settled: string[] = [];
     for (const entry of entries) {
       if (entry.id === null) continue;
       if ((entry.resolution ?? null) === null) continue;
+      settled.push(entry.id);
       for (const node of host.querySelectorAll(
         `[data-comment-id="${entry.id}"]`
       )) {
         node.classList.add('is-resolved');
       }
     }
+    // The frame owns the marks inside it, so the fact that a comment is
+    // settled has to cross the boundary. The whole list every time, because
+    // a resolution can be undone.
+    host
+      .querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow?.postMessage(
+        { type: 'relic:quiet-marks', ids: settled },
+        '*'
+      );
   };
 
   /**

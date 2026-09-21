@@ -51,6 +51,7 @@ import {
   isClearMarksMessage,
   isPaintMarkMessage,
   isPaintMarksMessage,
+  isQuietMarksMessage,
   isRevealMarkMessage,
   type RevealMarkMessage,
   takeHeadUtf8,
@@ -113,6 +114,7 @@ export interface FrameInteractionHandler {
   // Optional like onSetScroll: interaction stubs in older frame tests predate
   // active-mark and must not have to know about it.
   onActiveMark?(id: string | null): void;
+  onQuietMarks?(ids: readonly string[]): void;
   onSetScroll?(position: ScrollPosition): void;
 }
 
@@ -121,6 +123,7 @@ export interface FrameInteraction extends FrameInteractionHandler {
   // The real interaction always carries this; only the loose
   // FrameInteractionHandler param leaves it open to older stubs.
   onActiveMark(id: string | null): void;
+  onQuietMarks(ids: readonly string[]): void;
 }
 
 /**
@@ -928,6 +931,18 @@ export function setupFrameInteraction(
       }
     },
 
+    onQuietMarks(ids: readonly string[]) {
+      if (!doc.body) return;
+      const settled = new Set(ids);
+      for (const mark of doc.body.querySelectorAll('[data-comment-id]')) {
+        const id = (mark as HTMLElement).dataset?.commentId;
+        mark.classList.toggle(
+          'is-resolved',
+          id !== undefined && settled.has(id)
+        );
+      }
+    },
+
     onActiveMark(id: string | null) {
       if (!doc.body) return;
       // Compared by dataset rather than folded into the selector so a mark
@@ -1029,6 +1044,11 @@ export function createSandboxHandler(
       return true;
     }
 
+    if (isQuietMarksMessage(data)) {
+      interaction?.onQuietMarks?.(data.ids);
+      return true;
+    }
+
     if (isSetScrollMessage(data)) {
       interaction?.onSetScroll?.({
         fraction: data.fraction,
@@ -1124,6 +1144,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       onRevealMark: (msg) => interaction?.onRevealMark(msg),
       onPairMark: (id, active) => interaction?.onPairMark(id, active),
       onActiveMark: (id) => interaction?.onActiveMark?.(id),
+      onQuietMarks: (ids) => interaction?.onQuietMarks?.(ids),
       onSetScroll: (fraction) => interaction?.onSetScroll?.(fraction),
     }
   );
