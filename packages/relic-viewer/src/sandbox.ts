@@ -39,10 +39,13 @@ import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import { rectFromCorners } from './anchoring.ts';
 import {
+  FRAME_SELECTION_TEXT_LIMIT_BYTES,
   type FrameMarkPayload,
   type FramePointMessage,
+  type FrameRect,
   type FrameRegionMessage,
   type FrameSelectionMessage,
+  isActiveMarkMessage,
   isArmPointingMessage,
   isClearMarkMessage,
   isClearMarksMessage,
@@ -53,11 +56,7 @@ import {
   takeHeadUtf8,
   takeTailUtf8,
 } from './annotate-frame.ts';
-import {
-  type FrameScrollMessage,
-  isSetScrollMessage,
-  type SetScrollMessage,
-} from './frame-scroll.ts';
+import { isSetScrollMessage } from './frame-scroll.ts';
 import {
   applyMarks,
   captureTree,
@@ -111,49 +110,86 @@ export interface FrameInteractionHandler {
   onClearMarks(): void;
   onRevealMark(msg: RevealMarkMessage): void;
   onPairMark(id: string, active: boolean): void;
+  // Optional like onSetScroll: interaction stubs in older frame tests predate
+  // active-mark and must not have to know about it.
+  onActiveMark?(id: string | null): void;
   onSetScroll?(position: ScrollPosition): void;
 }
 
 export interface FrameInteraction extends FrameInteractionHandler {
   isArmed(): boolean;
+  // The real interaction always carries this; only the loose
+  // FrameInteractionHandler param leaves it open to older stubs.
+  onActiveMark(id: string | null): void;
 }
 
 /**
  * Constant stylesheet injected into the frame for comment marks and pointing.
  * Isolated from service-origin styles, so it provides its own visual tokens.
+ * Every declaration carries `!important` because the frame's document is
+ * author-owned untrusted content: whatever stylesheet or inline style that
+ * content ships must never be able to hide or restyle a mark, which is how a
+ * commented passage would stop being findable.
+ *
+ * A commented passage is visible at rest: a reader must see what carries a
+ * comment without touching it. Active is stronger than at rest, because it
+ * marks the one comment the reader is looking at right now. Resolved is
+ * deliberately quiet: settled feedback should stop shouting.
  */
 export const FRAME_MARK_CSS = `
 .relic-text-mark {
-  background: rgba(180, 140, 60, 0.22);
-  border-bottom: 2px solid rgba(180, 140, 60, 0.8);
-  color: inherit;
-  cursor: pointer;
-  padding: 0.1em 0;
+  background: rgba(180, 140, 60, 0.28) !important;
+  border-bottom: 2px solid rgba(180, 140, 60, 0.85) !important;
+  color: inherit !important;
+  cursor: pointer !important;
+  padding: 0.1em 0 !important;
+}
+.relic-text-mark:hover {
+  background: rgba(180, 140, 60, 0.4) !important;
+}
+.relic-text-mark.is-active {
+  background: rgba(180, 140, 60, 0.5) !important;
+  outline: 2px solid rgba(180, 140, 60, 0.9) !important;
+}
+.relic-text-mark.is-resolved {
+  background: rgba(140, 140, 140, 0.14) !important;
+  border-bottom-color: rgba(140, 140, 140, 0.4) !important;
 }
 .relic-text-mark.is-pending {
-  background: rgba(180, 140, 60, 0.14);
-  border-bottom: 2px dashed rgba(180, 140, 60, 0.8);
+  background: rgba(180, 140, 60, 0.16) !important;
+  border-bottom: 2px dashed rgba(180, 140, 60, 0.85) !important;
 }
 .relic-text-mark.is-paired {
-  background: rgba(180, 140, 60, 0.42);
-  outline: 2px solid rgba(180, 140, 60, 0.8);
+  background: rgba(180, 140, 60, 0.42) !important;
+  outline: 2px solid rgba(180, 140, 60, 0.85) !important;
 }
 .relic-region-mark {
-  position: absolute;
-  box-sizing: border-box;
-  background: rgba(180, 140, 60, 0.18);
-  border: 2px solid rgba(180, 140, 60, 0.8);
-  border-radius: 3px;
-  cursor: pointer;
-  pointer-events: auto;
+  position: absolute !important;
+  box-sizing: border-box !important;
+  background: rgba(180, 140, 60, 0.22) !important;
+  border: 2px solid rgba(180, 140, 60, 0.85) !important;
+  border-radius: 3px !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+}
+.relic-region-mark:hover {
+  background: rgba(180, 140, 60, 0.34) !important;
+}
+.relic-region-mark.is-active {
+  background: rgba(180, 140, 60, 0.42) !important;
+  box-shadow: 0 0 0 2px rgba(180, 140, 60, 0.9) !important;
+}
+.relic-region-mark.is-resolved {
+  background: rgba(140, 140, 140, 0.1) !important;
+  border-color: rgba(140, 140, 140, 0.45) !important;
 }
 .relic-region-mark.is-pending {
-  background: rgba(180, 140, 60, 0.10);
-  border: 2px dashed rgba(180, 140, 60, 0.8);
+  background: rgba(180, 140, 60, 0.12) !important;
+  border: 2px dashed rgba(180, 140, 60, 0.85) !important;
 }
 .relic-region-mark.is-paired {
-  background: rgba(180, 140, 60, 0.35);
-  box-shadow: 0 0 0 2px rgba(180, 140, 60, 0.8);
+  background: rgba(180, 140, 60, 0.38) !important;
+  box-shadow: 0 0 0 2px rgba(180, 140, 60, 0.85) !important;
 }
 .relic-pointing-active, .relic-pointing-active * {
   cursor: crosshair !important;
@@ -166,6 +202,79 @@ export function ensureFrameStyles(doc: Document): void {
   style.id = 'relic-frame-styles';
   style.textContent = FRAME_MARK_CSS;
   doc.head?.appendChild(style);
+}
+
+/**
+ * A mark's bounding box in the frame's own client coordinates, or undefined
+ * when the element cannot be measured. Guarded because the frame interaction
+ * tests drive a DOM-less stub whose elements carry no geometry, and because
+ * an element not in the rendered tree has no box to measure.
+ */
+function markFrameRect(el: Element): FrameRect | undefined {
+  const getter = (el as HTMLElement).getBoundingClientRect;
+  if (typeof getter !== 'function') return undefined;
+  try {
+    const box = getter.call(el) as {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    };
+    if (!box) return undefined;
+    for (const value of [box.left, box.top, box.width, box.height]) {
+      if (typeof value !== 'number' || !Number.isFinite(value))
+        return undefined;
+    }
+    return {
+      left: box.left,
+      top: box.top,
+      width: box.width,
+      height: box.height,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Wire a painted mark to report clicks and hover to the parent.
+ *
+ * Geometry is measured at event time, not when the mark is painted: a mark
+ * scrolled or resized after painting would otherwise report where it used to
+ * be. Only geometry crosses this boundary, never comment text: the parent
+ * owns the popover precisely so plaintext stays out of an origin that runs
+ * the relic's own code.
+ */
+function wireFrameMark(mark: Element, id: string, doc: Document): void {
+  mark.addEventListener('click', (e) => {
+    (e as MouseEvent).stopPropagation?.();
+    const rect = markFrameRect(mark);
+    doc.defaultView?.parent?.postMessage(
+      {
+        type: 'relic:frame-mark-click',
+        id,
+        ...(rect === undefined ? {} : { rect }),
+      },
+      '*'
+    );
+  });
+  mark.addEventListener('mouseenter', () => {
+    const rect = markFrameRect(mark);
+    doc.defaultView?.parent?.postMessage(
+      {
+        type: 'relic:frame-mark-hover',
+        id,
+        ...(rect === undefined ? {} : { rect }),
+      },
+      '*'
+    );
+  });
+  mark.addEventListener('mouseleave', () => {
+    doc.defaultView?.parent?.postMessage(
+      { type: 'relic:frame-mark-hover', id: null },
+      '*'
+    );
+  });
 }
 
 /**
@@ -294,13 +403,7 @@ export function wrapFrameQuote(
       mark.dataset.commentId = id;
       target.parentNode?.insertBefore(mark, target);
       mark.appendChild(target);
-      mark.addEventListener('click', (e) => {
-        e.stopPropagation();
-        doc.defaultView?.parent?.postMessage(
-          { type: 'relic:frame-mark-click', id },
-          '*'
-        );
-      });
+      wireFrameMark(mark, id, doc);
     }
     return true;
   }
@@ -321,13 +424,7 @@ export function wrapFrameQuote(
   mark.dataset.commentId = id;
   target.parentNode?.insertBefore(mark, target);
   mark.appendChild(target);
-  mark.addEventListener('click', (e) => {
-    e.stopPropagation();
-    doc.defaultView?.parent?.postMessage(
-      { type: 'relic:frame-mark-click', id },
-      '*'
-    );
-  });
+  wireFrameMark(mark, id, doc);
   return true;
 }
 
@@ -391,13 +488,7 @@ export function paintFrameRegion(
   div.style.width = `${rect.w * docWidth}px`;
   div.style.height = `${rect.h * docHeight}px`;
 
-  div.addEventListener('click', (e) => {
-    e.stopPropagation();
-    doc.defaultView?.parent?.postMessage(
-      { type: 'relic:frame-mark-click', id },
-      '*'
-    );
-  });
+  wireFrameMark(div, id, doc);
 
   overlay.appendChild(div);
   return div;
@@ -541,6 +632,33 @@ export function setupFrameInteraction(
   let isDown = false;
   let suppressScroll = false;
   let scrollResetTimer: number | undefined;
+  // True from the moment a nonempty selection is reported until the frame
+  // observes it collapse. The cleared message exists for the parent's open
+  // popover, so it is sent only on the transition, never on every event
+  // that merely happens while nothing is selected.
+  let selectionLive = false;
+
+  const readSelection = (): Selection | null => {
+    return typeof win.getSelection === 'function'
+      ? (win.getSelection() as Selection | null)
+      : null;
+  };
+
+  const hasLiveSelection = (sel: Selection | null): sel is Selection => {
+    return (
+      sel !== null &&
+      !sel.isCollapsed &&
+      sel.rangeCount > 0 &&
+      sel.toString().trim().length > 0
+    );
+  };
+
+  /** Take down the parent's popover exactly once, on the falling edge. */
+  const reportSelectionCleared = (): void => {
+    if (!selectionLive) return;
+    selectionLive = false;
+    postOutward({ type: 'relic:frame-selection-cleared' });
+  };
 
   const handleScroll = (): void => {
     if (suppressScroll) return;
@@ -558,6 +676,14 @@ export function setupFrameInteraction(
     win.addEventListener('scroll', handleScroll, { passive: true });
   }
 
+  // A selection collapses by more paths than mouseup: clicking elsewhere,
+  // a new armed drag, or the parent replacing the document. selectionchange
+  // is the one event that covers all of them.
+  doc.addEventListener('selectionchange', () => {
+    if (hasLiveSelection(readSelection())) return;
+    reportSelectionCleared();
+  });
+
   doc.addEventListener('mousedown', (event: MouseEvent) => {
     if (!armed) return;
     isDown = true;
@@ -566,13 +692,22 @@ export function setupFrameInteraction(
   });
 
   function handleSelection(): void {
-    const sel = win.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const sel = readSelection();
+    if (!hasLiveSelection(sel)) {
+      reportSelectionCleared();
+      return;
+    }
     const raw = sel.toString().trim();
-    if (raw.length === 0) return;
+    if (raw.length === 0) {
+      reportSelectionCleared();
+      return;
+    }
 
     const exact = takeHeadUtf8(raw, COMMENT_ANCHOR_QUOTE_LIMIT_BYTES);
-    if (exact.length === 0) return;
+    if (exact.length === 0) {
+      reportSelectionCleared();
+      return;
+    }
 
     const range = sel.getRangeAt(0);
     let prefix = '';
@@ -599,12 +734,57 @@ export function setupFrameInteraction(
       // If range computation throws in an edge-case DOM state, proceed without context
     }
 
+    // Geometry is measured now, while the selection is on screen; guarded
+    // because stub ranges in the frame interaction tests carry no box.
+    let rect: FrameRect | undefined;
+    try {
+      const getter = (range as Range).getBoundingClientRect;
+      if (typeof getter === 'function') {
+        const box = getter.call(range) as {
+          left: number;
+          top: number;
+          width: number;
+          height: number;
+        };
+        if (
+          box &&
+          [box.left, box.top, box.width, box.height].every(
+            (value) => typeof value === 'number' && Number.isFinite(value)
+          )
+        ) {
+          rect = {
+            left: box.left,
+            top: box.top,
+            width: box.width,
+            height: box.height,
+          };
+        }
+      }
+    } catch {
+      // A selection that cannot be measured is still a selection worth
+      // aiming a comment at, so proceed without the box.
+    }
+
+    // Copy gets the reader's whole selection, capped only at the transport
+    // limit the parent's guard enforces. A selection past the cap arrives
+    // flagged, so the parent can decline Copy rather than hand back a
+    // truncated string without saying so.
+    const byteLength = new TextEncoder().encode(raw).length;
+    const truncated = byteLength > FRAME_SELECTION_TEXT_LIMIT_BYTES;
+    const text = truncated
+      ? takeHeadUtf8(raw, FRAME_SELECTION_TEXT_LIMIT_BYTES)
+      : raw;
+
     const message: FrameSelectionMessage = {
       type: 'relic:frame-selection',
       exact,
       ...(prefix.length > 0 ? { prefix } : {}),
       ...(suffix.length > 0 ? { suffix } : {}),
+      ...(rect === undefined ? {} : { rect }),
+      ...(text.length > 0 ? { text } : {}),
+      ...(truncated ? { truncated } : {}),
     };
+    selectionLive = true;
     postOutward(message);
   }
 
@@ -748,6 +928,20 @@ export function setupFrameInteraction(
       }
     },
 
+    onActiveMark(id: string | null) {
+      if (!doc.body) return;
+      // Compared by dataset rather than folded into the selector so a mark
+      // id containing quotes or brackets cannot break out of the attribute
+      // matcher, and so every span of a multi-node quote lights together.
+      for (const mark of Array.from(
+        doc.body.querySelectorAll('[data-comment-id]')
+      )) {
+        const active =
+          id !== null && (mark as HTMLElement).dataset?.commentId === id;
+        mark.classList.toggle('is-active', active);
+      }
+    },
+
     onSetScroll(position: ScrollPosition) {
       suppressScroll = true;
       clearTimeout(scrollResetTimer);
@@ -827,6 +1021,11 @@ export function createSandboxHandler(
 
     if (isRevealMarkMessage(data)) {
       interaction?.onRevealMark(data);
+      return true;
+    }
+
+    if (isActiveMarkMessage(data)) {
+      interaction?.onActiveMark?.(data.id);
       return true;
     }
 
@@ -924,6 +1123,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       onClearMarks: () => interaction?.onClearMarks(),
       onRevealMark: (msg) => interaction?.onRevealMark(msg),
       onPairMark: (id, active) => interaction?.onPairMark(id, active),
+      onActiveMark: (id) => interaction?.onActiveMark?.(id),
       onSetScroll: (fraction) => interaction?.onSetScroll?.(fraction),
     }
   );
