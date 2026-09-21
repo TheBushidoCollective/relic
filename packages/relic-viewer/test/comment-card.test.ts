@@ -115,6 +115,50 @@ describe('a press inside a panel is not a press on the document', () => {
   });
 });
 
+describe('putting the conversation down', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('a press away from the card closes it', async () => {
+    const mounted = await mount({}, 'verified', [
+      { id: 'c1', body: 'mine', anchor: PINNED },
+    ]);
+    only(mounted.stage, 'comment-pin').dispatch('click');
+    expect(withClass(mounted.stage, 'popover-card')).toHaveLength(1);
+
+    const elsewhere = new Node('div');
+    documentNode.dispatch('pointerdown', { target: elsewhere });
+    expect(withClass(mounted.stage, 'popover-card')).toHaveLength(0);
+  });
+
+  test('a press inside the card leaves it alone', async () => {
+    const mounted = await mount({}, 'verified', [
+      { id: 'c1', body: 'mine', anchor: PINNED },
+    ]);
+    only(mounted.stage, 'comment-pin').dispatch('click');
+    const card = only(mounted.stage, 'popover-card');
+
+    documentNode.dispatch('pointerdown', { target: card });
+    expect(withClass(mounted.stage, 'popover-card')).toHaveLength(1);
+  });
+
+  test('a press away does not throw away a reply being written', async () => {
+    const mounted = await mount({}, 'verified', [
+      { id: 'c1', body: 'mine', anchor: PINNED },
+    ]);
+    only(mounted.stage, 'comment-pin').dispatch('click');
+    only(mounted.stage, 'popover-reply').dispatch('click');
+    const field = only(mounted.stage, 'popover-field');
+    field.value = 'half a sentence';
+
+    const elsewhere = new Node('div');
+    documentNode.dispatch('pointerdown', { target: elsewhere });
+    // The press meant the margin, not the two sentences, and nothing here
+    // could give them back.
+    expect(withClass(mounted.stage, 'popover-card')).toHaveLength(1);
+  });
+});
+
 describe('what the card offers, and to whom', () => {
   beforeEach(installDom);
   afterEach(clearDom);

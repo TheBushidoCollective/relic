@@ -468,6 +468,52 @@ describe('paired scroll landmarks', () => {
     expect(nearestScrollLandmark(root)).toEqual({ id: 'd1', top: 20 });
   });
 
+  test('a message carrying an anchor is accepted, not dropped', () => {
+    // The guard only knew the changed-pair namespace, so every message
+    // carrying an anchor was refused and the follower sat still while the
+    // leader scrolled. Anchors are most messages now.
+    expect(
+      isFrameScrollMessage({
+        type: 'relic:frame-scroll',
+        fraction: 0.5,
+        landmark: { id: 'a24', top: -23.6 },
+      })
+    ).toBe(true);
+    expect(
+      isSetScrollMessage({
+        type: 'relic:set-scroll',
+        fraction: 0.5,
+        landmark: { id: 'd3', top: 12 },
+      })
+    ).toBe(true);
+    // Still refused: an id from no namespace this diff mints.
+    expect(
+      isFrameScrollMessage({
+        type: 'relic:frame-scroll',
+        fraction: 0.5,
+        landmark: { id: 'x1', top: 0 },
+      })
+    ).toBe(false);
+  });
+
+  test('an unchanged paragraph anchors a version that only added at the top', () => {
+    // The reader's case: two paragraphs inserted at the top, nothing else
+    // touched. The only change is off screen above, and what is in front of
+    // the reader is unchanged content, which is exactly what the anchors
+    // give the follower to resolve.
+    const leader = {
+      querySelectorAll: () => [node('d0', -400, 60), node('a4', 120, 40)],
+    };
+    const follower = { querySelectorAll: () => [node('a4', 300, 40)] };
+    const landmark = nearestScrollLandmark(leader);
+    expect(landmark).toEqual({ id: 'a4', top: 120 });
+    // 180 pixels of correction: precisely the insertion the fraction would
+    // have smeared across the whole document.
+    expect(
+      landmarkScrollDelta(follower, landmark as { id: string; top: number })
+    ).toBe(180);
+  });
+
   test('computes the correction from the follower mark, not page height', () => {
     const root = { querySelectorAll: () => [node('d7', 148, 80)] };
     expect(landmarkScrollDelta(root, { id: 'd7', top: 103 })).toBe(45);
@@ -1300,6 +1346,13 @@ describe('scroller inventory across rendering modes', () => {
       ) as unknown as ElementStub;
 
       const stage = withClass(comparison, 'compare-stage')[0];
+      // Side by side is the default for every class now, so the swipe is
+      // reached the way a reader reaches it: by pressing for it.
+      expect(stage?.dataset['layout']).toBe('split');
+      const swipeControl = descendants(comparison).find(
+        (el) => el.dataset?.['layout'] === 'swipe'
+      );
+      swipeControl?.dispatchEvent({ type: 'click' });
       expect(stage?.dataset['layout']).toBe('swipe');
 
       const iframeElements = descendants(comparison).filter(

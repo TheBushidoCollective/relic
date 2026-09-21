@@ -59,10 +59,13 @@ import {
 } from './annotate-frame.ts';
 import { isSetScrollMessage } from './frame-scroll.ts';
 import {
+  type Anchor,
+  applyAnchors,
   applyMarks,
   captureTree,
   HIGHLIGHT_CSS,
   isAnnotateMessage,
+  isRevealChangeMessage,
   type Mark,
 } from './rendered-tree.ts';
 import {
@@ -115,6 +118,7 @@ export interface FrameInteractionHandler {
   // active-mark and must not have to know about it.
   onActiveMark?(id: string | null): void;
   onQuietMarks?(ids: readonly string[]): void;
+  onRevealChange?(changeId: string, top: number): void;
   onSetScroll?(position: ScrollPosition): void;
 }
 
@@ -124,6 +128,7 @@ export interface FrameInteraction extends FrameInteractionHandler {
   // FrameInteractionHandler param leaves it open to older stubs.
   onActiveMark(id: string | null): void;
   onQuietMarks(ids: readonly string[]): void;
+  onRevealChange(changeId: string, top: number): void;
 }
 
 /**
@@ -149,6 +154,10 @@ export const FRAME_MARK_CSS = `
 }
 .relic-text-mark:hover {
   background: rgba(180, 140, 60, 0.4) !important;
+}
+[data-relic-change-id].is-current-change {
+  outline: 3px solid rgba(180, 140, 60, 0.95) !important;
+  outline-offset: 3px !important;
 }
 .relic-text-mark.is-active {
   background: rgba(180, 140, 60, 0.5) !important;
@@ -931,6 +940,26 @@ export function setupFrameInteraction(
       }
     },
 
+    onRevealChange(changeId: string, top: number) {
+      if (!doc.body) return;
+      // Compared through `dataset` rather than matched in a selector, for
+      // the same reason the active mark is: an id never gets interpolated
+      // into a query this frame runs.
+      let found: HTMLElement | undefined;
+      for (const node of doc.body.querySelectorAll('[data-relic-change-id]')) {
+        const element = node as HTMLElement;
+        element.classList.remove('is-current-change');
+        if (element.dataset?.['relicChangeId'] === changeId) found = element;
+      }
+      if (found === undefined) return;
+      const current = win.scrollY ?? doc.documentElement?.scrollTop ?? 0;
+      const offset = found.getBoundingClientRect().top;
+      win.scrollTo?.({ top: Math.max(0, current + offset - top) });
+      // Lit as well as scrolled to, because a reader sent to the eighth of
+      // forty marked nodes cannot tell which one they were sent to.
+      found.classList.add('is-current-change');
+    },
+
     onQuietMarks(ids: readonly string[]) {
       if (!doc.body) return;
       const settled = new Set(ids);
@@ -1003,7 +1032,10 @@ export function setupFrameInteraction(
 export function createSandboxHandler(
   write: (html: string) => void,
   writeJsx: (code: string) => void,
-  annotate: (marks: readonly Mark[]) => void = () => {},
+  annotate: (
+    marks: readonly Mark[],
+    anchors?: readonly Anchor[]
+  ) => void = () => {},
   interaction?: FrameInteractionHandler
 ): (data: unknown) => boolean {
   let rendered = false;
@@ -1026,7 +1058,7 @@ export function createSandboxHandler(
 
     if (!annotated && isAnnotateMessage(data)) {
       annotated = true;
-      annotate(data.marks);
+      annotate(data.marks, data.anchors);
       return true;
     }
 
@@ -1065,6 +1097,11 @@ export function createSandboxHandler(
 
     if (isQuietMarksMessage(data)) {
       interaction?.onQuietMarks?.(data.ids);
+      return true;
+    }
+
+    if (isRevealChangeMessage(data)) {
+      interaction?.onRevealChange?.(data.changeId, data.top);
       return true;
     }
 
@@ -1148,11 +1185,15 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         scheduleReport();
       }, scheduleReport);
     },
-    (marks) => {
+    (marks, anchors) => {
       const style = document.createElement('style');
       style.textContent = HIGHLIGHT_CSS;
       document.head.appendChild(style);
       applyMarks(document.body, marks);
+      // After the marks, never before: `applyMarks` clears every authored
+      // copy of the id attribute first, and anchors written ahead of that
+      // sweep would be wiped by it.
+      if (anchors !== undefined) applyAnchors(document.body, anchors);
     },
     {
       setArmed: (armed) => interaction?.setArmed(armed),
@@ -1164,6 +1205,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       onPairMark: (id, active) => interaction?.onPairMark(id, active),
       onActiveMark: (id) => interaction?.onActiveMark?.(id),
       onQuietMarks: (ids) => interaction?.onQuietMarks?.(ids),
+      onRevealChange: (changeId, top) =>
+        interaction?.onRevealChange?.(changeId, top),
       onSetScroll: (fraction) => interaction?.onSetScroll?.(fraction),
     }
   );

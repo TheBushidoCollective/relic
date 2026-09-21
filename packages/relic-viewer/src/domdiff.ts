@@ -1,5 +1,6 @@
 import { diffArrays } from 'diff';
 import {
+  type Anchor,
   labelForTag,
   type Mark,
   type MarkKind,
@@ -26,6 +27,24 @@ export interface RenderedChange {
   readonly label: string;
   readonly before: string;
   readonly after: string;
+  /** Where this row sits in `jumps`, so pressing it goes to the thing. */
+  readonly jumpIndex?: number;
+}
+
+/**
+ * One stop on the way through a comparison.
+ *
+ * Recorded in the order the walk emits them, which is the order the two
+ * documents are read in: the comparison descends both trees in lockstep, so
+ * a removal on one side and an addition on the other arrive interleaved
+ * rather than in two separate runs. Sorting them afterwards by anything
+ * this side can measure would be a guess at that order.
+ */
+export interface ChangeJump {
+  /** Which pane holds the node. A removal exists only in the older one. */
+  readonly side: 'before' | 'after';
+  readonly changeId: string;
+  readonly kind: MarkKind;
 }
 
 export interface TreeDiff {
@@ -34,6 +53,21 @@ export interface TreeDiff {
   readonly removedMarks: readonly Mark[];
   /** Element paths into the current tree. */
   readonly addedMarks: readonly Mark[];
+  /**
+   * Matched content, paired so the two panes can be aligned on it.
+   *
+   * Changed nodes are too sparse to align by. A version that inserts two
+   * paragraphs at the top and edits nothing else gives the scroll sync one
+   * reference point, at the top, and every screen after it fell back to
+   * matching page fractions, which are off by exactly the height of the
+   * insertion. These are the nodes the diff already proved identical, so
+   * agreeing on them costs nothing and is the thing a reader is looking at
+   * most of the time.
+   */
+  readonly beforeAnchors: readonly Anchor[];
+  readonly afterAnchors: readonly Anchor[];
+  /** Every change, in reading order, addressable. */
+  readonly jumps: readonly ChangeJump[];
   readonly additions: number;
   readonly removals: number;
   readonly changes: readonly RenderedChange[];
@@ -83,9 +117,62 @@ function nearestElement(node: TreeNode, path: NodePath): NodePath {
   return node.tag === '#text' ? path.slice(0, -1) : path;
 }
 
+/**
+ * Tags worth anchoring.
+ *
+ * Block-level content, because that is what a reader scrolls to and what has
+ * a stable top. Anchoring inline nodes would put a reference on every
+ * emphasis and link in the document, multiply the work the scroll handler
+ * does on every frame, and align the panes on a word rather than on the
+ * paragraph the word is in.
+ */
+const ANCHOR_TAGS = new Set([
+  'address',
+  'article',
+  'aside',
+  'blockquote',
+  'dd',
+  'details',
+  'div',
+  'dl',
+  'dt',
+  'figcaption',
+  'figure',
+  'footer',
+  'form',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'header',
+  'hr',
+  'img',
+  'li',
+  'main',
+  'nav',
+  'ol',
+  'p',
+  'pre',
+  'section',
+  'table',
+  'tbody',
+  'td',
+  'th',
+  'thead',
+  'tr',
+  'ul',
+  'video',
+]);
+
 interface Collector {
   readonly removed: Mark[];
   readonly added: Mark[];
+  readonly beforeAnchors: Anchor[];
+  readonly afterAnchors: Anchor[];
+  readonly jumps: ChangeJump[];
+  nextChangeId: number;
   readonly changes: RenderedChange[];
   additions: number;
   removals: number;
@@ -93,14 +180,31 @@ interface Collector {
   changedCount: number;
   /** Sequence shared by the two mark arrays, unique inside one diff. */
   nextSyncId: number;
+  /**
+   * Anchors count separately.
+   *
+   * The `a` prefix already keeps the two namespaces from colliding, and a
+   * shared counter would make a change's id depend on how much unchanged
+   * content happened to precede it. Ids that move when nothing about the
+   * change moved are a needless way to break anything holding one.
+   */
+  nextAnchorId: number;
 }
 
+/**
+ * Record a mark, and say whether it was new.
+ *
+ * The caller needs to know, because a jump entry belongs to a node rather
+ * than to a call: a heading whose text and attributes both changed reaches
+ * here twice and is one stop, not two.
+ */
 function mark(
   into: Mark[],
   path: NodePath,
   kind: MarkKind,
-  syncId?: string
-): void {
+  syncId?: string,
+  changeId?: string
+): boolean {
   const key = path.join('.');
   // One element, one mark. A changed heading whose text also moved would
   // otherwise be marked twice and outlined twice. If that earlier mark had no
@@ -115,9 +219,27 @@ function mark(
     ) {
       into[at] = { ...existing, syncId };
     }
-    return;
+    return false;
   }
-  into.push({ path, kind, ...(syncId === undefined ? {} : { syncId }) });
+  into.push({
+    path,
+    kind,
+    ...(syncId === undefined ? {} : { syncId }),
+    ...(changeId === undefined ? {} : { changeId }),
+  });
+  return true;
+}
+
+/** One stop, named, on whichever side carries it. */
+function jump(
+  into: Collector,
+  side: 'before' | 'after',
+  kind: MarkKind
+): string {
+  const changeId = `c${into.nextChangeId}`;
+  into.nextChangeId += 1;
+  into.jumps.push({ side, changeId, kind });
+  return changeId;
 }
 
 /** Give the two nodes one identity only when the diff actually paired them. */
@@ -127,11 +249,39 @@ function markPair(
   afterPath: NodePath,
   beforeKind: MarkKind = 'changed',
   afterKind: MarkKind = 'changed'
-): void {
+): number | undefined {
   const syncId = `d${into.nextSyncId}`;
   into.nextSyncId += 1;
+  // The stop is recorded against the newer side, because that is the text a
+  // reader is deciding about. The older pane follows through the sync, so
+  // both are on screen either way.
+  const changeId = `c${into.nextChangeId}`;
+  const fresh = mark(into.added, afterPath, afterKind, syncId, changeId);
   mark(into.removed, beforePath, beforeKind, syncId);
-  mark(into.added, afterPath, afterKind, syncId);
+  if (!fresh) return undefined;
+  into.nextChangeId += 1;
+  into.jumps.push({ side: 'after', changeId, kind: afterKind });
+  return into.jumps.length - 1;
+}
+
+/**
+ * Agree on one unchanged node, so both panes can be aligned on it.
+ *
+ * The two sides always mean the same node by the same name, which is the
+ * whole point: the follower resolves the leader's id in its own document.
+ */
+function anchorPair(
+  into: Collector,
+  before: TreeNode,
+  beforePath: NodePath,
+  afterPath: NodePath
+): void {
+  if (before.tag === '#text') return;
+  if (!ANCHOR_TAGS.has(before.tag)) return;
+  const syncId = `a${into.nextAnchorId}`;
+  into.nextAnchorId += 1;
+  into.beforeAnchors.push({ path: beforePath, syncId });
+  into.afterAnchors.push({ path: afterPath, syncId });
 }
 
 function countNodes(node: TreeNode): number {
@@ -143,9 +293,22 @@ function collectRemoved(
   path: NodePath,
   into: Collector,
   syncId?: string
-): void {
-  mark(into.removed, nearestElement(node, path), 'removed', syncId);
+): number | undefined {
+  const changeId = jump(into, 'before', 'removed');
+  const fresh = mark(
+    into.removed,
+    nearestElement(node, path),
+    'removed',
+    syncId,
+    changeId
+  );
   into.removals += countNodes(node);
+  if (!fresh) {
+    into.jumps.pop();
+    into.nextChangeId -= 1;
+    return undefined;
+  }
+  return into.jumps.length - 1;
 }
 
 function collectAdded(
@@ -153,9 +316,22 @@ function collectAdded(
   path: NodePath,
   into: Collector,
   syncId?: string
-): void {
-  mark(into.added, nearestElement(node, path), 'added', syncId);
+): number | undefined {
+  const changeId = jump(into, 'after', 'added');
+  const fresh = mark(
+    into.added,
+    nearestElement(node, path),
+    'added',
+    syncId,
+    changeId
+  );
   into.additions += countNodes(node);
+  if (!fresh) {
+    into.jumps.pop();
+    into.nextChangeId -= 1;
+    return undefined;
+  }
+  return into.jumps.length - 1;
 }
 
 function compare(
@@ -168,10 +344,15 @@ function compare(
 ): void {
   if (before.tag === '#text' && after.tag === '#text') {
     if (before.text === after.text) return;
-    markPair(into, beforePath.slice(0, -1), afterPath.slice(0, -1));
+    const jumpIndex = markPair(
+      into,
+      beforePath.slice(0, -1),
+      afterPath.slice(0, -1)
+    );
     into.changedCount += 1;
     if (into.changes.length < MAX_LISTED_CHANGES) {
       into.changes.push({
+        ...(jumpIndex === undefined ? {} : { jumpIndex }),
         kind: 'changed',
         label: labelForTag(parentTag),
         before: quote(before.text),
@@ -192,10 +373,11 @@ function compare(
   const beforeAttrs = serialiseAttrs(before);
   const afterAttrs = serialiseAttrs(after);
   if (beforeAttrs !== afterAttrs) {
-    markPair(into, beforePath, afterPath);
+    const jumpIndex = markPair(into, beforePath, afterPath);
     into.changedCount += 1;
     if (into.changes.length < MAX_LISTED_CHANGES) {
       into.changes.push({
+        ...(jumpIndex === undefined ? {} : { jumpIndex }),
         kind: 'changed',
         label: labelForTag(before.tag),
         before: quote(beforeAttrs),
@@ -221,6 +403,17 @@ function compare(
         const beforeChild = before.children[beforeIndex + step];
         const afterChild = after.children[afterIndex + step];
         if (beforeChild !== undefined && afterChild !== undefined) {
+          // Matched by content, which is what makes it worth aligning on.
+          // Recorded before the recursion so a container is anchored even
+          // when something inside it turns out to have changed: the change
+          // gets its own paired id and wins the attribute, and the
+          // container keeps the panes together everywhere around it.
+          anchorPair(
+            into,
+            beforeChild,
+            [...beforePath, beforeIndex + step],
+            [...afterPath, afterIndex + step]
+          );
           compare(
             beforeChild,
             afterChild,
@@ -297,9 +490,10 @@ function removeChild(
 ): void {
   const child = parent.children[index];
   if (child === undefined) return;
-  collectRemoved(child, [...path, index], into);
+  const jumpIndex = collectRemoved(child, [...path, index], into);
   if (into.changes.length < MAX_LISTED_CHANGES) {
     into.changes.push({
+      ...(jumpIndex === undefined ? {} : { jumpIndex }),
       kind: 'removed',
       label: labelForTag(child.tag),
       before: quote(textOf(child)),
@@ -316,9 +510,10 @@ function addChild(
 ): void {
   const child = parent.children[index];
   if (child === undefined) return;
-  collectAdded(child, [...path, index], into);
+  const jumpIndex = collectAdded(child, [...path, index], into);
   if (into.changes.length < MAX_LISTED_CHANGES) {
     into.changes.push({
+      ...(jumpIndex === undefined ? {} : { jumpIndex }),
       kind: 'added',
       label: labelForTag(child.tag),
       before: '',
@@ -341,11 +536,16 @@ export function diffTrees(before: TreeNode, after: TreeNode): TreeDiff {
   const into: Collector = {
     removed: [],
     added: [],
+    beforeAnchors: [],
+    afterAnchors: [],
     changes: [],
     additions: 0,
     removals: 0,
     changedCount: 0,
     nextSyncId: 0,
+    nextAnchorId: 0,
+    jumps: [],
+    nextChangeId: 0,
   };
   compare(before, after, [], [], '#root', into);
 
@@ -357,6 +557,12 @@ export function diffTrees(before: TreeNode, after: TreeNode): TreeDiff {
       changed: false,
       removedMarks: [],
       addedMarks: [],
+      // Kept even here. Two versions that render identically are still two
+      // documents being scrolled together, and anchoring them on their own
+      // content costs nothing and is exactly as correct as it looks.
+      beforeAnchors: into.beforeAnchors,
+      afterAnchors: into.afterAnchors,
+      jumps: [],
       additions: 0,
       removals: 0,
       changes: [],
@@ -378,6 +584,9 @@ export function diffTrees(before: TreeNode, after: TreeNode): TreeDiff {
     changed: true,
     removedMarks: into.removed,
     addedMarks: into.added,
+    beforeAnchors: into.beforeAnchors,
+    afterAnchors: into.afterAnchors,
+    jumps: into.jumps,
     additions: into.additions,
     removals: into.removals,
     changes: into.changes,

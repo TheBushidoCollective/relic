@@ -59,6 +59,21 @@
   box-sizing: border-box;
 }
 
+/*
+ * `hidden` means hidden, everywhere.
+ *
+ * The attribute's own rule comes from the user agent stylesheet at the
+ * lowest possible weight, so any `display` here beats it and the element
+ * stays on screen with its `hidden` attribute set. That is how the swipe
+ * slider survived in side by side, where it controls nothing: a control a
+ * reader can drag with no effect is worse than no control. One rule rather
+ * than a per-element fix each time, because the next element to hit this
+ * would have hit it silently.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -1743,6 +1758,63 @@ canvas.relic-page {
   color: #fff;
 }
 
+/*
+ * Moving through the changes.
+ *
+ * Beside the layout control because they are the same kind of thing: what
+ * the comparison shows, and where in it you are.
+ */
+.compare-nav {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.25rem;
+  border: 1px solid var(--rule-strong);
+}
+
+.compare-nav .action {
+  padding: 0.35rem 0.5rem;
+}
+
+/* The chevron is drawn pointing down, so each direction turns it. */
+.compare-nav-previous svg {
+  transform: rotate(90deg);
+}
+
+.compare-nav-next svg {
+  transform: rotate(-90deg);
+}
+
+.compare-nav-position {
+  padding: 0 0.35rem;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+/*
+ * The one you were sent to.
+ *
+ * Stronger than the outline every changed node already carries, because
+ * the question this answers is which of them you are looking at, and an
+ * outline identical to its neighbours answers nothing.
+ */
+[data-relic-change-id].is-current-change {
+  outline: 3px solid var(--patina);
+  outline-offset: 3px;
+}
+
+/* A row that takes you to the change it names says so by behaving like it. */
+.diff-change.is-linked {
+  cursor: pointer;
+}
+
+.diff-change.is-linked:hover,
+.diff-change.is-linked:focus-visible {
+  background: color-mix(in srgb, var(--patina) 10%, transparent);
+}
+
 .compare-swipe {
   display: flex;
   align-items: center;
@@ -3120,8 +3192,7 @@ canvas.relic-page {
   box-sizing: border-box;
 }
 
-.time-frame-box.is-hidden,
-.time-frame-box[hidden] {
+.time-frame-box.is-hidden {
   display: none !important;
 }
 

@@ -205,6 +205,10 @@ const VERSION_HISTORY_DISCLOSURE =
   "Anyone holding a relic's link can fetch every version it has ever held, " +
   'so republishing does not withdraw earlier content.';
 export const REPUBLISH_DISCIPLINE_DISCLOSURE =
+  ' A version whose content, name and title are identical to the one already ' +
+  'live is refused locally, before any request: it would tell recipients to ' +
+  'look again at what they are already reading. Change the file rather than ' +
+  'retrying.' +
   " Before publishing, it reads the relic's comments, on every version, and " +
   'refuses if any are unanswered. Clear open comments either by replying with ' +
   '`relic_comment`, by resolving them with `relic_resolve_comment`, or by ' +

@@ -81,6 +81,7 @@ export type ClientCode =
   | 'local_comment_addresses_invalid'
   | 'local_comment_addresses_too_long'
   | 'unaddressed_comments'
+  | 'duplicate_version'
   | 'empty_acknowledgement_note'
   | 'invalid_acknowledgement_comment_id'
   | 'duplicate_acknowledgement'
@@ -332,6 +333,13 @@ export async function publish(
   // model-attested, and the metric's second clause would then have an
   // unreliable narrator reporting its only input.
   const rendererClass = deriveRendererClass(source.bytes, filename);
+  // What this version's plaintext is, recorded so the next republish from
+  // this machine can tell a change from a re-upload of the same thing.
+  const digest = await contentDigest({
+    content: source.bytes,
+    filename,
+    title: normalizedTitle,
+  });
 
   const retries = deps.maxCollisionRetries ?? 3;
   let lastCollision: ServerRefusal | undefined;
@@ -425,6 +433,7 @@ export async function publish(
         version: 1,
         source: sourceLookup.source,
         filename,
+        content_sha256: digest,
         published_at: new Date().toISOString(),
         expires_at: relicExpiresAt,
       });
@@ -463,6 +472,39 @@ export async function publish(
     lastCollision ??
     new PublishError('service_unreachable', 'could not obtain a grant')
   );
+}
+
+/**
+ * Name one version's plaintext, so the next one can be recognised as the
+ * same.
+ *
+ * Over the name and title as well as the bytes, because those two ride in
+ * the envelope and show on the card: retitling a relic changes what a
+ * recipient is handed even when the content does not, so it is a real
+ * version. The header is JSON and cannot contain a NUL, which is what keeps
+ * the separator unambiguous without a length prefix.
+ *
+ * Never sent anywhere. It is a local record of what this machine last put
+ * behind the link; the service is not asked and does not know.
+ */
+export async function contentDigest(input: {
+  readonly content: Uint8Array;
+  readonly filename: string;
+  readonly title: string;
+}): Promise<string> {
+  const header = new TextEncoder().encode(
+    `${JSON.stringify([input.filename, input.title])}\0`
+  );
+  const material = new Uint8Array(header.length + input.content.length);
+  material.set(header, 0);
+  material.set(input.content, header.length);
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    material.slice().buffer as ArrayBuffer
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 export async function readSource(

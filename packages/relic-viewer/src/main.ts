@@ -73,6 +73,7 @@ import {
   commentCipher,
   commentTime,
   DELIVERY_DISCLOSURE,
+  DISPLAY_NAME_NOTE,
   EDITED_LABEL,
   editComment,
   IDENTITY_DISCLOSURE,
@@ -125,10 +126,17 @@ import {
   type TextDiffPart,
   versionHistoryAvailability,
 } from './diff.ts';
-import { diffTrees, type RenderedChange, type TreeDiff } from './domdiff.ts';
+import {
+  type ChangeJump,
+  diffTrees,
+  type RenderedChange,
+  type TreeDiff,
+} from './domdiff.ts';
 import { transpileJsx } from './jsx.ts';
 import { highlightCode, renderMarkdown } from './markdown.ts';
 import {
+  type Anchor,
+  applyAnchors,
   applyMarks,
   captureTree,
   isTreeMessage,
@@ -823,8 +831,9 @@ interface FrameHandle {
    * what makes a second message safe where a second render would not be: this
    * channel is structurally incapable of changing what the document says.
    */
-  annotate(marks: readonly Mark[]): void;
+  annotate(marks: readonly Mark[], anchors?: readonly Anchor[]): void;
   setScroll(position: ScrollPosition): void;
+  revealChange(changeId: string, top: number): void;
 }
 
 /**
@@ -959,9 +968,12 @@ function sandboxFrame(
 
   return {
     frame,
-    annotate: (marks) => post({ type: 'relic:annotate', marks }),
+    annotate: (marks, anchors) =>
+      post({ type: 'relic:annotate', marks, anchors }),
     setScroll: (position: ScrollPosition) =>
       post({ type: 'relic:set-scroll', ...position }),
+    revealChange: (changeId: string, top: number) =>
+      post({ type: 'relic:reveal-change', changeId, top }),
   };
 }
 
@@ -1385,13 +1397,30 @@ export function renderCodeComparison(
 }
 
 /** What a reader sees changed, in rendered terms rather than source terms. */
-function renderChangeList(changes: readonly RenderedChange[]): HTMLElement {
+function renderChangeList(
+  changes: readonly RenderedChange[],
+  onJump?: (index: number) => void
+): HTMLElement {
   const list = document.createElement('ul');
   list.className = 'diff-change-list';
 
   for (const change of changes) {
     const item = document.createElement('li');
     item.className = `diff-change diff-change-${change.kind}`;
+    // A row that names a change and cannot take you to it is a description
+    // of a search the reader still has to run.
+    if (onJump !== undefined && change.jumpIndex !== undefined) {
+      const index = change.jumpIndex;
+      item.classList.add('is-linked');
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+      item.addEventListener('click', () => onJump(index));
+      item.addEventListener('keydown', (event: KeyboardEvent) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onJump(index);
+      });
+    }
 
     const kind = document.createElement('span');
     kind.className = 'diff-change-kind';
@@ -1425,13 +1454,131 @@ function renderChangeList(changes: readonly RenderedChange[]): HTMLElement {
   return list;
 }
 
+/** Where a jumped-to change is placed in the pane, in CSS pixels. */
+export const CHANGE_JUMP_TOP = 120;
+
+/**
+ * Which pane holds a change.
+ *
+ * Its own function because getting it wrong is silent: a removal exists only
+ * in the older version, and asking the newer pane for it finds nothing,
+ * changes nothing, and reports success. A named seam is testable; a ternary
+ * inside a callback was not.
+ */
+export function paneForJump<T>(jump: ChangeJump, before: T, after: T): T {
+  return jump.side === 'before' ? before : after;
+}
+
+export interface ChangeNav {
+  readonly element: HTMLElement;
+  /** Handed the diff's stops once the trees arrive. */
+  setJumps(jumps: readonly ChangeJump[]): void;
+  /** Move by one stop, wrapping at each end. Returns the new position. */
+  step(delta: 1 | -1): number | undefined;
+  /** Go to one stop by index, for a press on a row in the change list. */
+  goTo(index: number): void;
+}
+
+/**
+ * Previous, next, and where you are.
+ *
+ * The position is stated rather than implied, because "next" with no count
+ * leaves a reader unable to tell a document with two changes from one with
+ * forty, and unable to tell when they have seen them all. Wrapping is
+ * deliberate for the same reason the count is: the reader can keep pressing
+ * and will not be silently stuck at an end.
+ */
+export function buildChangeNav(deps: {
+  reveal: (jump: ChangeJump, top: number) => boolean;
+}): ChangeNav {
+  const element = document.createElement('div');
+  element.className = 'compare-nav';
+  let jumps: readonly ChangeJump[] = [];
+  let at = -1;
+  /**
+   * Whether the comparison has been computed yet.
+   *
+   * Separate from an empty list, because "there are no changes" and "nobody
+   * has looked yet" are different claims and the second one was being made
+   * as the first: a comparison said No changes for the seconds before its
+   * own diff landed, and for the whole of a comparison whose frames never
+   * reported at all.
+   */
+  let counted = false;
+
+  const position = document.createElement('span');
+  position.className = 'compare-nav-position';
+  // Polite: a reader moving through changes with the keyboard is told where
+  // they landed, and never interrupted mid sentence to hear it.
+  position.setAttribute('aria-live', 'polite');
+
+  const show = (): void => {
+    position.textContent = !counted
+      ? 'Comparing'
+      : jumps.length === 0
+        ? 'No changes'
+        : at < 0
+          ? `${jumps.length} ${jumps.length === 1 ? 'change' : 'changes'}`
+          : `Change ${at + 1} of ${jumps.length}`;
+    for (const control of [previous, next]) {
+      control.disabled = jumps.length === 0;
+    }
+  };
+
+  const goTo = (index: number): void => {
+    if (jumps.length === 0) return;
+    const wrapped = ((index % jumps.length) + jumps.length) % jumps.length;
+    const target = jumps[wrapped];
+    if (target === undefined) return;
+    at = wrapped;
+    deps.reveal(target, CHANGE_JUMP_TOP);
+    show();
+  };
+
+  const step = (delta: 1 | -1): number | undefined => {
+    if (jumps.length === 0) return undefined;
+    // From nothing, forward means the first and backward means the last,
+    // which is what a reader who has not started yet means by either.
+    goTo(at < 0 ? (delta === 1 ? 0 : jumps.length - 1) : at + delta);
+    return at;
+  };
+
+  const previous = button('Previous change', ICONS.chevron, () => step(-1));
+  previous.classList.add('compare-nav-previous');
+  const next = button('Next change', ICONS.chevron, () => step(1));
+  next.classList.add('compare-nav-next');
+  element.append(previous, position, next);
+  show();
+
+  return {
+    element,
+    setJumps: (value) => {
+      jumps = value;
+      at = -1;
+      counted = true;
+      show();
+    },
+    step,
+    goTo,
+  };
+}
+
 /** One side of a rendered comparison, and how to mark it once a diff exists. */
 interface ComparisonPane {
   readonly element: HTMLElement;
   /** Resolves with the pane's captured tree, or never when it cannot render. */
   readonly tree: Promise<TreeNode>;
-  annotate(marks: readonly Mark[]): void;
+  annotate(marks: readonly Mark[], anchors: readonly Anchor[]): void;
   readonly setScroll?: (position: ScrollPosition) => void;
+  /**
+   * Put one change at `top` inside this pane, and say whether it landed.
+   *
+   * The pane does it rather than the caller, because for a framed version
+   * the node is in another origin and only the frame can measure or move
+   * it. The other pane is not moved here: the two are already synced, and
+   * moving both would fight that.
+   */
+  readonly revealChange?: (changeId: string, top: number) => boolean;
 }
 
 /** Paired changed node nearest the top of one same-origin pane. */
@@ -1483,10 +1630,80 @@ function markdownPane(view: ReadyView): ComparisonPane {
   return {
     element: prose,
     tree: Promise.resolve(captureTree(prose)),
-    annotate: (marks) => {
+    annotate: (marks, anchors) => {
       applyMarks(prose, marks);
+      // Second, because the first call clears authored ids before painting
+      // its own and would take these with it.
+      applyAnchors(prose, anchors);
     },
+    revealChange: (changeId, top) => revealChangeIn(prose, changeId, top),
   };
+}
+
+/**
+ * The nearest box that actually scrolls this node.
+ *
+ * Asked of the layout rather than assumed, because the element a pane hands
+ * over is its content and not the box around it: a markdown pane is an
+ * article inside the scrolling column. Writing `scrollTop` on the article
+ * lit the right paragraph and moved nothing, which is the shape of defect
+ * only a browser shows.
+ */
+function scrollerFor(node: HTMLElement): HTMLElement | undefined {
+  let walk: HTMLElement | null = node.parentElement ?? null;
+  while (walk !== null) {
+    if (walk.scrollHeight - walk.clientHeight > 1) return walk;
+    walk = walk.parentElement ?? null;
+  }
+  return undefined;
+}
+
+/**
+ * Scroll a same-origin pane so one change sits at `top`.
+ *
+ * Never the window: the comparison stage clips and each side scrolls
+ * independently, which is the whole reason the two are synced rather than
+ * sharing one scrollbar.
+ */
+export function revealChangeIn(
+  pane: HTMLElement,
+  changeId: string,
+  top: number
+): boolean {
+  // Cleared before the lookup, and on every pane the stop is offered to,
+  // because a light left standing in the other pane means two nodes both
+  // claim to be the one the reader was sent to.
+  for (const lit of pane.querySelectorAll('.is-current-change')) {
+    lit.classList.remove('is-current-change');
+  }
+  const node = pane.querySelector<HTMLElement>(
+    `[data-relic-change-id="${changeId}"]`
+  );
+  if (node === null) return false;
+  // The element a pane hands over is its content, not the box that scrolls
+  // it: a markdown pane is an article inside a scrolling column. Writing
+  // `scrollTop` on the article lit the right paragraph and moved nothing,
+  // which is the shape of defect only a browser shows.
+  const scroller = scrollerFor(node) ?? pane;
+  if (
+    typeof node.getBoundingClientRect !== 'function' ||
+    typeof scroller.getBoundingClientRect !== 'function'
+  ) {
+    return false;
+  }
+  const offset =
+    node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  const travel = scroller.scrollHeight - scroller.clientHeight;
+  const target = Math.max(
+    0,
+    Math.min(scroller.scrollTop + offset - top, travel)
+  );
+  scroller.scrollTop = Math.round(target);
+  // Lit as well as scrolled to. A reader taken to the eighth change in a
+  // document with forty marked nodes cannot tell which one they were sent
+  // to from position alone.
+  node.classList.add('is-current-change');
+  return true;
 }
 
 /**
@@ -1523,6 +1740,13 @@ function framePane(view: ReadyView, usercontentOrigin: string): ComparisonPane {
     tree,
     annotate: handle.annotate,
     setScroll: handle.setScroll,
+    revealChange: (changeId, top) => {
+      handle.revealChange(changeId, top);
+      // Posted rather than answered: the frame is the only side that knows
+      // whether it has the node, and a message cannot return. The caller
+      // treats a framed pane as able to try, which is true.
+      return true;
+    },
   };
 }
 
@@ -1541,7 +1765,18 @@ export function renderRenderedComparison(
   historical: ReadyView,
   mode: 'markdown' | 'rendered',
   usercontentOrigin: string,
-  onChanges?: (changes: readonly RenderedChange[], summary: string) => void
+  onChanges?: (
+    changes: readonly RenderedChange[],
+    summary: string,
+    /**
+     * How to take the reader to one of those changes.
+     *
+     * Handed out because the list is rendered by whoever owns the sidebar,
+     * and a row that names a change without going to it leaves the reader
+     * running the search themselves.
+     */
+    onJump?: (index: number) => void
+  ) => void
 ): HTMLElement {
   const wrapper = document.createElement('section');
   wrapper.className = `diff-view diff-view-${mode}`;
@@ -1566,7 +1801,11 @@ export function renderRenderedComparison(
 
   const stage = document.createElement('div');
   stage.className = 'compare-stage';
-  stage.dataset['layout'] = mode === 'markdown' ? 'split' : 'swipe';
+  // Side by side, whatever the class. These are documents people read, and
+  // reading two of them at once is what the pane pair is for; the swipe
+  // answers "did the pixels move", which is a narrower question and one
+  // press away. A remembered choice beats this default.
+  stage.dataset['layout'] = readCompareLayout() ?? 'split';
   stage.style.setProperty('--split', '50%');
 
   const beforePane = document.createElement('div');
@@ -1654,14 +1893,36 @@ export function renderRenderedComparison(
     ['swipe', 'Swipe', ICONS.swipe],
     ['split', 'Side by side', ICONS.columns],
   ] as const) {
-    const control = button(text, path, () => setLayout(value));
+    const control = button(text, path, () => {
+      setLayout(value);
+      // Written only for a press, never for the initial paint, so opening a
+      // comparison cannot quietly overwrite what the reader last chose.
+      writeCompareLayout(value);
+    });
     control.dataset['layout'] = value;
     buttons.push(control);
     layout.appendChild(control);
   }
   setLayout(stage.dataset['layout'] === 'split' ? 'split' : 'swipe');
 
-  controls.append(layout, swipeControl);
+  // Moving through the changes, rather than hunting for the outlines.
+  // A comparison with forty marked nodes is a search problem without this,
+  // and the reader is the one who has to solve it.
+  const nav = buildChangeNav({
+    reveal: (jumpTarget, top) => {
+      // Offered to both. The pane that does not hold this stop clears its
+      // own light and does nothing else, which is how the two stop
+      // disagreeing about where the reader is.
+      paneForJump(jumpTarget, after, before).revealChange?.(
+        jumpTarget.changeId,
+        top
+      );
+      const pane = paneForJump(jumpTarget, before, after);
+      return pane.revealChange?.(jumpTarget.changeId, top) ?? false;
+    },
+  });
+
+  controls.append(layout, nav.element, swipeControl);
 
   const result = document.createElement('div');
   result.className = 'diff-rendered-result';
@@ -1686,10 +1947,11 @@ export function renderRenderedComparison(
       const [beforeTree, afterTree] = trees;
       const diff: TreeDiff = diffTrees(beforeTree, afterTree);
       counts.textContent = diff.summary;
-      before.annotate(diff.removedMarks);
-      after.annotate(diff.addedMarks);
+      before.annotate(diff.removedMarks, diff.beforeAnchors);
+      after.annotate(diff.addedMarks, diff.afterAnchors);
+      nav.setJumps(diff.jumps);
       if (onChanges !== undefined) {
-        onChanges(diff.changes, diff.summary);
+        onChanges(diff.changes, diff.summary, nav.goTo);
       }
       if (!diff.changed) {
         if (onChanges === undefined) {
@@ -1698,7 +1960,7 @@ export function renderRenderedComparison(
         return;
       }
       if (diff.changes.length > 0 && onChanges === undefined) {
-        result.replaceChildren(renderChangeList(diff.changes));
+        result.replaceChildren(renderChangeList(diff.changes, nav.goTo));
       }
     }
   );
@@ -2234,7 +2496,11 @@ export function renderLoadedVersion(
   historical: ReadyView,
   selectedVersion: number,
   usercontentOrigin: string,
-  onChanges?: (changes: readonly RenderedChange[], summary: string) => void
+  onChanges?: (
+    changes: readonly RenderedChange[],
+    summary: string,
+    onJump?: (index: number) => void
+  ) => void
 ): HTMLElement {
   const mode = diffModeForRoutes(current.route, historical.route);
   if (mode === undefined) {
@@ -2584,11 +2850,11 @@ export function renderComparison(
         leftRes.view,
         leftVersion,
         usercontentOrigin,
-        (changes) => {
+        (changes, _summary, onJump) => {
           if (thisRequest !== request) return;
           changesSidebar.setChanges(
             changes.length,
-            changes.length > 0 ? renderChangeList(changes) : undefined
+            changes.length > 0 ? renderChangeList(changes, onJump) : undefined
           );
         }
       )
@@ -2975,6 +3241,36 @@ export function displayNameInput(): HTMLInputElement {
   name.placeholder = 'Optional, shown beside your address';
   name.value = readDisplayName();
   return name;
+}
+
+/** Where the remembered comparison layout lives. */
+const COMPARE_LAYOUT_KEY = 'relic:compare-layout';
+
+/**
+ * The layout this reader last chose, across relics and across versions.
+ *
+ * Remembered because switching versions rebuilds the comparison, and a
+ * rebuild that reset the layout put a reader who had chosen side by side
+ * back into the swipe every time they moved a version. The default only
+ * applies until they express a preference; after that it is theirs.
+ */
+export function readCompareLayout(): 'swipe' | 'split' | undefined {
+  try {
+    const raw = preferenceStore()?.getItem(COMPARE_LAYOUT_KEY);
+    return raw === 'swipe' || raw === 'split' ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeCompareLayout(layout: 'swipe' | 'split'): void {
+  try {
+    preferenceStore()?.setItem(COMPARE_LAYOUT_KEY, layout);
+  } catch {
+    // A reader with storage denied still gets the layout they pressed for
+    // as long as the page lives. Losing it on reload is worth less than
+    // throwing here would cost.
+  }
 }
 
 /** The width this reader last dragged the divider to, if it was kept. */
@@ -4956,9 +5252,7 @@ export function buildThread(
             placeholder: 'What it should say instead',
             submitLabel: 'Save',
             value: entry.body,
-            disclosure:
-              'Editing replaces the text. Relic records that it was edited ' +
-              'and keeps no earlier copy.',
+            disclosure: 'Editing replaces the text. No earlier copy is kept.',
             onCancel: reopen,
             onSubmit: (body) => {
               const opener = cipher;
@@ -5179,12 +5473,11 @@ export function buildThread(
       const id =
         event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
           .commentId;
-      if (id === undefined) {
-        // A press on the document itself, away from every mark and outside
-        // the card, is how a reader puts the conversation down.
-        if (stickyId !== undefined) closeCard();
-        return;
-      }
+      // Closing is not handled here. A press lands on the sidebar, the
+      // taskbar or the page around them as often as on the stage, and only
+      // one of those reaches this listener, so the rule lives at the
+      // document, where every press does.
+      if (id === undefined) return;
       event.preventDefault();
       cardForId(id, undefined, true);
     });
@@ -5231,6 +5524,45 @@ export function buildThread(
   // a reader who has learned one has learned the other.
   document.addEventListener('keydown', (event: KeyboardEvent) => {
     if (event.key === 'Escape' && popover?.current() !== undefined) closeCard();
+  });
+
+  /** Text a reader typed and has not posted, anywhere in the open panel. */
+  const holdsUnsavedText = (): boolean => {
+    // Read by shape rather than by constructor: this is our own field, and
+    // an `instanceof` here would answer false in any environment that does
+    // not define the constructor, quietly turning the exception off.
+    const field = popover?.current()?.querySelector('.popover-field') as
+      | { value?: unknown }
+      | null
+      | undefined;
+    const value = field?.value;
+    return typeof value === 'string' && value.trim().length > 0;
+  };
+
+  /**
+   * Pressing away from the conversation puts it down.
+   *
+   * On the document rather than on the stage, because a press lands
+   * wherever the reader is looking: the sidebar, the taskbar, the margin.
+   * A rule bound to the stage answered for one of those and left the card
+   * open for every other.
+   *
+   * `pointerdown` rather than `click`, so the card goes before whatever the
+   * press was for rather than after it.
+   *
+   * The one exception is a composer holding text. A reader who typed two
+   * sentences and pressed the margin meant to press the margin, not to
+   * throw the sentences away, and nothing here could give them back.
+   */
+  document.addEventListener('pointerdown', (event: Event) => {
+    if (popover?.current() === undefined) return;
+    if (!(event.target instanceof Element)) return;
+    if (event.target.closest('.popover') !== null) return;
+    // A press on another mark is that mark's business: it opens its own
+    // card, and closing here first would make the two fight.
+    if (event.target.closest('[data-comment-id]') !== null) return;
+    if (holdsUnsavedText()) return;
+    closeCard();
   });
 
   bindPairing(list);
@@ -5445,6 +5777,9 @@ export function buildThread(
 
     const name = displayNameInput();
     form.appendChild(field('Display name', name));
+    // The aside that used to inflate the identity disclosure into a
+    // paragraph, said where it is actually a question.
+    form.appendChild(line('compose-fine', DISPLAY_NAME_NOTE));
 
     const body = document.createElement('textarea');
     body.className = 'compose-textarea';

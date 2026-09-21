@@ -26,6 +26,7 @@ import {
   readComments,
 } from './comments.ts';
 import {
+  contentDigest,
   guessMimetype,
   type PublishDeps,
   PublishError,
@@ -178,6 +179,46 @@ export async function republish(
     }
   }
 
+  // The duplicate gate, still local: read the file, name what its plaintext
+  // is, and refuse when that is already what the link serves.
+  //
+  // A version is a thing recipients are told to look at again. One that
+  // changes nothing cannot be told apart from a real one until it has been
+  // read, and the reader has to hold both in their head to discover that
+  // nothing moved, so an identical version spends their attention and
+  // returns nothing. It is refused here rather than uploaded, because the
+  // service has no way to know: it holds ciphertext, and a fresh salt makes
+  // two encryptions of one file differ byte for byte.
+  //
+  // Before the comment read, which is the first thing here that touches the
+  // network. An identical file is also the likeliest reason comments are
+  // still open, so naming the duplicate first names the cause.
+  const source = await readSource(input.path, deps.files);
+  const filename = input.filename ?? source.basename;
+  const normalizedTitle = normalizeTitle(input.title ?? filename);
+  // Same rule as a first publish: the class comes from bytes in hand, never
+  // from a tool input, so the taxonomy stays machine-attested.
+  const rendererClass = deriveRendererClass(source.bytes, filename);
+  const digest = await contentDigest({
+    content: source.bytes,
+    filename,
+    title: normalizedTitle,
+  });
+  if (state.content_sha256 !== undefined && state.content_sha256 === digest) {
+    throw new PublishError(
+      'duplicate_version',
+      `version ${state.version} of relic ${input.relic_id} already holds ` +
+        'exactly this content, under this name and title, so a new version ' +
+        'would show a reader nothing they are not already reading at the ' +
+        'same link. Change the file, or leave the relic where it is.',
+      {
+        relic_id: input.relic_id,
+        version: state.version,
+        content_sha256: digest,
+      }
+    );
+  }
+
   // The comment gate: before publishing a new version, read the relic's
   // comments, decrypt them locally, and verify every comment has been
   // addressed. Unaddressed or unreadable comments refuse the republish.
@@ -254,13 +295,6 @@ export async function republish(
     );
   }
 
-  const source = await readSource(input.path, deps.files);
-  const filename = input.filename ?? source.basename;
-  const normalizedTitle = normalizeTitle(input.title ?? filename);
-  // Same rule as a first publish: the class comes from bytes in hand, never
-  // from a tool input, so the taxonomy stays machine-attested.
-  const rendererClass = deriveRendererClass(source.bytes, filename);
-
   // The stored key, not a fresh one. This is the line that keeps the
   // existing share URL decrypting the new version; a fresh key here would
   // silently cut every recipient off from content they were told this link
@@ -312,6 +346,7 @@ export async function republish(
       ...state,
       version,
       filename,
+      content_sha256: digest,
       updated_at: new Date().toISOString(),
     });
   } catch (error) {
