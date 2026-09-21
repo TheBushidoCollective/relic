@@ -284,10 +284,6 @@ function anchorPair(
   into.afterAnchors.push({ path: afterPath, syncId });
 }
 
-function countNodes(node: TreeNode): number {
-  return 1 + node.children.reduce((sum, child) => sum + countNodes(child), 0);
-}
-
 function collectRemoved(
   node: TreeNode,
   path: NodePath,
@@ -302,7 +298,12 @@ function collectRemoved(
     syncId,
     changeId
   );
-  into.removals += countNodes(node);
+  // Counted per change, the same unit the change list and the navigator
+  // count. Counting tree nodes instead made one comparison report two
+  // different totals: a paragraph and its text are two nodes and one thing
+  // a reader would say was added, so "4 added, 1 changed" sat above a list
+  // of three rows and a navigator saying 3 changes.
+  if (fresh) into.removals += 1;
   if (!fresh) {
     into.jumps.pop();
     into.nextChangeId -= 1;
@@ -325,7 +326,7 @@ function collectAdded(
     syncId,
     changeId
   );
-  into.additions += countNodes(node);
+  if (fresh) into.additions += 1;
   if (!fresh) {
     into.jumps.pop();
     into.nextChangeId -= 1;
