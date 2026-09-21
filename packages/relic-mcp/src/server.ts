@@ -26,9 +26,11 @@ import {
   type CommentRecord,
   type CommentsSummary,
   describeAnchor,
+  editComment,
   formatTimecode,
   postComment,
   readComments,
+  resolveComment,
 } from './comments.ts';
 import {
   type ListResult,
@@ -177,6 +179,10 @@ export const READ_COMMENTS_TOOL_NAME = 'relic_read_comments';
 
 export const COMMENT_TOOL_NAME = 'relic_comment';
 
+export const EDIT_COMMENT_TOOL_NAME = 'relic_edit_comment';
+
+export const RESOLVE_COMMENT_TOOL_NAME = 'relic_resolve_comment';
+
 /**
  * The one sentence about comments an agent has to have before it reads any,
  * carried on both comment tools and in the handshake instructions the way the
@@ -199,10 +205,12 @@ const VERSION_HISTORY_DISCLOSURE =
   "Anyone holding a relic's link can fetch every version it has ever held, " +
   'so republishing does not withdraw earlier content.';
 export const REPUBLISH_DISCIPLINE_DISCLOSURE =
-  " Before publishing, it reads the relic's comments and refuses if any are " +
-  'unaddressed. Address open comments either by replying with `relic_comment` ' +
-  'or by passing `addresses: [{ comment_id, note }]` here to acknowledge them ' +
-  'in the new version. Unreadable comments block republishing. This is workflow ' +
+  " Before publishing, it reads the relic's comments, on every version, and " +
+  'refuses if any are unanswered. Clear open comments either by replying with ' +
+  '`relic_comment`, by resolving them with `relic_resolve_comment`, or by ' +
+  'passing `addresses: [{ comment_id, note }]` here to acknowledge them ' +
+  'in the new version. A resolved comment counts as handled. Unreadable ' +
+  'comments block republishing. This is workflow ' +
   'discipline in the client, not a boundary: the machine holding the publish ' +
   'token can call the HTTP API directly, and the service cannot enforce this ' +
   'because it cannot read comments.';
@@ -770,13 +778,23 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
     'on this machine. Use it before changing content somebody was asked to ' +
     'review, and after sharing a link, because a comment is the only way a ' +
     'reader can answer back. ' +
-    'Each comment reports whether it has been addressed, and a compact summary ' +
-    'gives total, addressed, open, and unreadable counts. Its output is the input ' +
-    'to `relic_republish`, which requires every open comment to be addressed before ' +
-    'a new version can land. ' +
+    'Each comment reports which version it was made on, whether its text was ' +
+    'edited after it was posted, whether it has been addressed, and whether it ' +
+    'has been resolved, and a compact summary gives total, addressed, open, ' +
+    'resolved, and unreadable counts. Its output is the input ' +
+    'to `relic_republish`, which requires every open comment to be addressed or ' +
+    'resolved before a new version can land. ' +
     'Each comment can be a remark on the relic as a whole or an exact mark: ' +
     'a text quote with surrounding context, a stage pin, an artifact region, ' +
     'a timestamp or span in audio or video, or a page in a document. ' +
+    'Pass `version` to scope the thread: a version number returns the comments ' +
+    'made on that version, `"*"` returns every comment on every version, and ' +
+    'omitting it returns the comments on the relic\u2019s current version only. ' +
+    'The current version is read from the service, which spends one of the ' +
+    'relic\u2019s finite opens; pass `version` explicitly or `"*"` to read ' +
+    'without spending it. Whatever the scope, `hidden_by_scope` counts the ' +
+    'comments the scope did not return, so a scoped thread never reads as the ' +
+    'whole one. ' +
     'Pass `resolve_anchors: true` to fetch and decrypt the relic content and ' +
     'resolve anchors against the actual content (source context runs for quotes, ' +
     'crops and annotated views for image regions, and extracted video frames). ' +
@@ -793,6 +811,15 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
       relic_id: {
         type: 'string',
         description: 'The 26-character relic id the original publish returned.',
+      },
+      version: {
+        type: ['integer', 'string'],
+        description:
+          'Which versions to read: a version number for the comments made on ' +
+          'that version, the literal "*" for every comment on every version, ' +
+          'or omitted for the relic\u2019s current version only. Omitted reads ' +
+          'the current version from the service, which spends one of the ' +
+          'relic\u2019s finite opens.',
       },
       resolve_anchors: {
         type: 'boolean',
@@ -818,6 +845,27 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
           'How many of `count` did not decrypt. Above zero means part of the ' +
           'conversation is unread, not absent.',
       },
+      version_scope: {
+        type: ['integer', 'string'],
+        description:
+          'The scope this read returned: a version number, or "all" for ' +
+          'every version.',
+      },
+      current_version: {
+        type: ['integer', 'null'],
+        description:
+          'The relic\u2019s current version as the service reported it, read ' +
+          'only when the default scope needed it. Null on an explicitly ' +
+          'scoped read, because asking would spend another open for a fact ' +
+          'the scope did not need.',
+      },
+      hidden_by_scope: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'How many comments exist that this scope did not return. Above ' +
+          'zero means this thread is a scope, not the whole conversation.',
+      },
       summary: {
         type: 'object',
         description: 'Compact counts of comment states on this relic.',
@@ -825,9 +873,10 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
           total: { type: 'integer', minimum: 0 },
           addressed: { type: 'integer', minimum: 0 },
           open: { type: 'integer', minimum: 0 },
+          resolved: { type: 'integer', minimum: 0 },
           unreadable: { type: 'integer', minimum: 0 },
         },
-        required: ['total', 'addressed', 'open', 'unreadable'],
+        required: ['total', 'addressed', 'open', 'resolved', 'unreadable'],
         additionalProperties: false,
       },
       comments: {
@@ -845,6 +894,19 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             created_at: { type: 'string' },
             display_name: { type: ['string', 'null'] },
             body: { type: ['string', 'null'] },
+            version: {
+              type: ['integer', 'null'],
+              description:
+                'The version this comment was made on, or null for a row ' +
+                'that predates versioning.',
+            },
+            edited_at: {
+              type: ['string', 'null'],
+              description:
+                'When the comment\u2019s text was replaced after it was ' +
+                'posted, or null when it never was. There is no edit history: ' +
+                'the earlier text is not on offer.',
+            },
             anchor: {
               type: ['object', 'null'],
               description:
@@ -912,6 +974,24 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
               },
               required: ['comment_id'],
             },
+            resolution: {
+              type: ['object', 'null'],
+              description:
+                'The comment\u2019s settled state, or null while it is open. ' +
+                'Not encrypted: Relic records that this comment was settled ' +
+                'and which address settled it, though not a word of what it ' +
+                'says. A resolved comment counts as handled and no longer ' +
+                'blocks republishing.',
+              properties: {
+                at: { type: 'string' },
+                by: {
+                  type: 'string',
+                  description: 'The address that settled it, or "publisher".',
+                },
+              },
+              required: ['at', 'by'],
+              additionalProperties: false,
+            },
             resolved: {
               type: ['object', 'null'],
               description:
@@ -924,18 +1004,30 @@ export const READ_COMMENTS_TOOL_DEFINITION = {
             'created_at',
             'display_name',
             'body',
+            'version',
+            'edited_at',
             'anchor',
             'readable',
             'unreadable_reason',
             'addresses',
             'addressed',
             'addressed_by',
+            'resolution',
           ],
           additionalProperties: false,
         },
       },
     },
-    required: ['relic_id', 'count', 'unreadable_count', 'summary', 'comments'],
+    required: [
+      'relic_id',
+      'count',
+      'unreadable_count',
+      'summary',
+      'comments',
+      'version_scope',
+      'current_version',
+      'hidden_by_scope',
+    ],
     additionalProperties: false,
   },
 } as const;
@@ -1082,6 +1174,143 @@ export const COMMENT_TOOL_DEFINITION = {
   },
 } as const;
 
+export const EDIT_COMMENT_TOOL_DEFINITION = {
+  name: EDIT_COMMENT_TOOL_NAME,
+  title: 'Edit a comment on a relic',
+  description:
+    'Replace the text of a comment on a relic this machine published, ' +
+    'authorized by its publish token, so the comment stays attributed to ' +
+    '"publisher". ' +
+    'An edit changes what a remark says and never where it points: the ' +
+    'comment\u2019s existing anchor and the comment it answers are carried ' +
+    'into the re-sealed copy, so every reply keeps answering the same thing. ' +
+    'There is no edit history. The service holds one ciphertext per comment ' +
+    'and this overwrites it, so the honest thing on offer is the fact that ' +
+    'the text changed, carried on the row as `edited_at`, not the earlier ' +
+    'text. ' +
+    COMMENT_MACHINE_BOUNDARY +
+    ' Takes the relic id, never the share URL: the URL carries the key in ' +
+    'its fragment.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: {
+        type: 'string',
+        description: 'The 26-character relic id the original publish returned.',
+      },
+      comment_id: {
+        type: 'string',
+        description:
+          'The service-minted id of the comment to edit. It can only come ' +
+          'from having read the relic\u2019s comments.',
+      },
+      body: {
+        type: 'string',
+        description:
+          'The replacement comment text, up to 4096 bytes of UTF-8. It is ' +
+          'encrypted before it leaves this machine, exactly as a new comment ' +
+          'would be.',
+      },
+    },
+    required: ['relic_id', 'comment_id', 'body'],
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: { type: 'string' },
+      comment_id: { type: 'string' },
+      author: { type: 'string' },
+      created_at: { type: 'string' },
+      edited_at: {
+        type: ['string', 'null'],
+        description:
+          'When this edit replaced the text, as the service stamped it.',
+      },
+      resolved_at: { type: ['string', 'null'] },
+      resolved_by: { type: ['string', 'null'] },
+    },
+    required: [
+      'relic_id',
+      'comment_id',
+      'author',
+      'created_at',
+      'edited_at',
+      'resolved_at',
+      'resolved_by',
+    ],
+    additionalProperties: false,
+  },
+} as const;
+
+export const RESOLVE_COMMENT_TOOL_DEFINITION = {
+  name: RESOLVE_COMMENT_TOOL_NAME,
+  title: 'Resolve a comment on a relic',
+  description:
+    'Mark a comment on a relic settled, or reopen it, on a relic this ' +
+    'machine published, authorized by its publish token. A publisher ' +
+    'settling feedback on their own relic is the point of the state. ' +
+    'Resolving is not encrypted: Relic records that the comment was settled ' +
+    'and which address settled it, though not a word of what it says. ' +
+    'A resolved comment counts as handled: it no longer blocks ' +
+    '`relic_republish`, and readers see it marked settled rather than open. ' +
+    COMMENT_MACHINE_BOUNDARY +
+    ' Takes the relic id, never the share URL: the URL carries the key in ' +
+    'its fragment.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: {
+        type: 'string',
+        description: 'The 26-character relic id the original publish returned.',
+      },
+      comment_id: {
+        type: 'string',
+        description:
+          'The service-minted id of the comment to resolve. It can only come ' +
+          'from having read the relic\u2019s comments.',
+      },
+      resolved: {
+        type: 'boolean',
+        description:
+          'True to mark the comment settled, false to open it again.',
+      },
+    },
+    required: ['relic_id', 'comment_id', 'resolved'],
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: { type: 'string' },
+      comment_id: { type: 'string' },
+      author: { type: 'string' },
+      created_at: { type: 'string' },
+      edited_at: { type: ['string', 'null'] },
+      resolved_at: {
+        type: ['string', 'null'],
+        description: 'When the comment was settled, or null while it is open.',
+      },
+      resolved_by: {
+        type: ['string', 'null'],
+        description:
+          'The address that settled it, or "publisher". Not encrypted: the ' +
+          'operator can see it.',
+      },
+    },
+    required: [
+      'relic_id',
+      'comment_id',
+      'author',
+      'created_at',
+      'edited_at',
+      'resolved_at',
+      'resolved_by',
+    ],
+    additionalProperties: false,
+  },
+} as const;
+
 export const DESCRIBE_TOOL_DEFINITION = {
   name: DESCRIBE_TOOL_NAME,
   title: 'Describe the Relic client',
@@ -1142,22 +1371,23 @@ to a server.
 Seven things that change how you should act:
 
 1. The link is the credential: anyone holding it, fragment included, can read \
-the file. Do not paste it into a tracker, log, or public channel.
-2. A relic carries a plaintext title, defaulting to the filename, and it is \
-not encrypted: the service stores it and every link preview shows it. Pass \
-title: "" when the name itself is sensitive.
-3. Publishing puts the key in this transcript. That is structural: say so \
-plainly when handing the link over.
+the file. Never paste it into a tracker, log, or channel.
+2. A relic carries a plaintext title, defaulting to the filename: the service \
+stores it and every link preview shows it. Pass \
+title: "" when the name is sensitive.
+3. Publishing puts the key in this transcript: say so plainly when handing \
+the link over.
 4. Check sources with relic_lookup_source; relic_republish keeps the URL \
 where relic_publish costs a second URL. \
 ${VERSION_HISTORY_DISCLOSURE}
-5. A relic can be republished only from the machine that published it, where \
-its key and publish token live. Anywhere else it refuses.
+5. A relic can be republished only from the machine that published it: the key \
+and publish token live nowhere else.
 6. HTML and JSX render in an isolated frame with no network access, so inline \
 styles, scripts, fonts, and images: a CDN reference renders as nothing.
 7. People can comment on a relic. Read with relic_read_comments before \
-changing reviewed content, and answer with relic_comment. Both take the \
-relic id and attribute you as publisher.`;
+changing reviewed content, answer with relic_comment. relic_edit_comment \
+rewrites one, relic_resolve_comment settles one, and settled counts as \
+handled. All take the relic id and attribute you as publisher.`;
 
 /**
  * Handle one JSON-RPC message.
@@ -1231,6 +1461,8 @@ export async function handleMessage(
             REPUBLISH_TOOL_DEFINITION,
             READ_COMMENTS_TOOL_DEFINITION,
             COMMENT_TOOL_DEFINITION,
+            EDIT_COMMENT_TOOL_DEFINITION,
+            RESOLVE_COMMENT_TOOL_DEFINITION,
             DESCRIBE_TOOL_DEFINITION,
           ],
         },
@@ -1328,6 +1560,14 @@ async function callTool(
 
   if (params['name'] === COMMENT_TOOL_NAME) {
     return callComment(id, params, deps);
+  }
+
+  if (params['name'] === EDIT_COMMENT_TOOL_NAME) {
+    return callEditComment(id, params, deps);
+  }
+
+  if (params['name'] === RESOLVE_COMMENT_TOOL_NAME) {
+    return callResolveComment(id, params, deps);
   }
 
   if (params['name'] !== TOOL_NAME) {
@@ -1878,9 +2118,25 @@ async function callReadComments(
   }
   const resolveAnchors = rawResolve === true;
 
+  const rawVersion = args['version'];
+  if (
+    rawVersion !== undefined &&
+    rawVersion !== '*' &&
+    (typeof rawVersion !== 'number' ||
+      !Number.isSafeInteger(rawVersion) ||
+      rawVersion < 1)
+  ) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`version` must be a positive version number, the literal "*", or omitted'
+    );
+  }
+
   try {
     const result = await readComments(relicId, deps, {
       resolve_anchors: resolveAnchors,
+      version: rawVersion,
     });
     const content: Array<
       | { type: 'text'; text: string }
@@ -1998,6 +2254,129 @@ async function callComment(
   }
 }
 
+async function callEditComment(
+  id: string | number | null,
+  params: Record<string, unknown>,
+  deps: PublishDeps
+): Promise<JsonRpcResponse> {
+  const args = (params['arguments'] ?? {}) as Record<string, unknown>;
+  const relicId = args['relic_id'];
+  if (typeof relicId !== 'string' || relicId.length === 0) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`relic_id` is required and must be a string'
+    );
+  }
+  const commentId = args['comment_id'];
+  if (typeof commentId !== 'string' || commentId.length === 0) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`comment_id` is required and must be a string'
+    );
+  }
+  const body = args['body'];
+  if (typeof body !== 'string') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`body` is required and must be a string'
+    );
+  }
+
+  try {
+    const result = await editComment(
+      { relic_id: relicId, comment_id: commentId, body },
+      deps
+    );
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        content: [
+          {
+            type: 'text',
+            text:
+              `Edited comment ${result.comment_id} on relic ${result.relic_id}.\n` +
+              'The earlier text is not on offer: the service holds one ' +
+              `ciphertext per comment and this replaced it, stamped ${result.edited_at ?? 'now'}. ` +
+              'Where the comment pointed and what it answered are unchanged.',
+          },
+        ],
+        structuredContent: result,
+        isError: false,
+      },
+    };
+  } catch (error) {
+    return { jsonrpc: '2.0', id, result: toolError(error) };
+  }
+}
+
+async function callResolveComment(
+  id: string | number | null,
+  params: Record<string, unknown>,
+  deps: PublishDeps
+): Promise<JsonRpcResponse> {
+  const args = (params['arguments'] ?? {}) as Record<string, unknown>;
+  const relicId = args['relic_id'];
+  if (typeof relicId !== 'string' || relicId.length === 0) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`relic_id` is required and must be a string'
+    );
+  }
+  const commentId = args['comment_id'];
+  if (typeof commentId !== 'string' || commentId.length === 0) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`comment_id` is required and must be a string'
+    );
+  }
+  const resolved = args['resolved'];
+  if (typeof resolved !== 'boolean') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`resolved` is required and must be a boolean: true to settle the ' +
+        'comment, false to open it again'
+    );
+  }
+
+  try {
+    const result = await resolveComment(
+      { relic_id: relicId, comment_id: commentId, resolved },
+      deps
+    );
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        content: [
+          {
+            type: 'text',
+            text:
+              resolved === true
+                ? `Resolved comment ${result.comment_id} on relic ${result.relic_id}, settled by ${result.resolved_by ?? 'publisher'}.\n` +
+                  'This is not encrypted: Relic records that the comment was ' +
+                  'settled and by which address, though not a word of what ' +
+                  'it says. It no longer blocks republishing.'
+                : `Reopened comment ${result.comment_id} on relic ${result.relic_id}.\n` +
+                  'It is open again, and it blocks republishing until it is ' +
+                  'answered or resolved.',
+          },
+        ],
+        structuredContent: result,
+        isError: false,
+      },
+    };
+  } catch (error) {
+    return { jsonrpc: '2.0', id, result: toolError(error) };
+  }
+}
+
 /**
  * The one line that says what a comment is attached to.
  *
@@ -2081,9 +2460,22 @@ function commentTranscript(result: {
   readonly unreadable_count: number;
   readonly summary: CommentsSummary;
   readonly comments: readonly CommentRecord[];
+  readonly version_scope: number | 'all';
+  readonly current_version: number | null;
+  readonly hidden_by_scope: number;
 }): string {
+  const scopeNote =
+    result.version_scope === 'all'
+      ? 'every version'
+      : `version ${result.version_scope}`;
   if (result.count === 0) {
-    return `No comments on relic ${result.relic_id} yet.`;
+    // A quiet scoped read is not a quiet relic. The hidden count rides even
+    // on an empty list, because an agent that read only the current version
+    // of a republished relic has not read the conversation at all.
+    return result.hidden_by_scope > 0
+      ? `No comments on ${scopeNote} of relic ${result.relic_id}. ` +
+          `${result.hidden_by_scope} comment(s) exist outside this scope and were not returned.`
+      : `No comments on relic ${result.relic_id} yet.`;
   }
 
   const lines = result.comments.map((comment) => {
@@ -2099,6 +2491,16 @@ function commentTranscript(result: {
     // would be the same defect this fixed, one layer up.
     const mark = markLine(comment.anchor);
     const resolution = resolutionLine(comment.resolved);
+    const versionNote =
+      comment.version !== null ? `[made on version ${comment.version}]\n` : '';
+    const editedNote =
+      comment.edited_at !== null ? `[edited ${comment.edited_at}]\n` : '';
+    // Resolution is not encrypted, so it is said plainly. A comment marked
+    // settled has been handled even when nothing answered it.
+    const resolvedNote =
+      comment.resolution === null
+        ? ''
+        : `[resolved by ${comment.resolution.by} at ${comment.resolution.at}]\n`;
     const replyNote =
       comment.addresses !== null
         ? `[answers comment ${comment.addresses}]\n`
@@ -2110,20 +2512,29 @@ function commentTranscript(result: {
             : ''
         }]\n`
       : '';
-    return `${comment.created_at} ${who}:\n${mark}${resolution}${replyNote}${addressedNote}${comment.body}`;
+    return `${comment.created_at} ${who}:\n${mark}${resolution}${versionNote}${editedNote}${resolvedNote}${replyNote}${addressedNote}${comment.body}`;
   });
 
   const header =
     result.unreadable_count === 0
-      ? `${result.count} comment(s) on relic ${result.relic_id}, oldest first.`
-      : `${result.count} comment(s) on relic ${result.relic_id}, oldest ` +
+      ? `${result.count} comment(s) on ${scopeNote} of relic ${result.relic_id}, oldest first.`
+      : `${result.count} comment(s) on ${scopeNote} of relic ${result.relic_id}, oldest ` +
         `first. ${result.unreadable_count} did not decrypt and are shown as ` +
         'unreadable rather than dropped, so treat this conversation as ' +
         'partially unread.';
 
-  const summaryLine = `Summary: ${result.summary.total} total, ${result.summary.addressed} addressed, ${result.summary.open} open, ${result.summary.unreadable} unreadable.`;
+  const hiddenNote =
+    result.hidden_by_scope > 0
+      ? ` ${result.hidden_by_scope} comment(s) exist outside this scope and were not returned.`
+      : '';
+  const currentNote =
+    result.current_version === null
+      ? ''
+      : ` The relic's current version is ${result.current_version}.`;
 
-  return `${header}\n${summaryLine}\n\n${lines.join('\n\n')}`;
+  const summaryLine = `Summary: ${result.summary.total} total, ${result.summary.addressed} addressed, ${result.summary.open} open, ${result.summary.resolved} resolved, ${result.summary.unreadable} unreadable.`;
+
+  return `${header}${hiddenNote}${currentNote}\n${summaryLine}\n\n${lines.join('\n\n')}`;
 }
 
 /**

@@ -43,10 +43,12 @@ import {
   encryptComment,
   isValidRelicId,
 } from '@relic/format';
+import { mintRelic } from './inventory.ts';
 import {
   getJson,
   type PublishDeps,
   PublishError,
+  patchJson,
   postJson,
 } from './publish.ts';
 import {
@@ -59,6 +61,21 @@ import { loadPublishState, type PublishState } from './state.ts';
 export interface CommentAddressedBy {
   readonly comment_id: string;
   readonly version: number | null;
+}
+
+/**
+ * Who settled a comment, and when.
+ *
+ * Named after the viewer's `Resolution` (`packages/relic-viewer/src/comments.ts`)
+ * because it is the same state read from the same three clear fields. It is
+ * the one thing about a comment the service holds unencrypted, deliberately:
+ * it decides whether a republish is blocked, which the service answers before
+ * any key exists on its side. The operator learns that a comment was settled
+ * and by which address, and still cannot read a word of it.
+ */
+export interface Resolution {
+  readonly at: string;
+  readonly by: string;
 }
 
 /** One comment as an agent reads it. */
@@ -104,6 +121,27 @@ export interface CommentRecord {
   readonly addressed_by_comment_id?: string | null;
   readonly addressed_by_version?: number | null;
   /**
+   * The version this comment was made on, or null for a row that predates
+   * versioning. Dropped once, which was a defect: an agent reading a
+   * republished relic could not tell remarks about the version it is reading
+   * from remarks about content that no longer exists. The scoping rule that
+   * decides which rows a read returns lives in `readComments`.
+   */
+  readonly version: number | null;
+  /**
+   * When the comment's body was replaced after it was posted, or null when it
+   * never was. There is no edit history: the service holds one ciphertext per
+   * comment and an edit overwrites it, so the honest thing on offer is the
+   * fact that it happened, not the earlier text.
+   */
+  readonly edited_at: string | null;
+  /**
+   * The comment's settled state, or null while it is open. A resolved comment
+   * counts as handled: it no longer blocks a republish, and `formatUnaddressedRefusal`
+   * names resolving as one of the ways to clear the block.
+   */
+  readonly resolution: Resolution | null;
+  /**
    * Resolved content for this comment's anchor when anchor resolution is
    * requested. Null when freeform or when resolution was not requested.
    */
@@ -114,6 +152,8 @@ export interface CommentsSummary {
   readonly total: number;
   readonly addressed: number;
   readonly open: number;
+  /** Comments somebody marked settled. Handled, so they do not read as open. */
+  readonly resolved: number;
   readonly unreadable: number;
 }
 
@@ -128,6 +168,24 @@ export interface ReadCommentsResult {
   readonly unreadable_count: number;
   readonly summary: CommentsSummary;
   readonly comments: readonly CommentRecord[];
+  /**
+   * The scope this read returned: a version number, or `'all'`.
+   */
+  readonly version_scope: number | 'all';
+  /**
+   * The relic's current version, as the service reported it. Resolved from
+   * the service only when the read had to scope by it, because that read
+   * spends one of the relic's finite opens; null when the caller named the
+   * scope or asked for every version, and the number would have been a
+   * second spend for a fact the scope did not need.
+   */
+  readonly current_version: number | null;
+  /**
+   * How many comments exist that this scope did not return. A scoped list
+   * that read as a quiet thread would be the exact lie this package refuses
+   * everywhere else, so the count rides beside the rows.
+   */
+  readonly hidden_by_scope: number;
   readonly content_blocks?: readonly ContentBlock[];
 }
 
@@ -139,6 +197,13 @@ export interface CommentResult {
 }
 export interface ReadCommentsOptions {
   readonly resolve_anchors?: boolean;
+  /**
+   * Which versions to read: a positive version number, the literal `'*'` for
+   * every comment on every version, or absent for the relic's current
+   * version. Current is resolved from the service, never from local publish
+   * state, which is stale the moment anything else republished.
+   */
+  readonly version?: number | '*' | undefined;
 }
 
 /** First part of a comment body for refusal summaries, truncated if long. */
@@ -163,13 +228,13 @@ export function formatUnaddressedRefusal(
     parts.push(
       `cannot republish relic ${relicId} while comments remain unaddressed. ` +
         `${openComments.length} comment(s) are unanswered, and ${unreadableComments.length} comment(s) could not be decrypted. ` +
-        'Address unanswered comments either by replying with relic_comment or by passing addresses: [{ comment_id, note }] on republish.'
+        'Clear unanswered comments either by replying with relic_comment, by resolving them with relic_resolve_comment, or by passing addresses: [{ comment_id, note }] on republish.'
     );
   } else if (openComments.length > 0) {
     parts.push(
       `cannot republish relic ${relicId} while comments remain unaddressed. ` +
         `${openComments.length} comment(s) are unanswered. ` +
-        'Address each open comment either by replying with relic_comment or by passing addresses: [{ comment_id, note }] on republish.'
+        'Clear each open comment either by replying with relic_comment, by resolving it with relic_resolve_comment, or by passing addresses: [{ comment_id, note }] on republish.'
     );
   } else {
     parts.push(
@@ -247,6 +312,49 @@ export async function readComments(
 ): Promise<ReadCommentsResult> {
   const state = await localState(relicId);
 
+  // The scope. Absent means the relic's current version, and current comes
+  // from the service, the same source `relic_show` uses, never from local
+  // publish state, which is stale the moment anything else republished. A
+  // failed read refuses here rather than degrading: a fetch that could not
+  // say which version is current must not silently become a permissive
+  // scope, a narrower one, or a guess.
+  const rawScope = options?.version;
+  if (
+    rawScope !== undefined &&
+    rawScope !== '*' &&
+    (typeof rawScope !== 'number' ||
+      !Number.isSafeInteger(rawScope) ||
+      rawScope < 1)
+  ) {
+    throw new PublishError(
+      'local_version_scope_invalid',
+      'version must be a positive version number or the literal "*", not ' +
+        `${JSON.stringify(rawScope)}. Omit it to read the relic's current ` +
+        'version.'
+    );
+  }
+
+  let currentVersion: number | null = null;
+  let scope: number | 'all';
+  if (rawScope === undefined) {
+    const minted = await mintRelic(relicId, deps);
+    if (minted.kind === 'failed') {
+      throw new PublishError(
+        'current_version_unavailable',
+        `the relic's current version could not be read from the service, so ` +
+          `the default scope cannot be resolved: ${minted.detail}. Pass an ` +
+          'explicit version, or "*" for every version, to read without it.',
+        { relic_id: relicId }
+      );
+    }
+    currentVersion = minted.currentVersion;
+    scope = currentVersion;
+  } else if (rawScope === '*') {
+    scope = 'all';
+  } else {
+    scope = rawScope;
+  }
+
   // No credential on this read. Anyone holding the link can already fetch the
   // ciphertext, and the bodies are ciphertext the service cannot open, so
   // authorizing it would gate nothing and cost the token an exposure.
@@ -273,6 +381,8 @@ export async function readComments(
     anchor: CommentAnchor | null;
     addresses: string | null;
     version: number | null;
+    edited_at: string | null;
+    resolution: Resolution | null;
     readable: boolean;
     unreadable_reason: string | null;
   }
@@ -293,6 +403,19 @@ export async function readComments(
       typeof row['created_at'] === 'string' ? row['created_at'] : 'unknown';
     const ciphertext = row['ciphertext'];
     const version = typeof row['version'] === 'number' ? row['version'] : null;
+    // Clear fields, read the way the viewer reads them
+    // (`packages/relic-viewer/src/comments.ts`, `resolutionOf`): the state
+    // exists only when both halves arrived.
+    const editedAt =
+      typeof row['edited_at'] === 'string' ? row['edited_at'] : null;
+    const resolvedAt =
+      typeof row['resolved_at'] === 'string' ? row['resolved_at'] : null;
+    const resolvedBy =
+      typeof row['resolved_by'] === 'string' ? row['resolved_by'] : null;
+    const resolution =
+      resolvedAt === null || resolvedBy === null
+        ? null
+        : { at: resolvedAt, by: resolvedBy };
 
     if (typeof ciphertext !== 'string') {
       entries.push({
@@ -304,6 +427,8 @@ export async function readComments(
         anchor: null,
         addresses: null,
         version,
+        edited_at: editedAt,
+        resolution,
         readable: false,
         unreadable_reason: 'the row carried no ciphertext',
       });
@@ -323,6 +448,8 @@ export async function readComments(
         anchor: plaintext.anchor ?? null,
         addresses: plaintext.addresses ?? null,
         version,
+        edited_at: editedAt,
+        resolution,
         readable: true,
         unreadable_reason: null,
       });
@@ -338,6 +465,8 @@ export async function readComments(
         anchor: null,
         addresses: null,
         version,
+        edited_at: editedAt,
+        resolution,
         readable: false,
         unreadable_reason: `it did not decrypt under this relic's comment key: ${
           (error as Error).message
@@ -371,39 +500,80 @@ export async function readComments(
     }
   }
 
-  const comments: CommentRecord[] = entries.map((entry) => {
-    const addressedBy = addressedByMap.get(entry.comment_id) ?? null;
-    const addressed = addressedBy !== null;
-    return {
-      comment_id: entry.comment_id,
-      author: entry.author,
-      created_at: entry.created_at,
-      display_name: entry.display_name,
-      body: entry.body,
-      anchor: entry.anchor,
-      addresses: entry.addresses,
-      readable: entry.readable,
-      unreadable_reason: entry.unreadable_reason,
-      addressed,
-      addressed_by: addressedBy,
-      addressed_by_comment_id: addressedBy?.comment_id ?? null,
-      addressed_by_version: addressedBy?.version ?? null,
-    };
-  });
+  const comments: CommentRecord[] = entries
+    // The version scope, mirroring the viewer's thread filter exactly
+    // (packages/relic-viewer/src/main.ts 4577-4597): a relic with no history
+    // shows everything regardless of stored version, a row carrying a version
+    // shows only on that version, and a row carrying none belongs to version 1.
+    .filter((entry) => {
+      if (scope === 'all') return true;
+
+      // Current version was not read on an explicitly scoped read. A relic
+      // with no history cannot carry a row stamped above version 1, the
+      // version never moves backwards, and a scope of 2 or more already
+      // proves history, so treating history as present here hides nothing
+      // the no-history branch would have shown.
+      const hasHistory = currentVersion === null || currentVersion > 1;
+      if (!hasHistory) {
+        return true;
+      }
+
+      if (entry.version !== null && entry.version !== undefined) {
+        return entry.version === scope;
+      }
+
+      return scope === 1;
+    })
+    .map((entry) => {
+      const addressedBy = addressedByMap.get(entry.comment_id) ?? null;
+      const addressed = addressedBy !== null;
+      return {
+        comment_id: entry.comment_id,
+        author: entry.author,
+        created_at: entry.created_at,
+        display_name: entry.display_name,
+        body: entry.body,
+        anchor: entry.anchor,
+        addresses: entry.addresses,
+        readable: entry.readable,
+        unreadable_reason: entry.unreadable_reason,
+        addressed,
+        addressed_by: addressedBy,
+        addressed_by_comment_id: addressedBy?.comment_id ?? null,
+        addressed_by_version: addressedBy?.version ?? null,
+        version: entry.version,
+        edited_at: entry.edited_at,
+        resolution: entry.resolution,
+      };
+    });
 
   const addressedCount = comments.filter((c) => c.addressed).length;
   const unreadableCount = comments.filter((c) => !c.readable).length;
   // A comment is open when it is readable, has not been addressed by another
-  // comment, and is not itself a reply or update acknowledgement.
+  // comment, is not itself a reply or update acknowledgement, and has not
+  // been resolved. Resolving is one of the ways a comment is handled, so a
+  // settled one does not read as open.
   const openCount = comments.filter(
-    (c) => c.readable && !c.addressed && c.addresses === null
+    (c) =>
+      c.readable &&
+      !c.addressed &&
+      c.addresses === null &&
+      c.resolution === null
   ).length;
+  const resolvedCount = comments.filter((c) => c.resolution !== null).length;
 
   const summary: CommentsSummary = {
     total: comments.length,
     addressed: addressedCount,
     open: openCount,
+    resolved: resolvedCount,
     unreadable: unreadableCount,
+  };
+
+  const scopeFields = {
+    version_scope: scope,
+    current_version: currentVersion,
+    hidden_by_scope: entries.length - comments.length,
   };
 
   if (options?.resolve_anchors === true) {
@@ -414,6 +584,7 @@ export async function readComments(
       unreadable_count: unreadableCount,
       summary,
       comments: resolved.comments,
+      ...scopeFields,
       content_blocks: resolved.imageBlocks,
     };
   }
@@ -424,6 +595,7 @@ export async function readComments(
     unreadable_count: unreadableCount,
     summary,
     comments,
+    ...scopeFields,
   };
 }
 
@@ -522,6 +694,190 @@ export async function postComment(
     author: String(posted['author']),
     created_at: String(posted['created_at']),
   };
+}
+
+/** The state a comment write answers with, as the service's contract defines it. */
+export interface CommentStateResult {
+  readonly relic_id: string;
+  readonly comment_id: string;
+  readonly author: string;
+  readonly created_at: string;
+  readonly edited_at: string | null;
+  readonly resolved_at: string | null;
+  readonly resolved_by: string | null;
+}
+
+export interface EditCommentInput {
+  readonly relic_id: string;
+  readonly comment_id: string;
+  readonly body: string;
+}
+
+export interface ResolveCommentInput {
+  readonly relic_id: string;
+  readonly comment_id: string;
+  readonly resolved: boolean;
+}
+
+/** Narrow the service's comment-write answer into the state it contracts. */
+function commentState(
+  relicId: string,
+  commentId: string,
+  posted: Record<string, unknown>
+): CommentStateResult {
+  return {
+    relic_id: relicId,
+    comment_id: commentId,
+    author: String(posted['author']),
+    created_at: String(posted['created_at']),
+    edited_at:
+      typeof posted['edited_at'] === 'string' ? posted['edited_at'] : null,
+    resolved_at:
+      typeof posted['resolved_at'] === 'string' ? posted['resolved_at'] : null,
+    resolved_by:
+      typeof posted['resolved_by'] === 'string' ? posted['resolved_by'] : null,
+  };
+}
+
+/**
+ * Replace the body of a comment this machine's publish token authored.
+ *
+ * The whole plaintext is re-sealed, so the comment's existing anchor and
+ * addresses are carried forward exactly: an edit changes words, never where
+ * they point. Moving a mark under an existing conversation would leave every
+ * reply answering something the reader can no longer see, and the display
+ * name is decoration the edit was never asked to touch.
+ *
+ * There is no history. The service holds one ciphertext per comment and this
+ * overwrites it, which is why the row carries `edited_at` and nothing else
+ * about the earlier text is on offer.
+ */
+export async function editComment(
+  input: EditCommentInput,
+  deps: PublishDeps
+): Promise<CommentStateResult> {
+  const state = await localState(input.relic_id);
+  if (typeof input.comment_id !== 'string' || input.comment_id.length === 0) {
+    throw new PublishError(
+      'local_comment_not_found',
+      'comment_id is required. The id is service-minted and can only come ' +
+        'from having read the relic\u2019s comments.'
+    );
+  }
+
+  const bodyBytes = new TextEncoder().encode(input.body).length;
+  if (input.body.trim().length === 0) {
+    throw new PublishError(
+      'local_comment_body_empty',
+      'a comment needs a body. An empty one is attributable noise nobody can ' +
+        'answer.'
+    );
+  }
+  if (bodyBytes > COMMENT_BODY_LIMIT_BYTES) {
+    throw new PublishError(
+      'local_comment_body_too_long',
+      `the comment body is ${bodyBytes} bytes of UTF-8 and the limit is ` +
+        `${COMMENT_BODY_LIMIT_BYTES}. Shorten it; a truncated comment would ` +
+        'change what it says.',
+      { body_bytes: bodyBytes, limit_bytes: COMMENT_BODY_LIMIT_BYTES }
+    );
+  }
+
+  // The existing comment, read back on the relic it belongs to. The `'*'`
+  // scope, because an edit targets a comment by id, not by version, and
+  // scoping by current could refuse an edit of a remark left on an older
+  // one. Read over the network rather than from any local cache: the
+  // comment could have been edited by a newer writer since it was read.
+  const thread = await readComments(input.relic_id, deps, { version: '*' });
+  const existing = thread.comments.find(
+    (c) => c.comment_id === input.comment_id
+  );
+  if (existing === undefined) {
+    throw new PublishError(
+      'local_comment_not_found',
+      `comment ${input.comment_id} does not exist on relic ` +
+        `${input.relic_id}. The comment ids can only come from having read ` +
+        'the relic\u2019s comments.'
+    );
+  }
+  if (!existing.readable) {
+    throw new PublishError(
+      'local_comment_unreadable',
+      `comment ${input.comment_id} could not be decrypted on this machine, ` +
+        'so its anchor and addresses cannot be carried into a re-sealed ' +
+        'copy: editing it here would silently change where it points. ' +
+        `${existing.unreadable_reason ?? 'it did not decrypt under this relic\u2019s comment key'}`
+    );
+  }
+
+  // A fresh plaintext built from the decrypted comment, never the decrypted
+  // object passed on: the read stamps `unsupported_fields` when it met a
+  // field it did not know, and that member is read-only. Only the body is
+  // replaced; the anchor and addresses travel forward untouched.
+  const commentKey = await deriveCommentKey(decodeKey(state.key));
+  const ciphertext = await encryptComment(commentKey, {
+    body: input.body,
+    display_name: existing.display_name,
+    anchor: existing.anchor,
+    ...(existing.addresses == null ? {} : { addresses: existing.addresses }),
+  }).catch((error: unknown) => {
+    // A comment this machine could read but cannot re-seal (an anchor the
+    // current writer refuses, most likely) is a named refusal, not a
+    // cipher crash the agent has to interpret.
+    throw new PublishError(
+      'local_comment_unreadable',
+      `comment ${input.comment_id} cannot be re-sealed on this machine: ${
+        (error as Error).message
+      }`,
+      { comment_id: input.comment_id }
+    );
+  });
+
+  // The token travels in the body, where the republish grant already puts
+  // it, so every write path authorizes the same way.
+  const posted = await patchJson(
+    deps,
+    `${deps.serviceOrigin}/api/relics/${input.relic_id}/comments/${encodeURIComponent(input.comment_id)}`,
+    {
+      publish_token: state.publish_token,
+      ciphertext,
+    }
+  );
+  return commentState(input.relic_id, input.comment_id, posted);
+}
+
+/**
+ * Set or clear the resolution on a comment on a relic this machine published.
+ *
+ * The service lets a publish token resolve anything on its own relic, because
+ * a publisher settling feedback on their relic is the point of the state. It
+ * is not encrypted and cannot be: it decides whether a republish is blocked,
+ * and the service answers that before any key exists on its side. The
+ * operator learns that a comment was settled and by which address, and still
+ * cannot read a word of it.
+ */
+export async function resolveComment(
+  input: ResolveCommentInput,
+  deps: PublishDeps
+): Promise<CommentStateResult> {
+  const state = await localState(input.relic_id);
+  if (typeof input.comment_id !== 'string' || input.comment_id.length === 0) {
+    throw new PublishError(
+      'local_comment_not_found',
+      'comment_id is required. The id is service-minted and can only come ' +
+        'from having read the relic\u2019s comments.'
+    );
+  }
+
+  const posted = await patchJson(
+    deps,
+    `${deps.serviceOrigin}/api/relics/${input.relic_id}/comments/${encodeURIComponent(input.comment_id)}`,
+    {
+      publish_token: state.publish_token,
+      resolved: input.resolved === true,
+    }
+  );
+  return commentState(input.relic_id, input.comment_id, posted);
 }
 
 /**

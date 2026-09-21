@@ -49,6 +49,12 @@ let uploadedContainers: Map<string, Uint8Array>;
 let mintFetchCount: number;
 let containerDownloadCount: number;
 let refuseMint: { status: number; body: Record<string, unknown> } | null;
+/**
+ * The relic's current version the stub mint reports. Default 1; a test that
+ * needs a multi-version relic sets it, because a real republish increments
+ * the row and this stub stands in for the service's ledger.
+ */
+let currentVersionForRelic: number | null;
 beforeEach(async () => {
   scratch = await mkdtemp(join(tmpdir(), 'relic-comments-'));
   process.env['RELIC_PUBLISH_STATE'] = join(scratch, 'publish-state.json');
@@ -59,6 +65,7 @@ beforeEach(async () => {
   mintFetchCount = 0;
   containerDownloadCount = 0;
   refuseMint = null;
+  currentVersionForRelic = null;
   deps = {
     serviceOrigin: SERVICE,
     relicOrigin: SERVICE,
@@ -123,6 +130,7 @@ function commentFetch(): typeof globalThis.fetch {
         url: `https://storage.invalid/download/${relicId}`,
         object_length: bytes.length,
         version: 1,
+        current_version: currentVersionForRelic ?? 1,
       });
     }
     if (url.pathname === '/api/challenge') {
@@ -166,6 +174,9 @@ function commentFetch(): typeof globalThis.fetch {
           author: 'publisher',
           created_at: `2026-08-20T0${stored.length}:00:00Z`,
           ciphertext: String(body['ciphertext']),
+          // The service stamps every comment with the relic's current
+          // version at post time; the stub mirrors that.
+          version: currentVersionForRelic ?? 1,
         };
         stored.push(row);
         return Response.json({
@@ -498,6 +509,7 @@ describe('reading comments back', () => {
       total: 2,
       addressed: 0,
       open: 2,
+      resolved: 0,
       unreadable: 0,
     });
     expect(structured['comments']).toEqual([
@@ -515,6 +527,9 @@ describe('reading comments back', () => {
         addressed_by: null,
         addressed_by_comment_id: null,
         addressed_by_version: null,
+        version: 1,
+        edited_at: null,
+        resolution: null,
       },
       {
         comment_id: 'c2',
@@ -530,6 +545,9 @@ describe('reading comments back', () => {
         addressed_by: null,
         addressed_by_comment_id: null,
         addressed_by_version: null,
+        version: 1,
+        edited_at: null,
+        resolution: null,
       },
     ]);
     const text = JSON.stringify(result['content']);
@@ -649,6 +667,10 @@ describe('reading comments back', () => {
   test('refuses a comment list that is not an array', async () => {
     const relicId = await publishFixture();
     refuseComments = null;
+    // The wrapper stands in only for the comment read; the base fetch is
+    // captured before reassignment so the current-version mint this read
+    // now does resolves against the real stub rather than wrapping itself.
+    const base = deps.fetch;
     deps = {
       ...deps,
       fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -656,7 +678,7 @@ describe('reading comments back', () => {
         if (url.pathname.endsWith('/comments') && init?.method !== 'POST') {
           return Response.json({ comments: [] });
         }
-        return deps.fetch(input, init);
+        return base(input, init);
       }) as typeof globalThis.fetch,
     };
 
@@ -1625,8 +1647,10 @@ describe('comment anchor resolution against decrypted relic content', () => {
     });
     expect(readResult['isError']).toBe(false);
 
-    // Exactly one mint and one container download occurred for all three comments
-    expect(mintFetchCount).toBe(1);
+    // Exactly one content mint and one container download occurred for all
+    // three comments; the second mint was the default scope resolving the
+    // current version from the service, which is a separate, cheaper read.
+    expect(mintFetchCount).toBe(2);
     expect(containerDownloadCount).toBe(1);
 
     const structured = readResult['structuredContent'] as Record<
@@ -1665,7 +1689,10 @@ describe('comment anchor resolution against decrypted relic content', () => {
       relic_id: relic.relic_id,
     });
     expect(readDefault['isError']).toBe(false);
-    expect(mintFetchCount).toBe(0);
+    // No content fetch: the only mint was the default scope resolving the
+    // current version from the service, and resolving anchors never touched
+    // the container.
+    expect(mintFetchCount).toBe(1);
     expect(containerDownloadCount).toBe(0);
 
     // Read with explicit resolve_anchors: false
@@ -1674,7 +1701,7 @@ describe('comment anchor resolution against decrypted relic content', () => {
       resolve_anchors: false,
     });
     expect(readExplicitFalse['isError']).toBe(false);
-    expect(mintFetchCount).toBe(0);
+    expect(mintFetchCount).toBe(2);
     expect(containerDownloadCount).toBe(0);
 
     const structured = readDefault['structuredContent'] as Record<
@@ -1743,11 +1770,14 @@ describe('comment anchor resolution against decrypted relic content', () => {
       anchor: { kind: 'text', quote: 'under review' },
     });
 
-    // Simulate 410 Gone on mint
+    // Simulate 410 Gone on mint. The read is scoped explicitly, so the
+    // current-version read does not mint at all, and the refusal lands on
+    // anchor resolution, which is the leg this test is about.
     refuseMint = { status: 410, body: { code: 'relic_expired' } };
 
     const readResult = await callTool(READ_COMMENTS_TOOL_NAME, {
       relic_id: relicId,
+      version: 1,
       resolve_anchors: true,
     });
     expect(readResult['isError']).toBe(false);
@@ -1835,6 +1865,7 @@ describe('reply pointers and comment state', () => {
       total: 2,
       addressed: 1,
       open: 0,
+      resolved: 0,
       unreadable: 0,
     });
 
@@ -1844,7 +1875,7 @@ describe('reply pointers and comment state', () => {
     expect(comments[0]?.['addressed']).toBe(true);
     expect(comments[0]?.['addressed_by']).toEqual({
       comment_id: 'c2',
-      version: null,
+      version: 1,
     });
 
     expect(comments[1]?.['comment_id']).toBe('c2');
@@ -1854,9 +1885,9 @@ describe('reply pointers and comment state', () => {
 
     const transcript = JSON.stringify(read['content']);
     expect(transcript).toContain('[answers comment c1]');
-    expect(transcript).toContain('[addressed by comment c2]');
+    expect(transcript).toContain('[addressed by comment c2 in v1]');
     expect(transcript).toContain(
-      'Summary: 2 total, 1 addressed, 0 open, 0 unreadable.'
+      'Summary: 2 total, 1 addressed, 0 open, 0 resolved, 0 unreadable.'
     );
   });
 });

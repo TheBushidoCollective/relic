@@ -87,6 +87,10 @@ export type ClientCode =
   | 'unknown_comment_id'
   | 'unreadable_comment_cannot_be_addressed'
   | 'invalid_acknowledgements'
+  | 'local_version_scope_invalid'
+  | 'current_version_unavailable'
+  | 'local_comment_not_found'
+  | 'local_comment_unreadable'
   | 'app_response_unusable';
 export class PublishError extends Error {
   override readonly name = 'PublishError';
@@ -525,6 +529,39 @@ export async function postJson(
   const parsed = await readJson(response);
   // Every publish leg answers with an object. A body that is not one is read
   // as empty rather than crashing the caller on its first member read.
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * PATCH a JSON document on the app server.
+ *
+ * The comment edit and resolve legs are the callers, and both answer with a
+ * single comment object, so the shape is narrowed there rather than here. The
+ * leg is otherwise identical to `postJson`: the token rides in the body, and a
+ * service refusal throws as a named problem document.
+ */
+export async function patchJson(
+  deps: PublishDeps,
+  url: string,
+  body: unknown
+): Promise<Record<string, unknown>> {
+  let response: Response;
+  try {
+    response = await deps.fetch(url, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    throw new PublishError(
+      'service_unreachable',
+      `could not reach ${url}: ${(error as Error).message}`
+    );
+  }
+
+  const parsed = await readJson(response);
   return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
     ? (parsed as Record<string, unknown>)
     : {};
