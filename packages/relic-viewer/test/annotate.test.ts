@@ -12,6 +12,8 @@ import type { ReadyView, ViewerDeps } from '../src/viewer.ts';
 
 /** What every element in the stub tree measures, in CSS pixels. */
 const STUB_LAID_OUT_HEIGHT = 28;
+const STUB_STAGE_WIDTH = 800;
+const STUB_STAGE_HEIGHT = 600;
 
 /**
  * Bun tests run without a DOM, and the thread's existing tests get by with a
@@ -55,6 +57,16 @@ export class Node {
    * keeps it inside the clipped stage untestable.
    */
   offsetHeight = STUB_LAID_OUT_HEIGHT;
+  offsetWidth = 0;
+  /**
+   * The visible box the panel is clamped inside.
+   *
+   * Zero would model a stage nobody can see, and every placement would clamp
+   * to the left margin, which would make the coordinate-space assertions
+   * below pass for the wrong reason.
+   */
+  clientWidth = STUB_STAGE_WIDTH;
+  clientHeight = STUB_STAGE_HEIGHT;
   parent: Node | undefined;
   rect = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
   readonly children: Node[] = [];
@@ -323,6 +335,12 @@ export function installDom(): void {
     getSelection: () => ({
       isCollapsed: scripted.collapsed,
       rangeCount: scripted.ranges,
+      // A real selection can be dropped, and the page drops one after
+      // posting and on cancel. A stub without it turns a reader-visible
+      // behaviour into a harness error.
+      removeAllRanges: () => {
+        scripted.collapsed = true;
+      },
       toString: () => scripted.text,
       getRangeAt: () => ({
         commonAncestorContainer: scripted.within,
@@ -377,8 +395,17 @@ function view(overrides: Partial<ReadyView> = {}): ReadyView {
   };
 }
 
+/** One request the page made, for a test that cares which. */
+export interface Call {
+  readonly url: string;
+  readonly method: string;
+  readonly body: string | undefined;
+}
+
 /** A mounted relic, with the handles a test needs to act on it. */
 export interface Mounted {
+  /** Every request, in order, so a write can be asserted rather than assumed. */
+  readonly calls: readonly Call[];
   readonly thread: Node;
   readonly stage: Node;
   /** A rendered element inside the stage, to select in or click on. */
@@ -387,8 +414,14 @@ export interface Mounted {
   chip(): string;
   /** The plaintext of the posted comment, anchor included. */
   post(body: string): Promise<{ anchor?: unknown }>;
+  /** The same, written in the panel that opens over the words. */
+  postInPanel(body: string): Promise<{ anchor?: unknown }>;
   /** Repaints the stage to simulate repaints between user actions. */
   readonly repaint: () => void;
+  /** Waits for the thread to finish its next load. */
+  settle(): Promise<void>;
+  /** Opens a ciphertext the page wrote, so a write can be read back. */
+  openSealed(ciphertext: string): Promise<{ body: string; anchor?: unknown }>;
 }
 
 /**
@@ -410,6 +443,10 @@ interface Seed {
   readonly id: string;
   readonly body: string;
   readonly anchor: CommentAnchor;
+  /** Defaults to the reader's own address, so a seed is editable by default. */
+  readonly author?: string;
+  readonly editedAt?: string;
+  readonly resolvedBy?: string;
 }
 export async function mount(
   overrides: Partial<ReadyView> = {},
@@ -418,10 +455,19 @@ export async function mount(
 ): Promise<Mounted> {
   const ready = view(overrides);
   const sealed: string[] = [];
+  const calls: Call[] = [];
   const deps: ViewerDeps = {
     serviceOrigin: 'https://relik.example',
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      calls.push({
+        url,
+        method: init?.method ?? 'GET',
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      });
+      if (init?.method === 'PATCH') {
+        return new Response(null, { status: 204 });
+      }
       if (init?.method === 'POST' && typeof init.body === 'string') {
         const wire: unknown = JSON.parse(init.body);
         if (
@@ -444,8 +490,12 @@ export async function mount(
         : await Promise.all(
             seeds.map(async (seed) => ({
               comment_id: seed.id,
-              author: 'ada@example.com',
+              author: seed.author ?? 'ada@example.com',
               created_at: '2026-08-24T00:00:00Z',
+              edited_at: seed.editedAt ?? null,
+              resolved_at:
+                seed.resolvedBy === undefined ? null : '2026-08-25T00:00:00Z',
+              resolved_by: seed.resolvedBy ?? null,
               ciphertext: await seedCipher().then((cipher) =>
                 cipher.seal({
                   body: seed.body,
@@ -520,17 +570,32 @@ export async function mount(
   scripted.within = content;
 
   return {
+    calls,
     thread,
     stage,
     content,
     chip: () => textOf(only(thread, 'compose-target')),
     repaint: () => handle.attach(stage as unknown as HTMLElement),
+    settle: loaded,
+    openSealed: async (ciphertext: string) => {
+      const cipher = commentCipher(await deriveCommentKey(KEY_BYTES));
+      return cipher.open(ciphertext);
+    },
     post: async (body: string) => {
       const box = only(thread, 'compose-textarea');
       box.value = body;
       const form = box.closest('.compose');
       expect(form).not.toBeNull();
       form?.dispatch('submit');
+      await loaded();
+      expect(sealed).toHaveLength(1);
+      const cipher = commentCipher(await deriveCommentKey(KEY_BYTES));
+      return cipher.open(sealed[0] as string);
+    },
+    postInPanel: async (body: string) => {
+      const field = only(stage, 'popover-field');
+      field.value = body;
+      only(stage, 'is-primary').dispatch('click');
       await loaded();
       expect(sealed).toHaveLength(1);
       const cipher = commentCipher(await deriveCommentKey(KEY_BYTES));
@@ -610,13 +675,13 @@ describe('aiming a comment at a quote', () => {
     const mounted = await mount();
     select(mounted, 'the second paragraph');
 
-    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(1);
+    expect(withClass(mounted.stage, 'popover-offer')).toHaveLength(1);
     expect(mounted.chip()).toContain('Commenting on the whole document');
     const posted = await mounted.post('a comment about nothing in particular');
     expect(posted.anchor).toBeNull();
   });
 
-  test('pressing the bubble is what takes it', async () => {
+  test('pressing Comment writes it on the words, carrying the quote', async () => {
     const mounted = await mount({
       content: new TextEncoder().encode(
         '# notes\n\nfirst: the second paragraph\n\nsecond: the second paragraph\n'
@@ -625,10 +690,11 @@ describe('aiming a comment at a quote', () => {
     scripted.prefix = 'second: ';
     scripted.suffix = '\n';
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.stage, 'popover-comment').dispatch('click');
 
-    expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
-    const posted = await mounted.post('about that paragraph');
+    // Written in the panel rather than in the sidebar, which is the whole
+    // point of the second step: the reader is looking at the sentence.
+    const posted = await mounted.postInPanel('about that paragraph');
     expect(posted.anchor).toEqual({
       kind: 'quote',
       exact: 'the second paragraph',
@@ -637,33 +703,44 @@ describe('aiming a comment at a quote', () => {
     });
   });
 
-  test('pressing it also opens the thread and puts the cursor in the box', async () => {
+  test('the cursor lands in the panel, over the words', async () => {
     const mounted = await mount();
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.stage, 'popover-comment').dispatch('click');
+
+    expect(only(mounted.stage, 'popover-field').focused).toBe(true);
+  });
+
+  test('with no identity yet it hands off to the sidebar, which has one', async () => {
+    // Composing needs an address, verifying one is the magic-link flow, and
+    // that flow lives in the sidebar. The hand-off is the honest answer; a
+    // field nobody could post from would not be.
+    const mounted = await mount({}, 'anonymous');
+    select(mounted, 'the second paragraph');
+    only(mounted.stage, 'popover-comment').dispatch('click');
 
     expect(mounted.thread.classes()).toContain('is-open');
-    expect(only(mounted.thread, 'compose-textarea').focused).toBe(true);
+    expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
   });
 
   test('the bubble goes once it has been used, so it cannot be pressed twice', async () => {
     const mounted = await mount();
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
-    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    only(mounted.stage, 'popover-comment').dispatch('click');
+    expect(withClass(mounted.stage, 'popover-offer')).toHaveLength(0);
   });
 
   test('the offer is placed in the stage own content coordinates', async () => {
-    // Not a claim about pixels on a screen, which this file cannot make. It is
-    // a claim about which coordinate space the offsets are in: the scripted
-    // selection sits at viewport left 120, top 240, width 80, the stage starts
-    // at the viewport origin, and the button measures 28 tall with 6 of
-    // clearance. Centred is 160, above is 240 - 28 - 6.
+    // Not a claim about pixels on a screen, which this file cannot make. It
+    // is a claim about which coordinate space the offsets are in: the
+    // scripted selection sits at viewport left 120, top 240, width 80, the
+    // stage starts at the viewport origin, and the panel measures 28 tall
+    // with 8 of clearance. Centred is 160, above is 240 - 28 - 8.
     const mounted = await mount();
     select(mounted, 'the second paragraph');
-    const offered = only(mounted.stage, 'mark-bubble');
+    const offered = only(mounted.stage, 'popover-offer');
     expect(offered.style.left).toBe('160px');
-    expect(offered.style.top).toBe('206px');
+    expect(offered.style.top).toBe('204px');
   });
 
   test('a scrolled stage carries the offer with its content', async () => {
@@ -674,19 +751,21 @@ describe('aiming a comment at a quote', () => {
     mounted.stage.scrollLeft = 30;
     mounted.stage.scrollTop = 500;
     select(mounted, 'the second paragraph');
-    const offered = only(mounted.stage, 'mark-bubble');
+    const offered = only(mounted.stage, 'popover-offer');
     expect(offered.style.left).toBe('190px');
-    expect(offered.style.top).toBe('706px');
+    expect(offered.style.top).toBe('704px');
   });
 
-  test('a selection on the first line is still offered inside the box', async () => {
-    // The stage clips its overflow, so an offer placed above the content box
-    // is an offer the reader cannot press. The first line of every relic is
-    // that case, which makes it the one worth clamping for.
+  test('a selection on the first line is offered below it, inside the box', async () => {
+    // The stage clips its overflow, so a panel placed above the content box
+    // is a panel the reader cannot press. The first line of every relic is
+    // that case, and it goes below the selection rather than being clamped
+    // onto it: a panel sitting on the words it names hides them.
     const mounted = await mount();
     scripted.top = 4;
     select(mounted, 'notes');
-    expect(only(mounted.stage, 'mark-bubble').style.top).toBe('0px');
+    expect(only(mounted.stage, 'popover-offer').dataset.side).toBe('below');
+    expect(only(mounted.stage, 'popover-offer').style.top).toBe('30px');
   });
 
   test('a selection outside the stage offers nothing', async () => {
@@ -696,13 +775,13 @@ describe('aiming a comment at a quote', () => {
     scripted.text = 'text from somewhere else';
     scripted.within = new Node('p');
     mounted.content.dispatch('mouseup');
-    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    expect(withClass(mounted.stage, 'popover-offer')).toHaveLength(0);
   });
 
   test('a selection of nothing but whitespace offers nothing', async () => {
     const mounted = await mount();
     select(mounted, '   \n  ');
-    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    expect(withClass(mounted.stage, 'popover-offer')).toHaveLength(0);
   });
 
   test('the collapse of a selection dismisses the offer', async () => {
@@ -710,13 +789,13 @@ describe('aiming a comment at a quote', () => {
     select(mounted, 'the second paragraph');
     scripted.collapsed = true;
     documentNode.dispatch('selectionchange');
-    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    expect(withClass(mounted.stage, 'popover-offer')).toHaveLength(0);
   });
 
   test('clearing puts it back to the whole document', async () => {
     const mounted = await mount();
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.thread, 'mark-quote-action').dispatch('click');
     only(mounted.thread, 'compose-target-clear').dispatch('click');
 
     expect(mounted.chip()).toContain('Commenting on the whole document');
@@ -727,7 +806,7 @@ describe('aiming a comment at a quote', () => {
   test('escape clears it too', async () => {
     const mounted = await mount();
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.thread, 'mark-quote-action').dispatch('click');
     documentNode.dispatch('keydown', { key: 'Escape' });
 
     expect(mounted.chip()).toContain('Commenting on the whole document');
@@ -738,7 +817,7 @@ describe('aiming a comment at a quote', () => {
     // the same mark, unasked, is the bug wearing the feature's clothes.
     const mounted = await mount();
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.stage, 'popover-comment').dispatch('click');
     await mounted.post('about that paragraph');
     expect(mounted.chip()).toContain('Commenting on the whole document');
   });
@@ -948,7 +1027,7 @@ describe('a relic that renders in a sandboxed frame', () => {
     // mark-bubble appears. But pointing mode is wired across postMessage, so the
     // mark-mode toggle is offered and can be armed.
     const mounted = await mount(framed);
-    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    expect(withClass(mounted.stage, 'popover-offer')).toHaveLength(0);
     expect(withClass(mounted.thread, 'mark-mode')).toHaveLength(1);
 
     only(mounted.thread, 'mark-mode').dispatch('click');
@@ -992,7 +1071,7 @@ describe('a relic that renders in a sandboxed frame', () => {
     scripted.within = mounted.stage;
     mounted.stage.dispatch('mouseup');
 
-    expect(withClass(mounted.stage, 'mark-bubble')).toHaveLength(0);
+    expect(withClass(mounted.stage, 'popover-offer')).toHaveLength(0);
     expect(mounted.chip()).toContain('Commenting on the whole document');
   });
 });

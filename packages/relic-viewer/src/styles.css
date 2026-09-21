@@ -140,6 +140,34 @@ body {
   background: color-mix(in srgb, var(--patina) 10%, transparent);
 }
 
+/* A settled remark keeps its mark and loses its colour. Removing the mark
+   would make the page claim a conversation that did not happen; leaving it
+   at full strength would make a closed question look open. */
+.relic-text-mark.is-resolved {
+  background: none;
+  border-bottom: 1px dotted var(--rule-strong);
+}
+
+.comment-pin.is-resolved,
+.comment-region.is-resolved,
+.time-marker.is-resolved {
+  opacity: 0.55;
+  filter: grayscale(0.6);
+}
+
+.comment.is-resolved {
+  opacity: 0.62;
+}
+
+.comment.is-resolved.is-active {
+  opacity: 1;
+}
+
+.comment-badge-resolved {
+  border-color: var(--patina);
+  color: var(--patina);
+}
+
 /* The target a reader has aimed and not yet posted. Dashed, because the thing
    it marks is a sentence they are about to talk about rather than one anybody
    has said anything about yet.
@@ -196,39 +224,132 @@ body {
 }
 
 /*
- * What a selection offers, rather than what it takes.
+ * The panel that opens on the thing a comment is about.
  *
- * Selecting text used to set the anchor outright, invisibly, so the next
- * comment written landed on whatever had last been highlighted. Now the
- * selection puts this here and nothing is aimed until it is pressed.
+ * One rule for both its uses, because a selection's offer and a comment's
+ * card are the same object in two states and styling them apart is how they
+ * start reading as two unrelated pieces of chrome.
+ *
+ * Positioned against the stage's scrolled content rather than the viewport,
+ * because the stage scrolls its own children and a panel placed against the
+ * visible box is correct only until somebody scrolls. Nothing is rounded,
+ * because nothing else in this system is.
  */
-.mark-bubble {
+.popover {
   position: absolute;
-  z-index: 6;
-  padding: 0.3rem 0.7rem;
+  z-index: 8;
   background: var(--surface);
-  color: var(--patina-ink);
+  border: 1px solid var(--rule-strong);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 14%);
   font-family: var(--sans);
-  font-size: 0.78rem;
-  font-weight: 600;
-  border: 1px solid var(--patina);
-  border-radius: 0.35rem;
-  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
-  /* Centred on the selection. Only the horizontal axis is a transform: the
-     vertical offset is computed in the script against the button's measured
-     height, so it can be clamped to the top of a stage that clips. */
-  transform: translateX(-50%);
+}
+
+.popover-offer {
+  display: flex;
+  align-items: stretch;
+}
+
+.popover-card {
+  width: min(22rem, calc(100vw - 2rem));
+  padding: 0.55rem 0.7rem 0.5rem;
+}
+
+.popover-action {
+  padding: 0.4rem 0.7rem;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.mark-bubble:hover {
+.popover-offer .popover-action + .popover-action {
+  border-left: 1px solid var(--rule);
+}
+
+.popover-action:hover {
+  background: color-mix(in srgb, var(--patina) 12%, transparent);
+}
+
+.popover-action:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: -2px;
+}
+
+.popover-action:disabled {
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+.popover-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--rule);
+}
+
+.popover-card .popover-action {
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--rule-strong);
+  font-size: 0.8rem;
+}
+
+.popover-card .popover-action.is-primary {
   background: var(--patina);
+  border-color: var(--patina);
   color: #fff;
 }
 
-.mark-bubble:focus-visible {
-  outline: 2px solid var(--patina);
-  outline-offset: 2px;
+.popover-card .popover-action.is-quiet {
+  border-color: transparent;
+  color: var(--ink-soft);
+}
+
+/* The thread inside the panel is the sidebar's own rows, so it inherits
+   their look and drops only the list furniture. */
+.popover-thread {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.popover-target {
+  margin: 0 0 0.4rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
+.popover-composer {
+  margin-top: 0.5rem;
+}
+
+.popover-field {
+  width: 100%;
+  min-height: 4.5rem;
+  padding: 0.4rem;
+  background: var(--ground);
+  border: 1px solid var(--rule-strong);
+  color: var(--ink);
+  font: inherit;
+  font-family: var(--serif);
+  font-size: 0.9rem;
+  resize: vertical;
+}
+
+.popover-note {
+  margin: 0.4rem 0 0;
+  color: var(--oxide);
+  font-size: 0.76rem;
+}
+
+.popover-disclosure {
+  margin: 0.4rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
 }
 
 /* ---------- the accession band ---------- */

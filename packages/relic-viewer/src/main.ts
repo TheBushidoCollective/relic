@@ -49,12 +49,16 @@ registerBuiltInAnchorAdapters();
 
 import {
   type FrameMarkClickMessage,
+  type FrameMarkHoverMessage,
   type FramePointMessage,
+  type FrameRect,
   type FrameRegionMessage,
   type FrameSelectionMessage,
   isFrameMarkClickMessage,
+  isFrameMarkHoverMessage,
   isFramePointMessage,
   isFrameRegionMessage,
+  isFrameSelectionClearedMessage,
   isFrameSelectionMessage,
 } from './annotate-frame.ts';
 import {
@@ -63,10 +67,14 @@ import {
   type CommentCipher,
   type CommentEntry,
   type CommentNode,
+  canEditComment,
+  canResolveComment,
   collectDisplayedEntries,
   commentCipher,
   commentTime,
   DELIVERY_DISCLOSURE,
+  EDITED_LABEL,
+  editComment,
   IDENTITY_DISCLOSURE,
   KEY_AT_RISK_NOTE,
   keySurvivesNavigation,
@@ -77,17 +85,33 @@ import {
   plainLabel,
   postComment,
   quotedTargetLabel,
+  RESOLUTION_DISCLOSURE,
   type Refusal,
   readSession,
   requestMagicLink,
   resolveAddressedMap,
+  resolvedLabel,
   type SessionState,
+  setCommentResolved,
   threadCountLabel,
   threadEntries,
   unwrapTextQuotes,
   utf8Bytes,
   wrapTextQuote,
 } from './comments.ts';
+import {
+  type AnchorBox,
+  anchorFromClientRect,
+  COPY_FAILED_NOTE,
+  copyText,
+  inlineComposer,
+  type PopoverAction,
+  type PopoverLayer,
+  placePopover,
+  popoverCard,
+  popoverLayer,
+  selectionOffer,
+} from './popover.ts';
 
 export { quotedTargetLabel } from './comments.ts';
 
@@ -862,6 +886,21 @@ function sandboxFrame(
     if (isFrameSelectionMessage(event.data)) {
       frame.dispatchEvent(
         new CustomEvent('relic:frame-selection', {
+          detail: event.data,
+          bubbles: true,
+        })
+      );
+      return;
+    }
+    if (isFrameSelectionClearedMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-selection-cleared', { bubbles: true })
+      );
+      return;
+    }
+    if (isFrameMarkHoverMessage(event.data)) {
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-mark-hover', {
           detail: event.data,
           bubbles: true,
         })
@@ -2669,6 +2708,30 @@ export function commentRow(
     head.appendChild(unversioned);
   }
 
+  if (entry.editedAt !== null && entry.editedAt !== undefined) {
+    // Said rather than shown, because the earlier text does not exist to
+    // show: one ciphertext per comment means an edit overwrote it. What a
+    // reader is owed is that the words on screen are not the words posted.
+    const edited = document.createElement('span');
+    edited.className = 'comment-badge comment-badge-edited';
+    edited.textContent = EDITED_LABEL;
+    edited.setAttribute('title', `Replaced ${commentTime(entry.editedAt)}`);
+    head.appendChild(edited);
+  }
+
+  const resolution = entry.resolution ?? null;
+  if (resolution !== null) {
+    // The row goes quiet rather than disappearing. A settled remark is still
+    // part of what was said, and a thread that hides them reads as a shorter
+    // conversation than it was.
+    row.classList.add('is-resolved');
+    const settled = document.createElement('span');
+    settled.className = 'comment-badge comment-badge-resolved';
+    settled.textContent = 'Resolved';
+    settled.setAttribute('title', resolvedLabel(resolution));
+    head.appendChild(settled);
+  }
+
   const resolvedAddressed =
     addressed ?? (entry.kind === 'open' ? entry.addressed : null);
   if (resolvedAddressed !== null && resolvedAddressed !== undefined) {
@@ -2991,6 +3054,31 @@ export const MARK_REGION_HINT =
 const MARK_BUBBLE_GAP = 6;
 
 /**
+ * How long a pointer rests on a mark before its comment opens.
+ *
+ * Short enough to read as a response to pointing, long enough that crossing
+ * a paragraph of marked text does not flash a card per word.
+ */
+export const MARK_HOVER_OPEN_MS = 140;
+
+/**
+ * Grace before a card closes after the pointer leaves.
+ *
+ * The gap between a mark and the card above it is real, and a card that
+ * closed while the pointer crossed it could never be reached at all.
+ */
+export const MARK_HOVER_CLOSE_MS = 220;
+
+/**
+ * What `stickyId` holds while a new comment is being written.
+ *
+ * A colon cannot occur in a service-minted id, which is the same reason the
+ * provisional mark key below is shaped this way, so this can never collide
+ * with a real comment.
+ */
+const COMPOSING = 'composing:new';
+
+/**
  * The key a provisional mark is painted under.
  *
  * A colon cannot occur in a server-minted comment id, which is base64url, so
@@ -3132,6 +3220,64 @@ export interface MarkDeps {
    * comments, so a provisional mark and a real one cannot drift apart.
    */
   readonly repaint: () => void;
+  /**
+   * Writes the comment where the reader is looking, rather than in a sidebar
+   * they are not looking at.
+   *
+   * Returns false when the page cannot compose here: composing needs an
+   * identity, verifying one needs the magic-link flow, and that flow lives
+   * in the sidebar. A panel that offered a field nobody could post from
+   * would be worse than the hand-off.
+   */
+  readonly compose?: (anchor: CommentAnchor, box: AnchorBox) => boolean;
+}
+
+/**
+ * A box reported by the frame, in the host's content coordinates.
+ *
+ * Two conversions, and both are easy to forget. The frame measures against
+ * its own viewport, so the iframe's position has to be added, and the host
+ * scrolls its children, so its scroll has to be added after that. Doing it
+ * here means the popover code never sees a frame coordinate.
+ */
+export function frameAnchorBox(
+  frame: HTMLElement,
+  rect: FrameRect,
+  host: HTMLElement
+): AnchorBox {
+  const framed = frame.getBoundingClientRect();
+  return anchorFromClientRect(
+    {
+      left: framed.left + rect.left,
+      top: framed.top + rect.top,
+      width: rect.width,
+      height: rect.height,
+    },
+    host.getBoundingClientRect(),
+    host
+  );
+}
+
+/**
+ * Writes a placement onto a panel already inserted in the host.
+ *
+ * Inserted first because the panel's own height decides whether it fits
+ * above the thing it points at, and an element outside the document has no
+ * height to read.
+ */
+function positionPanel(
+  panel: HTMLElement,
+  anchor: AnchorBox,
+  host: HTMLElement
+): void {
+  const placed = placePopover(
+    anchor,
+    { width: panel.offsetWidth, height: panel.offsetHeight },
+    host
+  );
+  panel.style.left = `${placed.left}px`;
+  panel.style.top = `${placed.top}px`;
+  panel.dataset['side'] = placed.side;
 }
 
 /**
@@ -3358,6 +3504,63 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       );
   };
 
+  /**
+   * Two verbs over the words, and a way out.
+   *
+   * The intermediate step exists because selecting text is not a declaration
+   * of intent: most selections are made to read or to copy, and a panel that
+   * goes straight to a composer treats every one of them as the start of a
+   * comment. One builder rather than two, so a selection inside a sandboxed
+   * frame is offered exactly what a selection on this origin is.
+   */
+  const showOffer = (offered: {
+    readonly target: CommentAnchor;
+    readonly anchorBox: AnchorBox;
+    readonly text: string;
+    readonly canCopy: boolean;
+    readonly deselect: () => void;
+  }): void => {
+    const surface = host;
+    if (surface === undefined) return;
+    const panel: HTMLElement = selectionOffer({
+      text: offered.text,
+      canCopy: offered.canCopy,
+      onCopy: () => {
+        void (async () => {
+          if (await copyText(offered.text)) {
+            dismiss();
+            return;
+          }
+          // The clipboard is refused often enough to matter, and claiming a
+          // copy that did not happen leaves the reader pasting whatever they
+          // copied an hour ago. The selection is still live, so the keyboard
+          // route still works and the panel says so.
+          const note = document.createElement('p');
+          note.className = 'popover-note';
+          note.textContent = COPY_FAILED_NOTE;
+          panel.appendChild(note);
+          positionPanel(panel, offered.anchorBox, surface);
+        })();
+      },
+      onComment: () => {
+        // Captured when the panel appeared rather than re-read on click, so
+        // what gets anchored is what the reader was offered.
+        if (deps.compose?.(offered.target, offered.anchorBox) === true) {
+          dismiss();
+          return;
+        }
+        aim(offered.target);
+      },
+      onCancel: () => {
+        dismiss();
+        offered.deselect();
+      },
+    });
+    surface.appendChild(panel);
+    positionPanel(panel, offered.anchorBox, surface);
+    bubble = panel;
+  };
+
   /** Offers a target for a settled selection, and offers nothing otherwise. */
   const offer = (): void => {
     const surface = host;
@@ -3394,32 +3597,18 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     dismiss();
     const rect = range.getBoundingClientRect();
     const box = surface.getBoundingClientRect();
-    const offered = document.createElement('button');
-    offered.type = 'button';
-    offered.className = 'mark-bubble';
-    offered.textContent = 'Comment';
     // Content coordinates, not viewport ones: the stage scrolls its own
     // children, so an offset measured against the visible box would leave the
-    // bubble behind the moment the reader scrolls.
-    offered.style.left = `${rect.left - box.left + surface.scrollLeft + rect.width / 2}px`;
-    // A press that moved focus would collapse the selection before the click
-    // arrived, which is how a selection toolbar loses the thing it points at.
-    offered.addEventListener('mousedown', (event) => {
-      event.preventDefault();
+    // panel behind the moment the reader scrolls.
+    showOffer({
+      target,
+      anchorBox: anchorFromClientRect(rect, box, surface),
+      text: quote,
+      canCopy: true,
+      deselect: () => {
+        window.getSelection()?.removeAllRanges();
+      },
     });
-    // Captured above rather than re-read on click, so what gets anchored is
-    // what the bubble appeared for.
-    offered.addEventListener('click', () => {
-      aim(target);
-    });
-    surface.appendChild(offered);
-    // Above the selection, and never above the content box. The stage clips
-    // its overflow, so the first line of every relic would otherwise be
-    // offered a button sitting outside the box it is clipped to. The height is
-    // read after insertion because it is the button's own and not a guess.
-    const above = rect.top - box.top + surface.scrollTop;
-    offered.style.top = `${Math.max(above - offered.offsetHeight - MARK_BUBBLE_GAP, 0)}px`;
-    bubble = offered;
 
     // Keyboard and sidebar affordance
     const qa = document.createElement('button');
@@ -4126,15 +4315,40 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         event: CustomEvent<FrameSelectionMessage>
       ) => {
         const msg = event.detail;
-        if (msg?.exact && msg.exact.trim().length > 0) {
-          aim({
-            kind: 'quote',
-            exact: msg.exact.trim(),
-            ...(msg.prefix ? { prefix: msg.prefix } : {}),
-            ...(msg.suffix ? { suffix: msg.suffix } : {}),
-          });
+        if (!msg?.exact || msg.exact.trim().length === 0) return;
+        const target: CommentAnchor = {
+          kind: 'quote',
+          exact: msg.exact.trim(),
+          ...(msg.prefix ? { prefix: msg.prefix } : {}),
+          ...(msg.suffix ? { suffix: msg.suffix } : {}),
+        };
+        const frame = event.target;
+        dismiss();
+        if (msg.rect === undefined || !(frame instanceof HTMLElement)) {
+          // No geometry to draw over, which is what every framed selection
+          // looked like before the frame reported boxes. The sidebar takes
+          // it, exactly as it did then.
+          aim(target);
+          return;
         }
+        showOffer({
+          target,
+          anchorBox: frameAnchorBox(frame, msg.rect, next),
+          // The mark's quote is capped at 512 bytes, so copying it would
+          // hand back less than was selected without saying so. The frame
+          // sends the whole selection separately, and when it could not,
+          // Copy is not offered rather than offered as a prefix.
+          text: msg.text ?? msg.exact,
+          canCopy: msg.text !== undefined && msg.truncated !== true,
+          // The selection lives in the other origin and there is no message
+          // for reaching in to clear it. Taking the panel down is the whole
+          // of what this side can do.
+          deselect: () => {},
+        });
       }) as EventListener);
+      next.addEventListener('relic:frame-selection-cleared', () => {
+        dismiss();
+      });
       next.addEventListener('relic:frame-point', ((
         event: CustomEvent<FramePointMessage>
       ) => {
@@ -4335,6 +4549,14 @@ export function buildThread(
       // mark would put a network round trip behind a text selection.
       paintMarks(lastEntries);
     },
+    compose: (anchor, box) => {
+      // Refused rather than half-offered when there is no identity yet:
+      // verifying one is the sidebar's flow, and the caller falls back to it.
+      if (host === undefined || popover === undefined) return false;
+      if (session.kind !== 'verified' || cipher === undefined) return false;
+      openComposer(anchor, box);
+      return true;
+    },
   });
 
   section.append(title, marks.tools, status, list, composer, outcome);
@@ -4475,6 +4697,21 @@ export function buildThread(
     }
     paintPendingMark(host, pins, marks.target());
     host.appendChild(pins);
+
+    // After every mark is painted rather than during, because a text mark is
+    // wrapped into the document and a region is appended to the overlay, and
+    // only one pass sees both. A settled remark stays visible and goes
+    // quiet: hiding it would make the page claim a conversation that did
+    // not happen.
+    for (const entry of entries) {
+      if (entry.id === null) continue;
+      if ((entry.resolution ?? null) === null) continue;
+      for (const node of host.querySelectorAll(
+        `[data-comment-id="${entry.id}"]`
+      )) {
+        node.classList.add('is-resolved');
+      }
+    }
   };
 
   /**
@@ -4523,6 +4760,446 @@ export function buildThread(
     root.addEventListener('focusout', leave);
   };
 
+  // --- the conversation, opened on the thing it is about ----------------
+
+  let popover: PopoverLayer | undefined;
+  /** The comment whose card is pinned open, as opposed to merely hovered. */
+  let stickyId: string | undefined;
+  let activeId: string | undefined;
+  // The global timers rather than the ones hanging off `window`: a browser
+  // gives you the same function either way, and the test's window stub is
+  // deliberately partial, so reaching through it makes a real behaviour
+  // depend on how completely the harness imitates a browser.
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const frameWindow = (): Window | null =>
+    host?.querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
+      ?.contentWindow ?? null;
+
+  /**
+   * Lights one mark and its row, and puts out the last one.
+   *
+   * The frame is told separately because it owns the marks inside it and
+   * this origin cannot reach into them. Without that message, clicking a
+   * comment about text in a sandboxed relic scrolls to a mark that looks
+   * like every other mark.
+   */
+  const setActiveMark = (id: string | undefined): void => {
+    if (activeId !== undefined) pair(activeId, false);
+    activeId = id;
+    if (id !== undefined) pair(id, true);
+    frameWindow()?.postMessage(
+      { type: 'relic:active-mark', id: id ?? null },
+      '*'
+    );
+  };
+
+  const closeCard = (): void => {
+    clearTimeout(hoverTimer);
+    clearTimeout(leaveTimer);
+    popover?.hide();
+    stickyId = undefined;
+    setActiveMark(undefined);
+  };
+
+  /** Where a painted mark sits, in the stage's content coordinates. */
+  const anchorBoxFor = (id: string): AnchorBox | undefined => {
+    if (host === undefined) return undefined;
+    const node = host.querySelector<HTMLElement>(`[data-comment-id="${id}"]`);
+    if (node === null) return undefined;
+    return anchorFromClientRect(
+      node.getBoundingClientRect(),
+      host.getBoundingClientRect(),
+      host
+    );
+  };
+
+  const entryById = (id: string): CommentEntry | undefined =>
+    lastEntries.find((entry) => entry.id === id);
+
+  /**
+   * The card, built from the same renderer the sidebar uses.
+   *
+   * Two renderings of one comment drift until the same remark reads
+   * differently depending on where it was seen, so the row is built by
+   * `commentRow` here exactly as it is there and only the surroundings
+   * differ.
+   */
+  const openCard = (
+    entry: CommentEntry,
+    box: AnchorBox,
+    sticky: boolean
+  ): void => {
+    if (host === undefined || entry.id === null) return;
+    const layer = popover;
+    if (layer === undefined) return;
+    clearTimeout(leaveTimer);
+
+    const nodes = threadEntries(lastEntries);
+    const node = nodes.find((candidate) => candidate.entry.id === entry.id);
+    const replies = (node?.replies ?? []).map((reply) =>
+      commentRow(reply.entry, false, undefined, [], true)
+    );
+    const rows = document.createElement('ol');
+    rows.className = 'popover-thread';
+    rows.appendChild(
+      commentRow(entry, unplaceable.has(entry.id), undefined, replies, false)
+    );
+
+    const id = entry.id;
+    const actions: PopoverAction[] = [];
+    const reopen = (): void => {
+      const fresh = entryById(id);
+      const at = anchorBoxFor(id) ?? box;
+      if (fresh !== undefined) openCard(fresh, at, true);
+      else closeCard();
+    };
+
+    actions.push({
+      label: 'Reply',
+      className: 'popover-reply',
+      onSelect: () => {
+        stickyId = id;
+        if (session.kind !== 'verified' || cipher === undefined) {
+          // Replying needs an identity, verifying one needs the magic-link
+          // flow, and that flow lives in the sidebar. Saying so beats a
+          // field nobody could post from.
+          setOpen(true);
+          const note = document.createElement('p');
+          note.className = 'popover-note';
+          note.textContent =
+            'Verify an address in the comments panel, then reply here.';
+          layer.current()?.appendChild(note);
+          layer.reposition();
+          return;
+        }
+        const composer = inlineComposer({
+          placeholder: `Reply to ${plainLabel(entry.author ?? 'this comment')}`,
+          submitLabel: 'Post reply',
+          onCancel: reopen,
+          onSubmit: (body) => {
+            const opener = cipher;
+            if (opener === undefined) return;
+            composer.setBusy(true);
+            void (async () => {
+              const result = await postComment(
+                relicId,
+                {
+                  body,
+                  display_name: readDisplayName() || null,
+                  // A reply answers a comment that already carries a mark,
+                  // so it does not get one of its own. The thread nests it
+                  // under what it answers.
+                  anchor: null,
+                  addresses: id,
+                },
+                deps,
+                opener,
+                view.version
+              );
+              if (result.kind === 'refused') {
+                composer.setBusy(false);
+                composer.setNote(result.refusal.headline);
+                return;
+              }
+              await refresh();
+              reopen();
+            })();
+          },
+        });
+        layer.current()?.appendChild(composer.element);
+        layer.reposition();
+        composer.field.focus();
+      },
+    });
+
+    if (canEditComment(entry, session) && entry.kind === 'open') {
+      actions.push({
+        label: 'Edit',
+        className: 'popover-edit',
+        onSelect: () => {
+          stickyId = id;
+          const target = document.createElement('p');
+          target.className = 'popover-target';
+          target.textContent = markTargetLabel(entry.anchor);
+          const panel = popoverCard({
+            content: target,
+            actions: [],
+            commentId: id,
+          });
+          const composer = inlineComposer({
+            placeholder: 'What it should say instead',
+            submitLabel: 'Save',
+            value: entry.body,
+            disclosure:
+              'Editing replaces the text. Relic records that it was edited ' +
+              'and keeps no earlier copy.',
+            onCancel: reopen,
+            onSubmit: (body) => {
+              const opener = cipher;
+              if (opener === undefined) return;
+              composer.setBusy(true);
+              void (async () => {
+                const result = await editComment(
+                  relicId,
+                  id,
+                  {
+                    body,
+                    display_name: entry.displayName,
+                    // Carried forward rather than rebuilt. An edit changes
+                    // what a remark says and never where it points, and
+                    // moving the mark would leave every reply answering
+                    // something the reader can no longer see.
+                    anchor: entry.anchor,
+                    addresses: entry.addresses ?? null,
+                  },
+                  deps,
+                  opener
+                );
+                if (result.kind === 'refused') {
+                  composer.setBusy(false);
+                  composer.setNote(result.refusal.headline);
+                  return;
+                }
+                await refresh();
+                reopen();
+              })();
+            },
+          });
+          panel.appendChild(composer.element);
+          layer.show(panel, box);
+          composer.field.focus();
+        },
+      });
+    }
+
+    if (canResolveComment(entry, session)) {
+      const settled = (entry.resolution ?? null) !== null;
+      actions.push({
+        label: settled ? 'Reopen' : 'Resolve',
+        className: 'popover-resolve',
+        onSelect: () => {
+          stickyId = id;
+          void (async () => {
+            const result = await setCommentResolved(
+              relicId,
+              id,
+              !settled,
+              deps
+            );
+            if (result.kind === 'refused') {
+              const note = document.createElement('p');
+              note.className = 'popover-note';
+              note.textContent = result.refusal.headline;
+              layer.current()?.appendChild(note);
+              layer.reposition();
+              return;
+            }
+            await refresh();
+            reopen();
+          })();
+        },
+      });
+    }
+
+    actions.push({
+      label: 'Open in thread',
+      className: 'popover-open-thread',
+      kind: 'quiet',
+      onSelect: () => {
+        setOpen(true);
+        const row = list.querySelector(`[data-comment-id="${id}"]`);
+        if (row instanceof HTMLElement)
+          row.scrollIntoView({ block: 'nearest' });
+        closeCard();
+        setActiveMark(id);
+      },
+    });
+
+    const card = popoverCard({ content: rows, actions, commentId: id });
+    // Crossing the gap from a mark into its own card must not close it, and
+    // the pointer leaving both must. Bound on the card rather than tracked
+    // globally, because the card is replaced on every state change.
+    card.addEventListener('mouseenter', () => {
+      clearTimeout(leaveTimer);
+    });
+    card.addEventListener('mouseleave', () => {
+      if (stickyId !== undefined) return;
+      leaveTimer = setTimeout(closeCard, MARK_HOVER_CLOSE_MS);
+    });
+    layer.show(card, box);
+    if (sticky) stickyId = id;
+    setActiveMark(id);
+  };
+
+  /**
+   * Writing a new comment on the words it is about.
+   *
+   * The sidebar composer stays: it is where a remark about the whole
+   * document is written and where an address is verified. This one exists
+   * because a reader who has just selected a sentence is looking at the
+   * sentence, and asking them to cross the page to say something about it
+   * is how a mark ends up on the wrong line.
+   */
+  const openComposer = (anchor: CommentAnchor, box: AnchorBox): void => {
+    const layer = popover;
+    const opener = cipher;
+    if (layer === undefined || opener === undefined) return;
+    closeCard();
+
+    const target = document.createElement('p');
+    target.className = 'popover-target';
+    target.textContent = markTargetLabel(anchor);
+    const panel = popoverCard({ content: target, actions: [] });
+
+    const composer = inlineComposer({
+      placeholder: 'What is wrong with this, or what should change.',
+      submitLabel: 'Post',
+      disclosure: IDENTITY_DISCLOSURE,
+      onCancel: () => {
+        closeCard();
+        window.getSelection()?.removeAllRanges();
+      },
+      onSubmit: (body) => {
+        composer.setBusy(true);
+        void (async () => {
+          const result = await postComment(
+            relicId,
+            {
+              body,
+              display_name: readDisplayName() || null,
+              anchor,
+            },
+            deps,
+            opener,
+            view.version
+          );
+          if (result.kind === 'refused') {
+            composer.setBusy(false);
+            composer.setNote(result.refusal.headline);
+            return;
+          }
+          // The chip goes back to the whole document, because the target it
+          // was holding has been spent. Leaving it aimed would put the next
+          // comment on the last thing selected.
+          marks.clear();
+          window.getSelection()?.removeAllRanges();
+          closeCard();
+          await refresh();
+        })();
+      },
+    });
+    panel.appendChild(composer.element);
+    layer.show(panel, box);
+    // Held open against hover, because a composer that vanished when the
+    // pointer wandered would take the sentence being typed with it.
+    stickyId = COMPOSING;
+    composer.field.focus();
+  };
+
+  /** Opens the card for a mark the reader is pointing at, by id. */
+  const cardForId = (
+    id: string,
+    box: AnchorBox | undefined,
+    sticky: boolean
+  ): void => {
+    const entry = entryById(id);
+    if (entry === undefined) return;
+    const at = box ?? anchorBoxFor(id);
+    if (at === undefined) return;
+    openCard(entry, at, sticky);
+  };
+
+  const bindMarkPointing = (root: HTMLElement): void => {
+    root.addEventListener('mouseover', (event: Event) => {
+      if (!(event.target instanceof Element)) return;
+      const mark = event.target.closest<HTMLElement>('[data-comment-id]');
+      const id = mark?.dataset.commentId;
+      if (id === undefined || stickyId !== undefined) return;
+      clearTimeout(leaveTimer);
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => {
+        cardForId(id, undefined, false);
+      }, MARK_HOVER_OPEN_MS);
+    });
+    root.addEventListener('mouseout', (event: Event) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest('[data-comment-id]') === null) return;
+      if (stickyId !== undefined) return;
+      clearTimeout(hoverTimer);
+      leaveTimer = setTimeout(closeCard, MARK_HOVER_CLOSE_MS);
+    });
+    // A pin and a timeline marker are buttons, so they are in the tab order.
+    // A keyboard reader gets the card the same way a pointer does.
+    root.addEventListener('focusin', (event: Event) => {
+      if (!(event.target instanceof Element)) return;
+      const id =
+        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
+          .commentId;
+      if (id === undefined) return;
+      cardForId(id, undefined, true);
+    });
+    root.addEventListener('click', (event: Event) => {
+      if (!(event.target instanceof Element)) return;
+      if (popover?.contains(event.target) === true) return;
+      const id =
+        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
+          .commentId;
+      if (id === undefined) {
+        // A press on the document itself, away from every mark and outside
+        // the card, is how a reader puts the conversation down.
+        if (stickyId !== undefined) closeCard();
+        return;
+      }
+      event.preventDefault();
+      cardForId(id, undefined, true);
+    });
+    root.addEventListener('relic:frame-mark-hover', ((
+      event: CustomEvent<FrameMarkHoverMessage>
+    ) => {
+      const msg = event.detail;
+      if (stickyId !== undefined) return;
+      clearTimeout(hoverTimer);
+      clearTimeout(leaveTimer);
+      if (msg?.id === null || msg?.id === undefined) {
+        leaveTimer = setTimeout(closeCard, MARK_HOVER_CLOSE_MS);
+        return;
+      }
+      const frame = event.target;
+      const id = msg.id;
+      const box =
+        msg.rect !== undefined &&
+        frame instanceof HTMLElement &&
+        host !== undefined
+          ? frameAnchorBox(frame, msg.rect, host)
+          : undefined;
+      hoverTimer = setTimeout(() => {
+        cardForId(id, box, false);
+      }, MARK_HOVER_OPEN_MS);
+    }) as EventListener);
+    root.addEventListener('relic:frame-mark-click', ((
+      event: CustomEvent<FrameMarkClickMessage>
+    ) => {
+      const msg = event.detail;
+      if (!msg?.id) return;
+      const frame = event.target;
+      const box =
+        msg.rect !== undefined &&
+        frame instanceof HTMLElement &&
+        host !== undefined
+          ? frameAnchorBox(frame, msg.rect, host)
+          : undefined;
+      cardForId(msg.id, box, true);
+    }) as EventListener);
+  };
+
+  // Escape closes the conversation the same way it closes the offer, because
+  // a reader who has learned one has learned the other.
+  document.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key === 'Escape' && popover?.current() !== undefined) closeCard();
+  });
+
   bindPairing(list);
   list.addEventListener('click', (event: Event) => {
     if (!(event.target instanceof Element)) return;
@@ -4538,6 +5215,12 @@ export function buildThread(
     if (surface === undefined) return;
     const adapter = adapterFor(entry.anchor, surface);
     adapter?.reveal?.(surface, entry.anchor);
+    // Revealing answers "where", and lighting answers "which one". A reader
+    // who clicked a row about one sentence in a paragraph of marked
+    // sentences needs the second answer more than the first.
+    setActiveMark(commentId);
+    const box = anchorBoxFor(commentId);
+    if (box !== undefined) openCard(entry, box, true);
   });
 
   const policyLink = (): HTMLElement => {
@@ -4896,11 +5579,13 @@ export function buildThread(
     toggle: toggleOpen,
     attach: (next) => {
       host = next;
+      popover = popoverLayer(next);
       // Once per stage. A second binding would toggle the class twice on one
       // pointer crossing, which reads as the pairing not working at all.
       if (next.dataset.pairBind !== '1') {
         next.dataset.pairBind = '1';
         bindPairing(next);
+        bindMarkPointing(next);
         next.addEventListener('relic:page-changed', () => {
           paintMarks(lastEntries);
         });

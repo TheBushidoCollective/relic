@@ -262,7 +262,7 @@ describe('re-aiming preserves composer text', () => {
 
     // Re-aim at a quote
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.thread, 'mark-quote-action').dispatch('click');
 
     expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
     // Draft text must be preserved after re-aiming
@@ -278,7 +278,7 @@ describe('re-aiming preserves composer text', () => {
     textarea.value = 'Draft note to keep.';
 
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.thread, 'mark-quote-action').dispatch('click');
 
     expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
 
@@ -301,7 +301,7 @@ describe('escape cancels target and aiming while keeping draft', () => {
     textarea.value = 'Preserved draft across escape.';
 
     select(mounted, 'the second paragraph');
-    only(mounted.stage, 'mark-bubble').dispatch('click');
+    only(mounted.thread, 'mark-quote-action').dispatch('click');
 
     expect(mounted.chip()).toContain('Commenting on "the second paragraph"');
 
