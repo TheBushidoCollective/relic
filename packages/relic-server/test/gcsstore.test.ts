@@ -666,4 +666,99 @@ describe('gcsStore', () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.id).toBe('c1');
   });
+
+  test('an edit stamps the row and a cleared resolution omits its keys from the document', async () => {
+    const gcs = fakeGcs();
+    const store = storeOn(gcs);
+    await store.putComment({
+      id: 'c1',
+      relicId: 'relic',
+      author: 'reader@example.com',
+      createdAt: 1000,
+      ciphertext: 'YWJjZA',
+    });
+
+    const edited = await store.updateComment('relic', 'c1', {
+      ciphertext: 'ZWRpdGVk',
+      editedAt: 2000,
+      resolved: { at: 2000, by: 'reader@example.com' },
+    });
+    expect(edited?.ciphertext).toBe('ZWRpdGVk');
+    expect(edited?.editedAt).toBe(2000);
+    expect(edited?.resolvedAt).toBe(2000);
+    expect(edited?.resolvedBy).toBe('reader@example.com');
+
+    const rawBody = gcs.objects.get('m/comment/relic/c1.json')?.body;
+    const parsed = JSON.parse(rawBody ?? '{}') as Record<string, unknown>;
+    expect(parsed['editedAt']).toBe(2000);
+    expect(parsed['resolvedAt']).toBe(2000);
+    expect(parsed['resolvedBy']).toBe('reader@example.com');
+
+    const cleared = await store.updateComment('relic', 'c1', {
+      resolved: null,
+    });
+    expect(cleared?.editedAt).toBe(2000);
+    expect(cleared?.ciphertext).toBe('ZWRpdGVk');
+    expect(cleared?.resolvedAt).toBeUndefined();
+    expect(cleared?.resolvedBy).toBeUndefined();
+
+    const clearedBody = JSON.parse(
+      gcs.objects.get('m/comment/relic/c1.json')?.body ?? '{}'
+    ) as Record<string, unknown>;
+    expect('resolvedAt' in clearedBody).toBe(false);
+    expect('resolvedBy' in clearedBody).toBe(false);
+    expect(clearedBody['editedAt']).toBe(2000);
+  });
+
+  test('a patch that loses the race retries against fresh state', async () => {
+    const gcs = fakeGcs();
+    const store = storeOn(gcs);
+    await store.putComment({
+      id: 'c1',
+      relicId: 'relic',
+      author: 'reader@example.com',
+      createdAt: 1000,
+      ciphertext: 'YWJjZA',
+    });
+
+    // One competing write lands between our read and our write.
+    gcs.contendOn('m/comment/relic/c1.json', 1);
+
+    const updated = await store.updateComment('relic', 'c1', {
+      ciphertext: 'ZWRpdGVk',
+      editedAt: 2000,
+    });
+    expect(updated?.ciphertext).toBe('ZWRpdGVk');
+
+    // A second store reads what actually landed, not a lost overwrite.
+    const other = storeOn(gcs);
+    expect((await other.getComment('relic', 'c1'))?.ciphertext).toBe(
+      'ZWRpdGVk'
+    );
+  });
+
+  test('a hopelessly contended comment raises rather than overwriting on stale state', async () => {
+    const gcs = fakeGcs();
+    const store = storeOn(gcs, 2);
+    await store.putComment({
+      id: 'c1',
+      relicId: 'relic',
+      author: 'reader@example.com',
+      createdAt: 1000,
+      ciphertext: 'YWJjZA',
+    });
+
+    gcs.contendOn('m/comment/relic/c1.json', -1);
+
+    await expect(
+      store.updateComment('relic', 'c1', { ciphertext: 'ZQ', editedAt: 2000 })
+    ).rejects.toThrow(/compare-and-swap/);
+  });
+
+  test('patching a comment that is gone is undefined, not an invention', async () => {
+    const store = storeOn(fakeGcs());
+    expect(
+      await store.updateComment('relic', 'ghost', { resolved: null })
+    ).toBeUndefined();
+  });
 });

@@ -42,6 +42,7 @@ import {
   type ObjectStorage,
 } from './storage.ts';
 import {
+  type CommentPatch,
   MemoryStore,
   type MintLogEntry,
   type ReasonClass,
@@ -385,6 +386,9 @@ export function createApp(options: AppOptions = {}): RelicApp {
       }
       if (fourth !== undefined && request.method === 'DELETE') {
         return deleteComment(second, fourth, request, now);
+      }
+      if (fourth !== undefined && request.method === 'PATCH') {
+        return patchComment(second, fourth, request, ip, now);
       }
       return new Response('Method not allowed', { status: 405 });
     }
@@ -1322,6 +1326,15 @@ export function createApp(options: AppOptions = {}): RelicApp {
         created_at: new Date(row.createdAt).toISOString(),
         ciphertext: row.ciphertext,
         version: row.version ?? null,
+        edited_at:
+          row.editedAt === undefined
+            ? null
+            : new Date(row.editedAt).toISOString(),
+        resolved_at:
+          row.resolvedAt === undefined
+            ? null
+            : new Date(row.resolvedAt).toISOString(),
+        resolved_by: row.resolvedBy ?? null,
       }))
     );
   }
@@ -1401,10 +1414,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     // re-derived from here, so validating the encoding is the whole of the
     // server's business with this field.
     const ciphertext = body['ciphertext'];
-    if (typeof ciphertext !== 'string' || !isBase64Url(ciphertext)) {
-      return refuse('invalid_comment', { relic_id: relicId });
-    }
-    if (ciphertext.length > config.commentCiphertextCapChars) {
+    if (!validCommentCiphertext(ciphertext)) {
       return refuse('invalid_comment', { relic_id: relicId });
     }
     const rawAddresses = body['addresses'];
@@ -1562,6 +1572,171 @@ export function createApp(options: AppOptions = {}): RelicApp {
 
     await store.deleteComment(relicId, commentId);
     return new Response(null, { status: 204 });
+  }
+
+  /**
+   * The one thing this server can check about a comment body, for both
+   * write paths. The plaintext caps live in `@relic/format` ahead of
+   * encryption and cannot be re-derived here, so validating the transport
+   * encoding against the same cap in both places is the whole of the
+   * server's business with the field, and the reason it is one function
+   * rather than two copies that could drift apart.
+   */
+  function validCommentCiphertext(ciphertext: unknown): ciphertext is string {
+    return (
+      typeof ciphertext === 'string' &&
+      isBase64Url(ciphertext) &&
+      ciphertext.length <= config.commentCiphertextCapChars
+    );
+  }
+
+  /**
+   * Change a comment after the fact: replace its sealed body, or settle it
+   * as resolved, or both in one call.
+   *
+   * There is no edit history (`frame.md`): the service holds one ciphertext
+   * per comment and an edit overwrites it, so the honest thing on offer is
+   * the fact that an edit happened, stamped `edited_at`, not the earlier
+   * text. An edit is authorized for the comment's author alone, by the same
+   * rule delete uses. Resolution is authorized for the author or the holder
+   * of the relic's publish token, because a publisher settling feedback on
+   * their own relic is the point of the state; it is deliberately clear
+   * data, since it decides whether a republish is blocked, which this
+   * server answers before any key exists on its side.
+   */
+  async function patchComment(
+    rawId: string,
+    commentId: string,
+    request: Request,
+    ip: string,
+    now: number
+  ): Promise<Response> {
+    if (config.killSwitchEngaged) {
+      return refuse('service_paused', { retry_after_seconds: 300 });
+    }
+
+    let relicId: string;
+    try {
+      relicId = parseRelicId(rawId);
+    } catch {
+      return refuse('invalid_relic_id');
+    }
+
+    // One budget for every comment write from one address, so an edit
+    // cannot become the cheap way around the posting limit.
+    const verdict = limiter.check(
+      `comment ${ip}`,
+      config.commentRateLimit,
+      now
+    );
+    if (!verdict.allowed) {
+      return refuse('comment_rate_limited', {
+        retry_after_seconds: verdict.retryAfterSeconds,
+      });
+    }
+
+    if ((await store.getTombstone(relicId)) !== undefined) {
+      return refuse('relic_removed', {
+        relic_id: relicId,
+        report_url: `${config.serviceOrigin}/abuse`,
+      });
+    }
+    const row = await store.getRelic(relicId);
+    if (row === undefined) {
+      return refuse('relic_not_found', { relic_id: relicId });
+    }
+
+    const existing = await store.getComment(relicId, commentId);
+    if (existing === undefined) {
+      return refuse('comment_not_found', {
+        relic_id: relicId,
+        comment_id: commentId,
+      });
+    }
+
+    const raw = await readJson(request);
+    const body: Record<string, unknown> =
+      raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>)
+        : {};
+    const rawCiphertext = body['ciphertext'];
+    const rawResolved = body['resolved'];
+    if (rawCiphertext === undefined && rawResolved === undefined) {
+      return refuse('nothing_to_change', {
+        relic_id: relicId,
+        comment_id: commentId,
+      });
+    }
+
+    const author = await resolveAuthor(body, request, row.publishTokenHash);
+
+    // The sealed body belongs to its author alone: the verified address
+    // that made it, or the publish token when the comment was made as the
+    // publisher. A session address can never equal `publisher`, so this one
+    // comparison covers both credentials.
+    if (rawCiphertext !== undefined) {
+      if (author === undefined || author !== existing.author) {
+        return refuse('comment_forbidden', {
+          relic_id: relicId,
+          comment_id: commentId,
+        });
+      }
+    }
+
+    // Settling feedback on your own relic is the point of the state, so the
+    // publish token may resolve a comment its holder did not make.
+    if (rawResolved !== undefined) {
+      const mayResolve =
+        author !== undefined &&
+        (author === existing.author || author === 'publisher');
+      if (!mayResolve) {
+        return refuse('comment_forbidden', {
+          relic_id: relicId,
+          comment_id: commentId,
+        });
+      }
+    }
+
+    let patch: CommentPatch = {};
+    if (rawCiphertext !== undefined) {
+      if (!validCommentCiphertext(rawCiphertext)) {
+        return refuse('invalid_comment', { relic_id: relicId });
+      }
+      patch = { ...patch, ciphertext: rawCiphertext, editedAt: now };
+    }
+    if (rawResolved !== undefined) {
+      if (typeof rawResolved !== 'boolean') {
+        return refuse('invalid_comment', { relic_id: relicId });
+      }
+      // Authorization has already established `author` for a resolution.
+      patch = {
+        ...patch,
+        resolved: rawResolved ? { at: now, by: author as string } : null,
+      };
+    }
+
+    const updated = await store.updateComment(relicId, commentId, patch);
+    if (updated === undefined) {
+      return refuse('comment_not_found', {
+        relic_id: relicId,
+        comment_id: commentId,
+      });
+    }
+
+    return json({
+      comment_id: updated.id,
+      author: updated.author,
+      created_at: new Date(updated.createdAt).toISOString(),
+      edited_at:
+        updated.editedAt === undefined
+          ? null
+          : new Date(updated.editedAt).toISOString(),
+      resolved_at:
+        updated.resolvedAt === undefined
+          ? null
+          : new Date(updated.resolvedAt).toISOString(),
+      resolved_by: updated.resolvedBy ?? null,
+    });
   }
 
   /**

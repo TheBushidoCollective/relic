@@ -3506,3 +3506,432 @@ describe('comment notifications', () => {
     }
   });
 });
+
+describe('comment edits and resolutions', () => {
+  async function createSession(
+    email = 'reader@example.com',
+    expiresAt = now + 3600 * 1000
+  ): Promise<string> {
+    const token = `token-${Math.random()}`;
+    const tokenHash = await sha256Hex(token);
+    await app.store.putSession({
+      tokenHash,
+      email,
+      createdAt: now,
+      expiresAt,
+    });
+    return `relic_session=${token}`;
+  }
+
+  function patch(
+    relicId: string,
+    commentId: string,
+    init: {
+      cookie?: string;
+      publishToken?: string;
+      ciphertext?: string;
+      resolved?: boolean;
+    } = {}
+  ): Promise<Response> {
+    return app.fetch(
+      req(`/api/relics/${relicId}/comments/${commentId}`, {
+        method: 'PATCH',
+        headers: {
+          ...(init.cookie === undefined ? {} : { cookie: init.cookie }),
+        },
+        body: JSON.stringify({
+          ...(init.publishToken === undefined
+            ? {}
+            : { publish_token: init.publishToken }),
+          ...(init.ciphertext === undefined
+            ? {}
+            : { ciphertext: init.ciphertext }),
+          ...(init.resolved === undefined ? {} : { resolved: init.resolved }),
+        }),
+      })
+    );
+  }
+
+  async function postAs(
+    relicId: string,
+    init: { cookie?: string; publishToken?: string; ciphertext?: string } = {}
+  ): Promise<{ commentId: string; author: string }> {
+    const posted = await app.fetch(
+      req(`/api/relics/${relicId}/comments`, {
+        method: 'POST',
+        headers: {
+          ...(init.cookie === undefined ? {} : { cookie: init.cookie }),
+        },
+        body: JSON.stringify({
+          ...(init.publishToken === undefined
+            ? {}
+            : { publish_token: init.publishToken }),
+          ciphertext: init.ciphertext ?? 'YWJjZA',
+        }),
+      })
+    );
+    expect(posted.status).toBe(201);
+    const body = (await posted.json()) as {
+      comment_id: string;
+      author: string;
+    };
+    return { commentId: body.comment_id, author: body.author };
+  }
+
+  async function listThread(relicId: string): Promise<
+    Array<{
+      comment_id: string;
+      ciphertext: string;
+      edited_at: string | null;
+      resolved_at: string | null;
+      resolved_by: string | null;
+    }>
+  > {
+    const listed = await app.fetch(req(`/api/relics/${relicId}/comments`));
+    expect(listed.status).toBe(200);
+    return (await listed.json()) as Array<{
+      comment_id: string;
+      ciphertext: string;
+      edited_at: string | null;
+      resolved_at: string | null;
+      resolved_by: string | null;
+    }>;
+  }
+
+  type PatchBody = {
+    comment_id: string;
+    author: string;
+    created_at: string;
+    edited_at: string | null;
+    resolved_at: string | null;
+    resolved_by: string | null;
+  };
+
+  test('a fresh thread lists all three fields as null', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const listed = await listThread(id);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.comment_id).toBe(commentId);
+    expect(listed[0]?.edited_at).toBeNull();
+    expect(listed[0]?.resolved_at).toBeNull();
+    expect(listed[0]?.resolved_by).toBeNull();
+  });
+
+  test('an author edits their own comment and the row carries the edit stamp', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    now += 5000;
+    const edited = await patch(id, commentId, {
+      cookie: alice,
+      ciphertext: 'ZWRpdGVk',
+    });
+    expect(edited.status).toBe(200);
+    const body = (await edited.json()) as PatchBody;
+    expect(body.comment_id).toBe(commentId);
+    expect(body.author).toBe('alice@example.com');
+    expect(body.created_at).toBe(new Date(now - 5000).toISOString());
+    expect(body.edited_at).toBe(new Date(now).toISOString());
+    expect(body.resolved_at).toBeNull();
+    expect(body.resolved_by).toBeNull();
+
+    const listed = await listThread(id);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.ciphertext).toBe('ZWRpdGVk');
+    expect(listed[0]?.edited_at).toBe(new Date(now).toISOString());
+  });
+
+  test("a stranger cannot edit somebody else's comment", async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const bob = await createSession('bob@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const edited = await patch(id, commentId, {
+      cookie: bob,
+      ciphertext: 'Ym9i',
+    });
+    expect(edited.status).toBe(403);
+    expect((await edited.json()).code).toBe('comment_forbidden');
+  });
+
+  test('an unauthenticated caller is refused for both fields', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const edited = await patch(id, commentId, { ciphertext: 'eHl6' });
+    expect(edited.status).toBe(403);
+    expect((await edited.json()).code).toBe('comment_forbidden');
+
+    const resolved = await patch(id, commentId, { resolved: true });
+    expect(resolved.status).toBe(403);
+    expect((await resolved.json()).code).toBe('comment_forbidden');
+  });
+
+  test('a session address cannot edit a publisher-authored comment', async () => {
+    const { id, grant } = await publish();
+    const { commentId } = await postAs(id, {
+      publishToken: grant['publish_token'] as string,
+    });
+    const alice = await createSession('alice@example.com');
+
+    const edited = await patch(id, commentId, {
+      cookie: alice,
+      ciphertext: 'YWxpY2U',
+    });
+    expect(edited.status).toBe(403);
+    expect((await edited.json()).code).toBe('comment_forbidden');
+  });
+
+  test('the publish token edits a publisher-authored comment', async () => {
+    const { id, grant } = await publish();
+    const token = grant['publish_token'] as string;
+    const { commentId } = await postAs(id, { publishToken: token });
+
+    now += 5000;
+    const edited = await patch(id, commentId, {
+      publishToken: token,
+      ciphertext: 'cmVwbHk',
+    });
+    expect(edited.status).toBe(200);
+    const body = (await edited.json()) as PatchBody;
+    expect(body.author).toBe('publisher');
+    expect(body.edited_at).toBe(new Date(now).toISOString());
+  });
+
+  test('the publish token resolves a comment its holder did not make', async () => {
+    const { id, grant } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const resolved = await patch(id, commentId, {
+      publishToken: grant['publish_token'] as string,
+      resolved: true,
+    });
+    expect(resolved.status).toBe(200);
+    const body = (await resolved.json()) as PatchBody;
+    expect(body.resolved_at).toBe(new Date(now).toISOString());
+    expect(body.resolved_by).toBe('publisher');
+  });
+
+  test("a stranger cannot resolve somebody else's comment", async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const bob = await createSession('bob@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const resolved = await patch(id, commentId, {
+      cookie: bob,
+      resolved: true,
+    });
+    expect(resolved.status).toBe(403);
+    expect((await resolved.json()).code).toBe('comment_forbidden');
+  });
+
+  test('an author resolves their own comment, then unresolving clears both fields', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const resolved = await patch(id, commentId, {
+      cookie: alice,
+      resolved: true,
+    });
+    expect(resolved.status).toBe(200);
+    const set = (await resolved.json()) as PatchBody;
+    expect(set.resolved_at).toBe(new Date(now).toISOString());
+    expect(set.resolved_by).toBe('alice@example.com');
+
+    now += 1000;
+    const cleared = await patch(id, commentId, {
+      cookie: alice,
+      resolved: false,
+    });
+    expect(cleared.status).toBe(200);
+    const body = (await cleared.json()) as PatchBody;
+    expect(body.resolved_at).toBeNull();
+    expect(body.resolved_by).toBeNull();
+
+    const listed = await listThread(id);
+    expect(listed[0]?.resolved_at).toBeNull();
+    expect(listed[0]?.resolved_by).toBeNull();
+  });
+
+  test('clearing a resolution leaves the edit stamp standing', async () => {
+    const { id, grant } = await publish();
+    const token = grant['publish_token'] as string;
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    now += 5000;
+    await patch(id, commentId, { cookie: alice, ciphertext: 'ZWRpdA' });
+    now += 5000;
+    await patch(id, commentId, { publishToken: token, resolved: true });
+    now += 5000;
+    const cleared = await patch(id, commentId, {
+      publishToken: token,
+      resolved: false,
+    });
+
+    const body = (await cleared.json()) as PatchBody;
+    expect(body.resolved_at).toBeNull();
+    expect(body.edited_at).toBe(new Date(now - 10000).toISOString());
+
+    // And the store row agrees, which is what a later republish check reads.
+    const row = await app.store.getComment(id, commentId);
+    expect(row?.editedAt).toBe(now - 10000);
+    expect(row?.resolvedAt).toBeUndefined();
+    expect(row?.resolvedBy).toBeUndefined();
+  });
+
+  test('an over-cap ciphertext is refused', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const edited = await patch(id, commentId, {
+      cookie: alice,
+      ciphertext: 'A'.repeat(8193),
+    });
+    expect(edited.status).toBe(400);
+    expect((await edited.json()).code).toBe('invalid_comment');
+  });
+
+  test('a non-base64url ciphertext is refused', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const edited = await patch(id, commentId, {
+      cookie: alice,
+      ciphertext: 'not valid/base64!',
+    });
+    expect(edited.status).toBe(400);
+    expect((await edited.json()).code).toBe('invalid_comment');
+  });
+
+  test('a body with neither field is nothing_to_change', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const response = await patch(id, commentId, { cookie: alice });
+    expect(response.status).toBe(400);
+    expect((await response.json()).code).toBe('nothing_to_change');
+  });
+
+  test('a missing comment is 404, before any authorization question', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+
+    const response = await patch(id, 'no-such-comment', {
+      cookie: alice,
+      ciphertext: 'YWJjZA',
+    });
+    expect(response.status).toBe(404);
+    expect((await response.json()).code).toBe('comment_not_found');
+  });
+
+  test('a comment on a tombstoned relic is refused', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    const removed = await app.fetch(
+      req(`/api/relics/${id}?reason=abuse`, {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer operator-secret' },
+      })
+    );
+    expect(removed.status).toBe(200);
+
+    const edited = await patch(id, commentId, {
+      cookie: alice,
+      ciphertext: 'YWJjZA',
+    });
+    expect(edited.status).toBe(410);
+    expect((await edited.json()).code).toBe('relic_removed');
+  });
+
+  test('the paused service refuses a patch', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    app = build({ config: { killSwitchEngaged: true } });
+    const edited = await patch(id, commentId, {
+      cookie: alice,
+      ciphertext: 'YWJjZA',
+    });
+    expect(edited.status).toBe(503);
+    expect((await edited.json()).code).toBe('service_paused');
+  });
+
+  test('an edit and a resolution land in one patch', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    now += 5000;
+    const response = await patch(id, commentId, {
+      cookie: alice,
+      ciphertext: 'Ym90aA',
+      resolved: true,
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as PatchBody;
+    expect(body.edited_at).toBe(new Date(now).toISOString());
+    expect(body.resolved_at).toBe(new Date(now).toISOString());
+    expect(body.resolved_by).toBe('alice@example.com');
+  });
+
+  test('the store distinguishes leaving a resolution alone from clearing it', async () => {
+    const { id } = await publish();
+    const alice = await createSession('alice@example.com');
+    const { commentId } = await postAs(id, { cookie: alice });
+
+    // Clearing on a comment that was never resolved stays clean, not nulls.
+    await app.store.updateComment(id, commentId, { resolved: null });
+    let row = await app.store.getComment(id, commentId);
+    expect(row?.resolvedAt).toBeUndefined();
+    expect(row?.resolvedBy).toBeUndefined();
+    expect(row?.ciphertext).toBe('YWJjZA');
+
+    now += 5000;
+    const set = await app.store.updateComment(id, commentId, {
+      ciphertext: 'ZWRpdGVk',
+      editedAt: now,
+      resolved: { at: now, by: 'alice@example.com' },
+    });
+    expect(set?.editedAt).toBe(now);
+    expect(set?.resolvedAt).toBe(now);
+    expect(set?.resolvedBy).toBe('alice@example.com');
+
+    // Clearing removes the resolution keys and leaves the edit stamp.
+    const cleared = await app.store.updateComment(id, commentId, {
+      resolved: null,
+    });
+    expect(cleared?.editedAt).toBe(now);
+    expect(cleared?.ciphertext).toBe('ZWRpdGVk');
+    expect(cleared?.resolvedAt).toBeUndefined();
+    expect(cleared?.resolvedBy).toBeUndefined();
+
+    // Omitting `resolved` leaves an existing resolution untouched.
+    now += 5000;
+    await app.store.updateComment(id, commentId, {
+      resolved: { at: now, by: 'alice@example.com' },
+    });
+    row = await app.store.updateComment(id, commentId, {
+      ciphertext: 'YWdhaW4',
+      editedAt: now,
+    });
+    expect(row?.resolvedAt).toBe(now);
+    expect(row?.resolvedBy).toBe('alice@example.com');
+    expect(row?.editedAt).toBe(now);
+  });
+});

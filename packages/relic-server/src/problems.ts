@@ -47,6 +47,9 @@ export type ProblemCode =
   // A commenter may delete their own comment and no one else's. The operator
   // path is the abuse surface, not this one.
   | 'comment_forbidden'
+  // A patch that carries neither an edit nor a resolution has nothing to
+  // apply, and saying so is cheaper than a silent 204 that changed nothing.
+  | 'nothing_to_change'
   // Magic-link session. A dead or spent link is not a malformed request.
   | 'invalid_session'
   | 'auth_rate_limited';
@@ -72,6 +75,7 @@ const STATUS: Readonly<Record<ProblemCode, number>> = {
   comment_not_found: 404,
   comment_rate_limited: 429,
   comment_forbidden: 403,
+  nothing_to_change: 400,
   invalid_session: 401,
   auth_rate_limited: 429,
 };
@@ -98,6 +102,7 @@ const TITLE: Readonly<Record<ProblemCode, string>> = {
   comment_not_found: 'No such comment',
   comment_rate_limited: 'Too many comments',
   comment_forbidden: 'Not your comment',
+  nothing_to_change: 'Nothing to change',
   invalid_session: 'Sign-in link is dead or already used',
   auth_rate_limited: 'Too many sign-in requests',
 };
