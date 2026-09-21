@@ -233,12 +233,17 @@ describe('republish comments gate', () => {
     );
     expect(republished.version).toBe(2);
 
-    // Verify read comments reports original comment addressed by the reply
-    const read = await readComments(published.relic_id, deps);
+    // Verify read comments reports original comment addressed by the reply.
+    // Scoped to every version: the default is the current version only, and
+    // the reply predates the republish it enabled.
+    const read = await readComments(published.relic_id, deps, {
+      version: '*',
+    });
     expect(read.summary).toEqual({
       total: 2,
       addressed: 1,
       open: 0,
+      resolved: 0,
       unreadable: 0,
     });
     const c1 = read.comments.find(
@@ -318,13 +323,17 @@ describe('republish comments gate', () => {
     expect(republished.acknowledgements).toBeDefined();
     expect(republished.acknowledgements).toHaveLength(2);
 
-    // Read back all comments
-    const read = await readComments(published.relic_id, deps);
+    // Read back all comments, on every version: the acknowledgements are
+    // stamped with the new version, and the originals they answer are not.
+    const read = await readComments(published.relic_id, deps, {
+      version: '*',
+    });
     expect(read.count).toBe(4);
     expect(read.summary).toEqual({
       total: 4,
       addressed: 2,
       open: 0,
+      resolved: 0,
       unreadable: 0,
     });
 

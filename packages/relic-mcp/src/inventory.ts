@@ -606,8 +606,15 @@ interface MintFailed {
   };
 }
 
-/** The metered probe: authoritative, and it spends one of the relic's opens. */
-async function mintRelic(
+/**
+ * The metered probe: authoritative, and it spends one of the relic's opens.
+ *
+ * Exported because it is the one service answer that carries the current
+ * version, and the comment read needs the same source `relic_show` uses when
+ * it scopes a thread by default. A caller that does not need it must not pay
+ * for it.
+ */
+export async function mintRelic(
   relicId: string,
   deps: PublishDeps
 ): Promise<MintOk | MintFailed> {

@@ -181,10 +181,22 @@ export async function republish(
   // The comment gate: before publishing a new version, read the relic's
   // comments, decrypt them locally, and verify every comment has been
   // addressed. Unaddressed or unreadable comments refuse the republish.
-  const commentResult = await readComments(input.relic_id, deps);
+  // The read is explicitly scoped to every version, never the newer
+  // current-version default: a remark left unanswered on version 1 still
+  // blocks, and inheriting the default would silently weaken this
+  // guarantee the moment the relic had any history at all. A resolved
+  // comment counts as handled and no longer blocks; resolving is one of
+  // the two ways to clear the gate, the other being an acknowledgement.
+  const commentResult = await readComments(input.relic_id, deps, {
+    version: '*',
+  });
   const unreadableComments = commentResult.comments.filter((c) => !c.readable);
   const openComments = commentResult.comments.filter(
-    (c) => c.readable && !c.addressed && c.addresses === null
+    (c) =>
+      c.readable &&
+      !c.addressed &&
+      c.addresses === null &&
+      c.resolution === null
   );
 
   if (addressesEntries && addressesEntries.length > 0) {

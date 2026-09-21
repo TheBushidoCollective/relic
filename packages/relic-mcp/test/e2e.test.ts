@@ -540,6 +540,8 @@ describe('the MCP surface', () => {
       'relic_republish',
       'relic_read_comments',
       'relic_comment',
+      'relic_edit_comment',
+      'relic_resolve_comment',
       'relic_describe_client',
     ]);
     for (const tool of tools) {
