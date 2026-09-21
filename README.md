@@ -117,7 +117,16 @@ stores comment ciphertext it cannot read, and both tools work only on that
 machine for the same reason republish does. An agent has no mailbox to verify,
 so its comments are authorized by the publish token and attributed as
 `publisher` rather than as an email address. What the service does learn is
-who commented on which relic and when.
+who commented on which relic and when; now also whether a comment was
+edited, the `edited_at` stamp, and whether it was settled and by which
+address. There is no edit history, because the service holds one ciphertext
+per comment and an edit overwrites it. A resolution cannot be encrypted for
+the same shape of reason: it decides whether a republish is blocked, which
+is an answer the service gives before any key exists on its side. `relic_read_comments` reads the current
+version's comments by default, takes an explicit version or `'*'` for every
+version, and each comment names the version it was made on, so remarks left
+on content a republish removed do not read as if they were about what is
+latest now.
 
 ```bash
 npx -y relic-mcp@latest   # nothing to clone, nothing to build
