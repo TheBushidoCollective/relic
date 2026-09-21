@@ -186,17 +186,18 @@ function writeFile(path: string, content: string | Uint8Array): void {
 }
 
 /** The parsed publish state file, read from the path the client itself uses. */
+interface StoredEntry {
+  key: string;
+  publish_token: string;
+  version: number;
+  content_sha256?: string;
+}
+
 async function readStoredState(): Promise<{
-  relics: Record<
-    string,
-    { key: string; publish_token: string; version: number }
-  >;
+  relics: Record<string, StoredEntry>;
 }> {
   return JSON.parse(await readStateFile(publishStatePath(), 'utf8')) as {
-    relics: Record<
-      string,
-      { key: string; publish_token: string; version: number }
-    >;
+    relics: Record<string, StoredEntry>;
   };
 }
 /** Stand in for the viewer: mint, fetch, decrypt. */
@@ -1171,6 +1172,134 @@ describe('local publish state', () => {
   });
 });
 
+describe('duplicate versions', () => {
+  test('an identical file is refused, and nothing reaches the network', async () => {
+    writeFile('/work/notes.md', '# first\n');
+    const first = await publish({ path: 'notes.md' }, deps);
+
+    let calls = 0;
+    const counting = ((...args: Parameters<typeof globalThis.fetch>) => {
+      calls += 1;
+      return deps.fetch(...args);
+    }) as typeof globalThis.fetch;
+
+    let refusal: PublishError | undefined;
+    try {
+      await republish(
+        { relic_id: first.relic_id, path: 'notes.md' },
+        { ...deps, fetch: counting }
+      );
+    } catch (error) {
+      refusal = error as PublishError;
+    }
+
+    expect(refusal?.code).toBe('duplicate_version');
+    expect(refusal?.message).toContain('already holds exactly this content');
+    expect(refusal?.details['version']).toBe(1);
+    // The service cannot answer this question: it holds ciphertext, and a
+    // fresh salt makes two encryptions of one file differ. So the refusal
+    // is decided here, and no request is spent on it.
+    expect(calls).toBe(0);
+    // The version it refused to add is the version still recorded.
+    const stored = await readStoredState();
+    expect(stored.relics[first.relic_id]?.version).toBe(1);
+  });
+
+  test('a changed byte is a real version, and the recorded digest moves with it', async () => {
+    writeFile('/work/notes.md', '# first\n');
+    const first = await publish({ path: 'notes.md' }, deps);
+    const before = (await readStoredState()).relics[first.relic_id]
+      ?.content_sha256;
+    expect(before).toMatch(/^[0-9a-f]{64}$/);
+
+    writeFile('/work/notes.md', '# first\n\nand a second line\n');
+    const second = await republish(
+      { relic_id: first.relic_id, path: 'notes.md' },
+      deps
+    );
+
+    expect(second.version).toBe(2);
+    const after = (await readStoredState()).relics[first.relic_id]
+      ?.content_sha256;
+    expect(after).toMatch(/^[0-9a-f]{64}$/);
+    // Recorded against the version that is now live, so a third republish
+    // of this same file is the one that gets refused.
+    expect(after).not.toBe(before);
+    await expect(
+      republish({ relic_id: first.relic_id, path: 'notes.md' }, deps)
+    ).rejects.toMatchObject({ code: 'duplicate_version' });
+  });
+
+  test('a new title alone is a version, because it is what a recipient is shown', async () => {
+    writeFile('/work/notes.md', '# first\n');
+    const first = await publish({ path: 'notes.md' }, deps);
+
+    // Same bytes, new title. The card and the link preview change, so a
+    // recipient is being shown something they have not seen.
+    const retitled = await republish(
+      { relic_id: first.relic_id, path: 'notes.md', title: 'Q3 report' },
+      deps
+    );
+    expect(retitled.version).toBe(2);
+    expect(retitled.title).toBe('Q3 report');
+
+    // And repeating that retitle is itself a duplicate.
+    await expect(
+      republish(
+        { relic_id: first.relic_id, path: 'notes.md', title: 'Q3 report' },
+        deps
+      )
+    ).rejects.toMatchObject({ code: 'duplicate_version' });
+  });
+
+  test('an entry written before the digest cannot be compared, so it republishes once and records one', async () => {
+    writeFile('/work/notes.md', '# first\n');
+    const first = await publish({ path: 'notes.md' }, deps);
+
+    // Every entry on a real machine looks like this: published before the
+    // digest was recorded, and unrepairable from anywhere, because the
+    // service will not hand a client the plaintext to hash.
+    const stored = await readStoredState();
+    const entry = stored.relics[first.relic_id];
+    if (entry === undefined) throw new Error('publish state entry is missing');
+    delete entry.content_sha256;
+    await writeStateFile(publishStatePath(), JSON.stringify(stored), 'utf8');
+
+    const allowed = await republish(
+      { relic_id: first.relic_id, path: 'notes.md' },
+      deps
+    );
+    expect(allowed.version).toBe(2);
+
+    // Self-healing: that republish recorded a digest, so the next identical
+    // one is refused.
+    expect(
+      (await readStoredState()).relics[first.relic_id]?.content_sha256
+    ).toMatch(/^[0-9a-f]{64}$/);
+    await expect(
+      republish({ relic_id: first.relic_id, path: 'notes.md' }, deps)
+    ).rejects.toMatchObject({ code: 'duplicate_version' });
+  });
+
+  test('a digest of the wrong shape is malformed state, not a comparison that quietly matches nothing', async () => {
+    writeFile('/work/notes.md', '# first\n');
+    const first = await publish({ path: 'notes.md' }, deps);
+
+    const stored = await readStoredState();
+    const entry = stored.relics[first.relic_id];
+    if (entry === undefined) throw new Error('publish state entry is missing');
+    entry.content_sha256 = 'not-a-digest';
+    await writeStateFile(publishStatePath(), JSON.stringify(stored), 'utf8');
+
+    // Refused loudly. Passing it through would compare against a value
+    // nothing can equal, and the duplicate gate would be off with no word
+    // about it anywhere.
+    await expect(
+      republish({ relic_id: first.relic_id, path: 'notes.md' }, deps)
+    ).rejects.toMatchObject({ code: 'local_state_unreadable' });
+  });
+});
+
 describe('republish refusals', () => {
   test('a wrong publish token surfaces invalid_publish_token distinctly', async () => {
     writeFile('/work/notes.md', 'first');
@@ -1399,6 +1528,9 @@ describe('plaintext title in link previews', () => {
     const republishBodies: Record<string, unknown>[] = [];
     const uploads: string[] = [];
 
+    // A new version needs new content: an identical one is refused before
+    // it reaches the wire, and this test is about what the wire carries.
+    writeFile('/work/secret.md', '# confidential, second draft');
     const repubResult = await republish(
       { relic_id: pubResult.relic_id, path: 'secret.md', title: '' },
       { ...deps, fetch: captureRepublish(republishBodies, uploads) }

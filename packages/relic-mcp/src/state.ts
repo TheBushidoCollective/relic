@@ -87,6 +87,23 @@ export interface PublishState {
   /** When this machine last published a new version, ISO 8601. */
   readonly updated_at?: string | undefined;
   /**
+   * SHA-256, hex, of the plaintext of the newest version this machine
+   * published: its bytes, its name and its title together.
+   *
+   * It exists to refuse a republish that would put identical content behind
+   * the link a second time. A version is a thing recipients are told to look
+   * at again, so one that changes nothing is a false alarm they cannot tell
+   * from a real one until they have read it.
+   *
+   * Absent on every entry written before this client, and absence is legacy
+   * state rather than an error. It cannot be repaired from anywhere: the
+   * service holds ciphertext and would not hand a client the plaintext to
+   * hash even if it were asked. So an entry without it cannot take part in
+   * the check, its next republish is allowed on that ground, and the digest
+   * is recorded as that republish lands.
+   */
+  readonly content_sha256?: string | undefined;
+  /**
    * The lifetime the first grant fixed, ISO 8601, or null for a relic kept
    * until it is deleted.
    *
@@ -328,7 +345,14 @@ function validatePublishStateEntry(
     !Number.isSafeInteger(candidate['version']) ||
     candidate['version'] < 1 ||
     (candidate['source'] !== undefined &&
-      !isSourceIdentity(candidate['source']))
+      !isSourceIdentity(candidate['source'])) ||
+    // Checked rather than trusted, because the duplicate-version refusal
+    // compares against it: a digest of the wrong shape would match nothing,
+    // and that refusal would then fail open on every republish, with no
+    // word about it anywhere.
+    (candidate['content_sha256'] !== undefined &&
+      (typeof candidate['content_sha256'] !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(candidate['content_sha256'])))
   ) {
     throw new Error(
       `publish state at ${publishStatePath()} holds a malformed entry for ` +

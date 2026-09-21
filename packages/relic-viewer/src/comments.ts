@@ -158,6 +158,16 @@ export const MAX_BODY_BYTES = COMMENT_BODY_LIMIT_BYTES;
 /** A display name aliases the address. It is decoration, and it is bounded. */
 export const MAX_DISPLAY_NAME_BYTES = COMMENT_DISPLAY_NAME_LIMIT_BYTES;
 
+/**
+ * Said at the display name field, and nowhere else.
+ *
+ * It used to ride along with the identity disclosure, which made a
+ * three-sentence paragraph out of two facts and one aside. The aside
+ * belongs next to the control it describes, where it is a short answer to
+ * the question a reader has while looking at it.
+ */
+export const DISPLAY_NAME_NOTE = 'Shown beside your address, never instead.';
+
 const encoder = new TextEncoder();
 
 export function utf8Bytes(text: string): number {
@@ -174,14 +184,13 @@ export function utf8Bytes(text: string): number {
  * would be the overclaim `viewer.md` 6.3 already bans on the load screen.
  */
 export const IDENTITY_DISCLOSURE =
-  'Your verified email address is shown with your comment to anyone holding ' +
-  'this link, and Relic can see which address commented on which relic. A ' +
-  'display name is decoration beside it, never instead of it.';
+  'Your address is shown with your comment, and Relic sees who commented ' +
+  'on what.';
 
 /** Said at the point of asking for an address, before one is typed. */
 export const DELIVERY_DISCLOSURE =
-  'Sending the link means handling your address in plain text. It cannot be ' +
-  'done any other way, so it is worth knowing before you type one.';
+  'Sending the link means handling your address in the clear. There is no ' +
+  'other way to post it.';
 
 export type SessionState =
   /** A valid session cookie, and the address it verified. */
@@ -904,8 +913,8 @@ export function resolvedLabel(resolution: Resolution): string {
  * say so where it is used rather than in a document nobody opens.
  */
 export const RESOLUTION_DISCLOSURE =
-  'Resolving is not encrypted: Relic records that this comment was settled ' +
-  'and which address settled it, though not a word of what it says.';
+  'Resolving is not encrypted. Relic records who settled it, never what it ' +
+  'says.';
 
 /**
  * How a comment's time reads.

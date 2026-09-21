@@ -324,6 +324,9 @@ describe('prior publish steering', () => {
       { mode: 0o600 }
     );
 
+    // Changed content, because an identical republish is refused on its own
+    // grounds and this test is about legacy state surviving one.
+    await writeFile(path, '# second\n');
     const updated = await republish({ relic_id: first.relic_id, path }, deps);
     expect(updated.version).toBe(2);
     const separate = await publish({ path }, deps);

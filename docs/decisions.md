@@ -369,3 +369,72 @@ Two reversals in one station.
 **One piece of comment state is deliberately not encrypted.** The rows hold editorial state as plaintext fields. A resolution decides whether a republish is blocked, and that is an answer the service gives before any key exists on its side, so there is nothing on its side to seal it with: an encrypted column the operator could not perform would either break the gate or gate on plaintext pretending to be sealed. The operator learns that a comment was settled and by which address, and still cannot read a word of it. The edit stamp is disclosed on the same basis but costs less, because the service holds one ciphertext per comment and an edit overwrites it: there is no edit history, and the honest disclosure is that an edit happened and when, never the text. Frame-bridge geometry rode along in the same station and is restated in `viewer.md` 6.6 rather than here.
 
 **The guard against recurrence.** `packages/relic-viewer/test/comment-write-contract.test.ts` carries the contract's tests; the mutation discipline and the integration gate belong to the integration owner, not this entry.
+
+## 2026-09-20: A comparison aligns on what did not change, and an identical version is refused
+
+Four picks, all in the same session, all about a reader holding two versions
+in their head.
+
+**Side by side is the default for every rendered comparison, and the swipe is
+one click away.** Swipe was the default and it is the wrong one: a wipe shows
+the pixels moving but never both readings at once, so a reader comparing prose
+has to remember the left to judge the right. Side by side shows both. The swipe
+still earns its place where the change is positional rather than textual, which
+is why it stays a click away rather than being removed, and its slider is
+hidden in every other layout because a control that does nothing where it sits
+is worse than an absent one. **The choice is remembered across a version
+switch**, in `localStorage`, because a reader who picked a layout and then
+moved between versions was silently handed the default back, and the default is
+the one they had just rejected.
+
+**The scroll sync anchors on unchanged content, not on page fraction.** Two
+versions of one document have different heights, so aligning by fraction puts
+the same paragraph at two different places, and the error grows with the size
+of the edit: on the framed fixture, a version with two inserted paragraphs
+lands 117 pixels out on a document a reader is trying to read line against
+line. The diff already pairs changed nodes; it now also pairs identical ones,
+mints an id for each pair in its own namespace, and the follower scrolls the
+paired node rather than a proportion. Both namespaces cross the frame boundary:
+the first cut only accepted the changed-pair namespace on the wire, which
+silently dropped most messages and left the follower still while the leader
+scrolled, and `packages/relic-viewer/test/scroll-sync.test.ts` now holds a case
+that fails when either namespace is refused.
+
+**A comparison carries a change navigator, and every change is addressable.**
+Prev, next and a position that says which of how many, plus a list of changes
+in the sidebar whose rows jump. Each stop scrolls the pane that actually holds
+the change rather than always the newer one, because an addition exists in one
+version and a removal in the other, and asking the pane without it produces a
+jump to nothing. Before the diff has run the navigator says it is comparing;
+it never says "No changes", which is an answer it does not have yet and which
+reads as a finished comparison of two identical versions.
+
+**A republish whose content is identical to the live version is refused,
+locally, before any request.** A version is a thing recipients are told to look
+at again, and one that changes nothing cannot be told from a real one until it
+has been read, so it spends their attention and returns nothing. The client
+keeps `content_sha256` in publish state: SHA-256 over the bytes, the envelope
+filename, and the plaintext title together, so a retitle is a real version and
+a re-upload of the same file is not. The service cannot answer this question
+and is never asked, because it holds ciphertext and a fresh salt per object
+(`format.md` 3.10) makes two encryptions of one file differ byte for byte.
+It sits above the comment gate, which is the first thing in that path to touch
+the network: an unchanged file is also the likeliest reason comments are still
+open, so naming the duplicate first names the cause.
+
+Two costs, accepted. **Legacy state cannot take part**, and there is no repair
+for it anywhere: the digest is of plaintext, and the service would not hand a
+client the plaintext to hash even if asked. Such an entry republishes once on
+that ground and records a digest as it lands, so the gate is self-healing per
+relic rather than retroactive. **And the gate is client-side discipline, not a
+boundary**, exactly like the comment gate: the machine holding the publish
+token can call the HTTP API directly, and the service cannot enforce what it
+cannot read.
+
+**The guard against recurrence.** `describe('duplicate versions')` in
+`packages/relic-mcp/test/e2e.test.ts` holds five cases: an identical file is
+refused with zero fetch calls, a changed byte moves the recorded digest, a
+retitle is allowed and then refused on repeat, an entry with no digest
+republishes once and records one, and a malformed digest refuses loudly instead
+of comparing against a value nothing can equal. Removing the gate fails four of
+them; trusting a malformed digest fails the fifth.

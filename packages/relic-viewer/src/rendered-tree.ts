@@ -34,6 +34,34 @@ export interface Mark {
   readonly kind: MarkKind;
   /** Same value on the two changed nodes one tree diff paired. */
   readonly syncId?: string;
+  /**
+   * This one change, addressable, so a reader can be taken to it.
+   *
+   * Deliberately not the sync id. Only paired nodes and anchors carry a
+   * sync id, because an id the other side does not have makes the follower
+   * fall back to the page fraction. A paragraph that exists on one side
+   * only still has to be reachable by the jump control, so it gets a name
+   * here and stays out of the alignment.
+   */
+  readonly changeId?: string;
+}
+
+/**
+ * A point of reference on content that did not change.
+ *
+ * Scroll syncing used to have nothing to hold onto except changed nodes,
+ * which is the wrong set: a version that adds two paragraphs at the top and
+ * touches nothing else has exactly one changed region, at the very top, and
+ * from the second screen onwards the two documents were aligned by page
+ * fraction and therefore off by the height of the insertion.
+ *
+ * An anchor is the same node on both sides, agreed by the diff, carrying no
+ * outline and no meaning for the reader. It exists so the follower can align
+ * on the paragraph the leader is actually looking at.
+ */
+export interface Anchor {
+  readonly path: NodePath;
+  readonly syncId: string;
 }
 
 /** Frame to parent: what this frame actually rendered. */
@@ -42,10 +70,44 @@ export interface TreeMessage {
   readonly tree: TreeNode;
 }
 
+/**
+ * Parent to frame: bring one marked node to this height in your viewport.
+ *
+ * Carries an id the parent minted and a number. No content, in either
+ * direction, which is the rule every message across this boundary follows.
+ */
+export interface RevealChangeMessage {
+  readonly type: 'relic:reveal-change';
+  readonly changeId: string;
+  readonly top: number;
+}
+
+export function isRevealChangeMessage(
+  data: unknown
+): data is RevealChangeMessage {
+  if (typeof data !== 'object' || data === null) return false;
+  const message = data as Record<string, unknown>;
+  if (message['type'] !== 'relic:reveal-change') return false;
+  const changeId = message['changeId'];
+  if (typeof changeId !== 'string' || !/^c[0-9]+$/.test(changeId)) {
+    return false;
+  }
+  const top = message['top'];
+  return typeof top === 'number' && Number.isFinite(top) && Math.abs(top) < 1e5;
+}
+
 /** Parent to frame: which of your own nodes differ from the other version. */
 export interface AnnotateMessage {
   readonly type: 'relic:annotate';
   readonly marks: readonly Mark[];
+  /**
+   * Unchanged content both sides agreed on, for aligning the scroll.
+   *
+   * Optional so a sender that predates them is still a valid message. It
+   * carries paths and ids and no content, exactly like `marks`, which is
+   * what keeps a second message type safe inside a frame that renders once.
+   */
+  readonly anchors?: readonly Anchor[];
 }
 
 /**
@@ -300,6 +362,7 @@ export function applyMarks(root: unknown, marks: readonly Mark[]): number {
     const node = asNode(value);
     if (node === undefined) return;
     node.removeAttribute?.('data-relic-sync-id');
+    node.removeAttribute?.('data-relic-change-id');
     for (const child of childrenOf(node)) clearAuthoredSyncIds(child);
   };
   clearAuthoredSyncIds(root);
@@ -317,9 +380,48 @@ export function applyMarks(root: unknown, marks: readonly Mark[]): number {
     if (mark.syncId !== undefined) {
       node.setAttribute('data-relic-sync-id', mark.syncId);
     }
+    if (mark.changeId !== undefined) {
+      node.setAttribute('data-relic-change-id', mark.changeId);
+    }
     applied += 1;
   }
 
+  return applied;
+}
+
+/**
+ * Put the shared ids on unchanged content.
+ *
+ * Separate from `applyMarks` and always run after it, because that function
+ * clears every authored `data-relic-sync-id` first: a relic is untrusted and
+ * could otherwise steer comparison scrolling by guessing an id. Running this
+ * first would have its own anchors wiped by that sweep.
+ *
+ * Only the id is written. An anchor that also wrote `data-relic-diff` would
+ * outline half the document as changed.
+ */
+export function applyAnchors(
+  root: unknown,
+  anchors: readonly Anchor[]
+): number {
+  let applied = 0;
+  for (const anchor of anchors) {
+    let node = asNode(root);
+    for (const index of anchor.path) {
+      if (node === undefined) break;
+      node = keptChildren(node)[index];
+    }
+    if (node === undefined) continue;
+    if (node.nodeType !== ELEMENT_NODE) continue;
+    if (typeof node.setAttribute !== 'function') continue;
+    // A changed node already carries its own paired id and outline. Writing
+    // an anchor over it would replace the id the two sides agreed on for the
+    // change with one agreed for the container, and the change would stop
+    // being the thing the panes align on.
+    if (node.getAttribute?.('data-relic-diff') !== null) continue;
+    node.setAttribute('data-relic-sync-id', anchor.syncId);
+    applied += 1;
+  }
   return applied;
 }
 
@@ -375,13 +477,41 @@ export function isAnnotateMessage(data: unknown): data is AnnotateMessage {
     ) {
       return false;
     }
-    const path = mark['path'];
-    if (!Array.isArray(path)) return false;
-    for (const index of path) {
-      if (typeof index !== 'number') return false;
-      if (!Number.isSafeInteger(index) || index < 0) return false;
+    const changeId = mark['changeId'];
+    if (
+      changeId !== undefined &&
+      (typeof changeId !== 'string' || !/^c[0-9]+$/.test(changeId))
+    ) {
+      return false;
+    }
+    if (!isNodePath(mark['path'])) return false;
+  }
+
+  const anchors = message['anchors'];
+  if (anchors !== undefined) {
+    if (!Array.isArray(anchors)) return false;
+    for (const entry of anchors) {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const anchor = entry as Record<string, unknown>;
+      // Anchors are minted in their own namespace, so a message cannot
+      // smuggle one in wearing a change's name and take over the identity
+      // the two panes agreed on for that change.
+      const syncId = anchor['syncId'];
+      if (typeof syncId !== 'string' || !/^a[0-9]+$/.test(syncId)) {
+        return false;
+      }
+      if (!isNodePath(anchor['path'])) return false;
     }
   }
 
+  return true;
+}
+
+function isNodePath(value: unknown): value is NodePath {
+  if (!Array.isArray(value)) return false;
+  for (const index of value) {
+    if (typeof index !== 'number') return false;
+    if (!Number.isSafeInteger(index) || index < 0) return false;
+  }
   return true;
 }

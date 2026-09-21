@@ -41,7 +41,12 @@ function isLandmark(value: unknown): value is ScrollLandmark {
   const mark = value as Record<string, unknown>;
   return (
     typeof mark['id'] === 'string' &&
-    /^d[0-9]+$/.test(mark['id']) &&
+    // Both namespaces the diff mints: `d` for a changed pair, `a` for
+    // matched content. Accepting only changed pairs silently dropped every
+    // message carrying an anchor, which is most of them once unchanged
+    // content became something the panes can align on, and the follower
+    // then sat still while the leader scrolled.
+    /^[da][0-9]+$/.test(mark['id']) &&
     typeof mark['top'] === 'number' &&
     Number.isFinite(mark['top'])
   );

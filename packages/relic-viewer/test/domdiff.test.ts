@@ -1,11 +1,17 @@
 import { describe, expect, test } from 'bun:test';
-import { diffTrees, MAX_LISTED_CHANGES } from '../src/domdiff.ts';
 import {
+  diffTrees,
+  MAX_LISTED_CHANGES,
+  type RenderedChange,
+} from '../src/domdiff.ts';
+import {
+  applyAnchors,
   applyMarks,
   captureTree,
   isAnnotateMessage,
   isTreeMessage,
   MAX_TREE_NODES,
+  type Mark,
   type TreeNode,
 } from '../src/rendered-tree.ts';
 
@@ -126,6 +132,125 @@ describe('capturing what a document rendered', () => {
   });
 });
 
+/** A change row without its stop index, for the tests about its wording. */
+function described(change: RenderedChange | undefined): unknown {
+  if (change === undefined) return undefined;
+  const { jumpIndex: _jumpIndex, ...rest } = change;
+  return rest;
+}
+
+/**
+ * A mark without its stop name.
+ *
+ * These tests are about which nodes got marked and which pairs the diff
+ * agreed on. Addressing for the jump control is asserted on its own, below,
+ * so it does not have to be restated in every one of them.
+ */
+function placement(marks: readonly Mark[]): unknown[] {
+  return marks.map(({ path, kind, syncId }) => ({
+    path,
+    kind,
+    ...(syncId === undefined ? {} : { syncId }),
+  }));
+}
+
+describe('anchoring the panes on content that did not change', () => {
+  test('matched blocks are paired, so there is something to align on', () => {
+    const before = element(
+      'body',
+      element('p', text('one')),
+      element('p', text('two'))
+    );
+    const after = element(
+      'body',
+      element('p', text('inserted at the top')),
+      element('p', text('one')),
+      element('p', text('two'))
+    );
+
+    const result = diffTrees(before, after);
+    // The reader's complaint in one assertion: a version that only inserts
+    // at the top used to leave the rest of the document with no reference
+    // point at all, so from the second screen down the panes were aligned
+    // by page fraction and off by the height of the insertion.
+    expect(result.beforeAnchors.length).toBeGreaterThan(0);
+    expect(result.beforeAnchors.map((a) => a.syncId)).toEqual(
+      result.afterAnchors.map((a) => a.syncId)
+    );
+  });
+
+  test('the same unchanged paragraph is one id on both sides', () => {
+    const before = element('body', element('p', text('one')));
+    const after = element('body', element('p', text('one')));
+    const result = diffTrees(before, after);
+    const [beforeAnchor] = result.beforeAnchors;
+    const [afterAnchor] = result.afterAnchors;
+    expect(beforeAnchor?.syncId).toBe(afterAnchor?.syncId as string);
+    // Different paths, because the two documents are not the same object.
+    expect(beforeAnchor?.path).toEqual([0]);
+    expect(afterAnchor?.path).toEqual([0]);
+  });
+
+  test('anchors are named apart from changes, so neither can claim the other', () => {
+    const before = element(
+      'body',
+      element('p', text('one')),
+      element('p', text('keep'))
+    );
+    const after = element(
+      'body',
+      element('p', text('ONE')),
+      element('p', text('keep'))
+    );
+    const result = diffTrees(before, after);
+    for (const anchor of result.afterAnchors) {
+      expect(anchor.syncId.startsWith('a')).toBe(true);
+    }
+    for (const mark of result.addedMarks) {
+      if (mark.syncId !== undefined)
+        expect(mark.syncId.startsWith('d')).toBe(true);
+    }
+  });
+
+  test('inline runs are not anchored, because a pane aligns on blocks', () => {
+    const before = element('body', element('p', element('em', text('same'))));
+    const after = element('body', element('p', element('em', text('same'))));
+    const result = diffTrees(before, after);
+    expect(result.afterAnchors.map((a) => a.path)).toEqual([[0]]);
+  });
+
+  test('a change keeps its own id when a container is anchored around it', () => {
+    const root = new NodeStub('BODY', [new NodeStub('P'), new NodeStub('P')]);
+    applyMarks(root, [{ path: [1], kind: 'changed', syncId: 'd3' }]);
+    applyAnchors(root, [
+      { path: [0], syncId: 'a0' },
+      { path: [1], syncId: 'a1' },
+    ]);
+    // The changed node keeps the id the two panes agreed on for the change.
+    // Overwriting it would align them on the container instead, which is
+    // the thing the change is inside rather than the change.
+    expect(root.childNodes[1]?.getAttribute('data-relic-sync-id')).toBe('d3');
+    expect(root.childNodes[0]?.getAttribute('data-relic-sync-id')).toBe('a0');
+  });
+
+  test('an anchor wearing a change name is refused on the wire', () => {
+    expect(
+      isAnnotateMessage({
+        type: 'relic:annotate',
+        marks: [],
+        anchors: [{ path: [0], syncId: 'a0' }],
+      })
+    ).toBe(true);
+    expect(
+      isAnnotateMessage({
+        type: 'relic:annotate',
+        marks: [],
+        anchors: [{ path: [0], syncId: 'd0' }],
+      })
+    ).toBe(false);
+  });
+});
+
 describe('comparing two rendered documents', () => {
   test('identical trees report rendering identically, not an empty result', () => {
     const tree = element('body', element('p', text('same')));
@@ -135,9 +260,9 @@ describe('comparing two rendered documents', () => {
     expect(result.summary).toBe(
       'No changes. These versions render identically.'
     );
-    expect(result.addedMarks).toEqual([]);
-    expect(result.removedMarks).toEqual([]);
-    expect(result.changes).toEqual([]);
+    expect(placement(result.addedMarks)).toEqual([]);
+    expect(placement(result.removedMarks)).toEqual([]);
+    expect(result.changes.map(described)).toEqual([]);
   });
 
   test('an added paragraph marks the current side and not the historical one', () => {
@@ -152,10 +277,12 @@ describe('comparing two rendered documents', () => {
     expect(result.changed).toBe(true);
     expect(result.additions).toBe(2);
     expect(result.removals).toBe(0);
-    expect(result.addedMarks).toEqual([{ path: [1], kind: 'added' }]);
-    expect(result.removedMarks).toEqual([]);
+    expect(placement(result.addedMarks)).toEqual([
+      { path: [1], kind: 'added' },
+    ]);
+    expect(placement(result.removedMarks)).toEqual([]);
     expect(result.summary).toBe('2 added.');
-    expect(result.changes[0]).toEqual({
+    expect(described(result.changes[0])).toEqual({
       kind: 'added',
       label: 'paragraph',
       before: '',
@@ -174,8 +301,10 @@ describe('comparing two rendered documents', () => {
     const result = diffTrees(before, after);
     expect(result.removals).toBe(2);
     expect(result.additions).toBe(0);
-    expect(result.removedMarks).toEqual([{ path: [1], kind: 'removed' }]);
-    expect(result.addedMarks).toEqual([]);
+    expect(placement(result.removedMarks)).toEqual([
+      { path: [1], kind: 'removed' },
+    ]);
+    expect(placement(result.addedMarks)).toEqual([]);
     expect(result.changes[0]?.kind).toBe('removed');
   });
 
@@ -187,14 +316,14 @@ describe('comparing two rendered documents', () => {
     expect(result.changed).toBe(true);
     // The mark lands on the element, because an attribute cannot be set on a
     // text node.
-    expect(result.removedMarks).toEqual([
+    expect(placement(result.removedMarks)).toEqual([
       { path: [0], kind: 'changed', syncId: 'd0' },
     ]);
-    expect(result.addedMarks).toEqual([
+    expect(placement(result.addedMarks)).toEqual([
       { path: [0], kind: 'changed', syncId: 'd0' },
     ]);
     expect(result.summary).toBe('1 changed.');
-    expect(result.changes).toEqual([
+    expect(result.changes.map(described)).toEqual([
       {
         kind: 'changed',
         label: 'heading',
@@ -210,7 +339,7 @@ describe('comparing two rendered documents', () => {
 
     const result = diffTrees(before, after);
     expect(result.changed).toBe(true);
-    expect(result.changes[0]).toEqual({
+    expect(described(result.changes[0])).toEqual({
       kind: 'changed',
       label: 'image',
       before: 'src=blob:one',
@@ -235,7 +364,7 @@ describe('comparing two rendered documents', () => {
     const result = diffTrees(before, after);
     expect(result.additions).toBe(0);
     expect(result.removals).toBe(0);
-    expect(result.addedMarks).toEqual([
+    expect(placement(result.addedMarks)).toEqual([
       { path: [1], kind: 'changed', syncId: 'd0' },
     ]);
   });
