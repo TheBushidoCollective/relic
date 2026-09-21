@@ -1853,10 +1853,19 @@ canvas.relic-page {
   font-size: 0.84rem;
 }
 
+/*
+ * Two lines: the label above, the quote under it.
+ *
+ * Three columns was the layout, and every list lands in a sidebar a reader
+ * can drag down to 230px, where the first two columns ate every pixel:
+ * 5.5rem and 7rem plus the gaps leave about six for the quote, which
+ * `overflow-wrap: anywhere` then broke one character per line into a 995px
+ * tall row. One layout, sized for the column the list actually renders in.
+ */
 .diff-change {
   display: grid;
-  grid-template-columns: 5.5rem 7rem minmax(0, 1fr);
-  gap: 0.75rem;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: 0.15rem 0.75rem;
   padding: 0.5rem 0.75rem;
 }
 
@@ -1883,9 +1892,46 @@ canvas.relic-page {
   color: var(--ink-soft);
 }
 
+/*
+ * Three lines of the quote, then it stops.
+ *
+ * The row is a way to reach the change, not a copy of it: pressing it puts
+ * the reader on the real text. An unclamped paragraph made one row taller
+ * than the viewport, which turned a list of three changes into a scroll.
+ */
 .diff-change-detail {
+  grid-column: 1 / -1;
   min-width: 0;
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+
+/*
+ * On a changed row the old text and the new one each get their own two
+ * lines.
+ *
+ * Clamping the whole cell cut the replacement off entirely: the row showed
+ * three lines of struck-through old text and nothing of what it became,
+ * which is the half the reader is looking for. So the cell stops clamping
+ * where both exist and each side clamps itself.
+ */
+.diff-change-changed .diff-change-detail {
+  display: block;
+  overflow: visible;
+}
+
+.diff-change-detail del,
+.diff-change-detail ins {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 
 .diff-change-detail del {
@@ -1895,7 +1941,6 @@ canvas.relic-page {
 
 .diff-change-detail ins {
   background: var(--diff-added);
-  margin-left: 0.4rem;
   text-decoration: none;
 }
 
@@ -2181,10 +2226,6 @@ canvas.relic-page {
     gap: 0.6rem;
   }
 
-  .diff-change {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.15rem;
-  }
 
   .diff-summary {
     align-items: flex-start;

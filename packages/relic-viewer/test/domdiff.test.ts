@@ -275,13 +275,17 @@ describe('comparing two rendered documents', () => {
 
     const result = diffTrees(before, after);
     expect(result.changed).toBe(true);
-    expect(result.additions).toBe(2);
+    // One thing a reader would say was added, not two tree nodes. The
+    // paragraph and its text are one change, and the summary sits above a
+    // list and a navigator that both count it once.
+    expect(result.additions).toBe(1);
     expect(result.removals).toBe(0);
     expect(placement(result.addedMarks)).toEqual([
       { path: [1], kind: 'added' },
     ]);
     expect(placement(result.removedMarks)).toEqual([]);
-    expect(result.summary).toBe('2 added.');
+    expect(result.summary).toBe('1 added.');
+    expect(result.changes).toHaveLength(1);
     expect(described(result.changes[0])).toEqual({
       kind: 'added',
       label: 'paragraph',
@@ -299,8 +303,9 @@ describe('comparing two rendered documents', () => {
     const after = element('body', element('p', text('one')));
 
     const result = diffTrees(before, after);
-    expect(result.removals).toBe(2);
+    expect(result.removals).toBe(1);
     expect(result.additions).toBe(0);
+    expect(result.summary).toBe('1 removed.');
     expect(placement(result.removedMarks)).toEqual([
       { path: [1], kind: 'removed' },
     ]);

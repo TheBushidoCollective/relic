@@ -379,6 +379,40 @@ function comparisonLayoutFaults(source: string): readonly string[] {
   if (!/height:\s*100%/.test(comparePane)) {
     faults.push('compare-pane does not take full height of grid track');
   }
+
+  // Every change list lands in a sidebar a reader can drag to 230px. Three
+  // fixed columns there left the quote about six pixels, which broke one
+  // character per line into a row 995px tall, so the quote takes its own
+  // line and stops after three of them.
+  const changeRow = rule('.diff-change');
+  const changeDetail = rule('.diff-change-detail');
+  if (/grid-template-columns:[^;]*7rem/.test(changeRow)) {
+    faults.push(
+      'change row takes a third fixed column, collapsing the quote to nothing'
+    );
+  }
+  if (!/grid-column:\s*1\s*\/\s*-1/.test(changeDetail)) {
+    faults.push(
+      'change quote shares a row with its label instead of taking one'
+    );
+  }
+  if (!/line-clamp:\s*3/.test(changeDetail)) {
+    faults.push(
+      'change quote is unclamped, so one long paragraph becomes a scroll'
+    );
+  }
+  // A changed row carries both texts. Clamping the cell showed three lines
+  // of struck-through old text and none of what it became.
+  const changedDetail = rule('.diff-change-changed .diff-change-detail');
+  const sides = rule('.diff-change-detail del');
+  if (!/overflow:\s*visible/.test(changedDetail)) {
+    faults.push(
+      'changed row clamps the cell, hiding the text the change produced'
+    );
+  }
+  if (!/line-clamp:\s*2/.test(sides)) {
+    faults.push('the two sides of a changed row are not each bounded');
+  }
   return faults;
 }
 
