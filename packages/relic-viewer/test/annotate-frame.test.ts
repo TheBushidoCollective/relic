@@ -9,6 +9,7 @@ import {
   isClearMarkMessage,
   isClearMarksMessage,
   isFrameMarkClickMessage,
+  isFrameMarkHoverMessage,
   isFramePointMessage,
   isFrameRegionMessage,
   isFrameSelectionMessage,
@@ -21,6 +22,7 @@ import {
 import {
   clearFrameRegions,
   createSandboxHandler,
+  FRAME_MARK_CSS,
   paintFrameRegion,
   setupFrameInteraction,
   unwrapFrameQuotes,
@@ -1012,5 +1014,353 @@ describe('frame adapters', () => {
     );
     expect(regionPlaced).toBe(true);
     expect(posted).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frame mark geometry: hover boxes, click rects, selection text, active mark
+// ---------------------------------------------------------------------------
+
+describe('frame mark geometry and selection reporting', () => {
+  interface PostedMessage {
+    type?: string;
+    id?: string | null;
+    rect?: { left: number; top: number; width: number; height: number };
+    exact?: string;
+    text?: string;
+    truncated?: boolean;
+  }
+
+  const posted: PostedMessage[] = [];
+
+  beforeEach(() => {
+    posted.length = 0;
+    // The frame posts over window.parent.postMessage; the mock window's
+    // parent ships without one, so give it a listener that records.
+    (
+      mockWin as unknown as { parent: { postMessage: (msg: unknown) => void } }
+    ).parent.postMessage = (msg: unknown) => {
+      posted.push(msg as PostedMessage);
+    };
+  });
+
+  function wrapWithBox(
+    exact: string,
+    id: string,
+    rect: { left: number; top: number; width: number; height: number }
+  ): MockNode {
+    const root = makeElement('div', {}, `before ${exact} after`);
+    mockDoc.body.appendChild(root);
+    expect(
+      wrapFrameQuote(root as unknown as HTMLElement, exact, '', '', id)
+    ).toBe(true);
+    const mark = root.querySelector('mark.relic-text-mark');
+    expect(mark).not.toBeNull();
+    (
+      mark as unknown as { getBoundingClientRect: () => unknown }
+    ).getBoundingClientRect = () => rect;
+    return mark as unknown as MockNode;
+  }
+
+  test('hover enter posts the mark id and its box, leave posts null', () => {
+    const mark = wrapWithBox('words', 'c1', {
+      left: 10,
+      top: 20,
+      width: 30,
+      height: 40,
+    });
+
+    mark.dispatchEvent({ type: 'mouseenter' });
+    mark.dispatchEvent({ type: 'mouseleave' });
+
+    expect(posted).toHaveLength(2);
+    expect(posted[0]).toEqual({
+      type: 'relic:frame-mark-hover',
+      id: 'c1',
+      rect: { left: 10, top: 20, width: 30, height: 40 },
+    });
+    expect(posted[1]).toEqual({ type: 'relic:frame-mark-hover', id: null });
+    expect(isFrameMarkHoverMessage(posted[0])).toBe(true);
+    expect(isFrameMarkHoverMessage(posted[1])).toBe(true);
+  });
+
+  test('a mark click carries the box it was clicked on', () => {
+    const mark = wrapWithBox('words', 'c2', {
+      left: 1,
+      top: 2,
+      width: 3,
+      height: 4,
+    });
+
+    mark.dispatchEvent({
+      type: 'click',
+      stopPropagation: () => {},
+    });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toEqual({
+      type: 'relic:frame-mark-click',
+      id: 'c2',
+      rect: { left: 1, top: 2, width: 3, height: 4 },
+    });
+    expect(isFrameMarkClickMessage(posted[0])).toBe(true);
+  });
+
+  test('hover and click on a region mark carry its box', () => {
+    const div = paintFrameRegion(
+      mockDoc.body as unknown as HTMLElement,
+      { x: 0.1, y: 0.2, w: 0.3, h: 0.4 },
+      'reg-9'
+    );
+    expect(div).not.toBeUndefined();
+    const region = div as unknown as MockNode & {
+      getBoundingClientRect: () => unknown;
+    };
+    region.getBoundingClientRect = () => ({
+      left: 50,
+      top: 60,
+      width: 70,
+      height: 80,
+    });
+
+    region.dispatchEvent({ type: 'mouseenter' });
+    region.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    region.dispatchEvent({ type: 'mouseleave' });
+
+    const hover = posted.find(
+      (m) => m.type === 'relic:frame-mark-hover' && m.id === 'reg-9'
+    );
+    const leave = posted.find(
+      (m) => m.type === 'relic:frame-mark-hover' && m.id === null
+    );
+    const click = posted.find((m) => m.type === 'relic:frame-mark-click');
+    expect(hover?.rect).toEqual({ left: 50, top: 60, width: 70, height: 80 });
+    expect(leave).toEqual({ type: 'relic:frame-mark-hover', id: null });
+    expect(click).toEqual({
+      type: 'relic:frame-mark-click',
+      id: 'reg-9',
+      rect: { left: 50, top: 60, width: 70, height: 80 },
+    });
+  });
+
+  test('a selection carries its box and the full selected text', () => {
+    const root = makeElement('div', {}, 'selectable words');
+    mockDoc.body.appendChild(root);
+    const textNode = root.firstChild as unknown as { data: string };
+
+    mockWin.getSelection = () => ({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => 'selectable words',
+      getRangeAt: () => ({
+        startContainer: textNode,
+        startOffset: 0,
+        endContainer: textNode,
+        endOffset: 15,
+        getBoundingClientRect: () => ({
+          left: 5,
+          top: 6,
+          width: 100,
+          height: 12,
+        }),
+      }),
+    });
+
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      (msg) => {
+        posted.push(msg as PostedMessage);
+      }
+    );
+    expect(interaction.isArmed()).toBe(false);
+
+    mockDoc.body.dispatchEvent({ type: 'mouseup' });
+
+    const selection = posted.find((m) => m.type === 'relic:frame-selection');
+    expect(selection).toBeDefined();
+    expect(selection?.exact).toBe('selectable words');
+    expect(selection?.text).toBe('selectable words');
+    expect(selection?.truncated).toBeUndefined();
+    expect(selection?.rect).toEqual({
+      left: 5,
+      top: 6,
+      width: 100,
+      height: 12,
+    });
+    expect(isFrameSelectionMessage(selection)).toBe(true);
+  });
+
+  test('an oversized selection is flagged and its copy text capped', () => {
+    const raw = 'x'.repeat(70_000);
+    mockWin.getSelection = () => ({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => raw,
+      getRangeAt: () => ({
+        startContainer: mockDoc.body,
+        startOffset: 0,
+        endContainer: mockDoc.body,
+        endOffset: 1,
+      }),
+    });
+
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      (msg) => {
+        posted.push(msg as PostedMessage);
+      }
+    );
+    expect(interaction.isArmed()).toBe(false);
+
+    mockDoc.body.dispatchEvent({ type: 'mouseup' });
+
+    const selection = posted.find((m) => m.type === 'relic:frame-selection');
+    expect(selection).toBeDefined();
+    expect(selection?.truncated).toBe(true);
+    expect(selection?.exact).toBe('x'.repeat(512));
+    expect(selection?.text).toBe('x'.repeat(64 * 1024));
+    expect(selection?.rect).toBeUndefined();
+    expect(isFrameSelectionMessage(selection)).toBe(true);
+  });
+
+  test('a collapsing selection posts one cleared message', () => {
+    let selection: unknown = null;
+    mockWin.getSelection = () => selection;
+
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      (msg) => {
+        posted.push(msg as PostedMessage);
+      }
+    );
+    expect(interaction.isArmed()).toBe(false);
+
+    // Nothing was ever reported: a falling edge without a rise posts nothing.
+    mockDoc.body.dispatchEvent({ type: 'selectionchange' });
+    expect(posted).toHaveLength(0);
+
+    const root = makeElement('div', {}, 'a sentence to select');
+    mockDoc.body.appendChild(root);
+    const textNode = root.firstChild as unknown as { data: string };
+    selection = {
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => 'a sentence',
+      getRangeAt: () => ({
+        startContainer: textNode,
+        startOffset: 0,
+        endContainer: textNode,
+        endOffset: 10,
+      }),
+    };
+    mockDoc.body.dispatchEvent({ type: 'mouseup' });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.type).toBe('relic:frame-selection');
+
+    // The selection collapses: one cleared message, and no repeats.
+    selection = null;
+    mockDoc.body.dispatchEvent({ type: 'selectionchange' });
+    mockDoc.body.dispatchEvent({ type: 'selectionchange' });
+    const cleared = posted.filter(
+      (m) => m.type === 'relic:frame-selection-cleared'
+    );
+    expect(cleared).toHaveLength(1);
+  });
+
+  test('active-mark lights the matching mark and null clears every mark', () => {
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      () => {}
+    );
+
+    const rootA = makeElement('p', {}, 'first quote here');
+    const rootB = makeElement('p', {}, 'second quote here');
+    mockDoc.body.appendChild(rootA);
+    mockDoc.body.appendChild(rootB);
+    wrapFrameQuote(
+      rootA as unknown as HTMLElement,
+      'first quote',
+      '',
+      '',
+      'c-a'
+    );
+    wrapFrameQuote(
+      rootB as unknown as HTMLElement,
+      'second quote',
+      '',
+      '',
+      'c-b'
+    );
+    const markA = mockDoc.body.querySelector(
+      '[data-comment-id="c-a"]'
+    ) as unknown as { classList: MockClassList };
+    const markB = mockDoc.body.querySelector(
+      '[data-comment-id="c-b"]'
+    ) as unknown as { classList: MockClassList };
+    expect(markA).not.toBeNull();
+    expect(markB).not.toBeNull();
+
+    interaction.onActiveMark('c-b');
+    expect(markA.classList.contains('is-active')).toBe(false);
+    expect(markB.classList.contains('is-active')).toBe(true);
+
+    interaction.onActiveMark('c-a');
+    expect(markA.classList.contains('is-active')).toBe(true);
+    expect(markB.classList.contains('is-active')).toBe(false);
+
+    interaction.onActiveMark(null);
+    expect(markA.classList.contains('is-active')).toBe(false);
+    expect(markB.classList.contains('is-active')).toBe(false);
+  });
+
+  test('relic:active-mark routes to the interaction through the handler', () => {
+    const activeIds: (string | null)[] = [];
+    const handle = createSandboxHandler(
+      () => {},
+      () => {},
+      () => {},
+      {
+        setArmed: () => {},
+        onPaintMark: () => true,
+        onPaintMarks: () => true,
+        onClearMark: () => {},
+        onClearMarks: () => {},
+        onRevealMark: () => {},
+        onPairMark: () => {},
+        onActiveMark: (id) => {
+          activeIds.push(id);
+        },
+      }
+    );
+
+    expect(handle({ type: 'relic:render', html: '<p>ok</p>' })).toBe(true);
+    expect(handle({ type: 'relic:active-mark', id: 'c-7' })).toBe(true);
+    expect(handle({ type: 'relic:active-mark', id: null })).toBe(true);
+
+    expect(activeIds).toEqual(['c-7', null]);
+  });
+
+  test('mark CSS keeps commented passages visible at rest, active strongest', () => {
+    // The stylesheet is a constant; assert the states it must carry rather
+    // than re-deriving them from selectors elsewhere in this file.
+    expect(FRAME_MARK_CSS).toContain('.relic-text-mark {');
+    expect(FRAME_MARK_CSS).toContain('.relic-text-mark.is-active {');
+    expect(FRAME_MARK_CSS).toContain('.relic-text-mark.is-resolved {');
+    expect(FRAME_MARK_CSS).toContain('.relic-region-mark.is-active {');
+    expect(FRAME_MARK_CSS).toContain('.relic-region-mark.is-resolved {');
+    // Every declaration is !important: the frame's document is author-owned
+    // content that must never be able to hide a mark.
+    for (const line of FRAME_MARK_CSS.split('\n')) {
+      if (line.trim().startsWith('background:')) {
+        expect(line).toContain('!important');
+      }
+      if (line.trim().startsWith('border-bottom:')) {
+        expect(line).toContain('!important');
+      }
+    }
   });
 });
