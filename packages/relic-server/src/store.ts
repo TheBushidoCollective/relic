@@ -146,6 +146,71 @@ export interface CommentRow {
    * Never returned on public comment reads; the sealed copy in ciphertext is authoritative.
    */
   readonly addresses?: string | undefined;
+  /**
+   * When the sealed body was last replaced, in epoch millis like
+   * `createdAt`. There is no edit history (`frame.md`): the service holds
+   * one ciphertext per comment and an edit overwrites it, so the honest
+   * record is that an edit happened, not what it replaced. Absent until the
+   * first edit.
+   */
+  readonly editedAt?: number | undefined;
+  /**
+   * When the comment was marked resolved, and by whom. Deliberately clear
+   * data: the resolution decides whether a republish is blocked, which the
+   * service answers before any key exists on its side, so the operator
+   * learns that a comment was settled and by which address and still
+   * cannot read a word of it.
+   */
+  readonly resolvedAt?: number | undefined;
+  readonly resolvedBy?: string | undefined;
+}
+
+/**
+ * A change to a comment after the fact.
+ *
+ * `undefined` on a field means leave it alone; only `resolved` uses an
+ * explicit null, to mean clear it. A two-way boolean cannot express "leave
+ * any resolution alone" and "clear it" apart, and an edit and its stamp are
+ * one fact, so the caller stamps `editedAt` alongside the new ciphertext
+ * rather than the store guessing at a clock.
+ */
+export interface CommentPatch {
+  /** Replaces the sealed body. */
+  readonly ciphertext?: string;
+  /** Stamped with `ciphertext` by the caller, never cleared by either. */
+  readonly editedAt?: number;
+  /** An object sets the resolution, null clears it, undefined leaves it. */
+  readonly resolved?: { readonly at: number; readonly by: string } | null;
+}
+
+/**
+ * Merge a patch into a comment row, returning a new row. Pure, and shared
+ * by both stores so the merge rules (in particular: clearing a resolution
+ * must not touch the edit stamp, and clearing omits the keys rather than
+ * writing nulls) cannot drift between memory and GCS.
+ */
+export function applyCommentPatch(
+  row: CommentRow,
+  patch: CommentPatch
+): CommentRow {
+  let next: CommentRow = {
+    ...row,
+    ...(patch.ciphertext !== undefined ? { ciphertext: patch.ciphertext } : {}),
+    ...(patch.editedAt !== undefined ? { editedAt: patch.editedAt } : {}),
+  };
+  if (patch.resolved !== undefined) {
+    if (patch.resolved === null) {
+      const { resolvedAt: _at, resolvedBy: _by, ...cleared } = next;
+      next = cleared;
+    } else {
+      next = {
+        ...next,
+        resolvedAt: patch.resolved.at,
+        resolvedBy: patch.resolved.by,
+      };
+    }
+  }
+  return next;
 }
 
 /** Summary of an author's engagement with a relic. */
@@ -256,6 +321,16 @@ export interface RelicStore {
   /** Oldest first, which is the order a thread is read in. */
   listComments(relicId: string): Promise<readonly CommentRow[]>;
   deleteComment(relicId: string, commentId: string): Promise<void>;
+  /**
+   * Apply a patch to one comment and return the updated row, or undefined
+   * if the comment is gone. Concurrent writers must lose to each other
+   * loudly where the store can tell, never silently overwrite.
+   */
+  updateComment(
+    relicId: string,
+    commentId: string,
+    patch: CommentPatch
+  ): Promise<CommentRow | undefined>;
   /**
    * Every comment on a relic, removed together with it. A comment outliving
    * the thing it comments on is a retention defect, not a leftover.
@@ -450,6 +525,21 @@ export class MemoryStore implements RelicStore {
     const kept = thread.filter((c) => c.id !== commentId);
     if (kept.length === 0) this.comments.delete(relicId);
     else this.comments.set(relicId, kept);
+  }
+
+  async updateComment(
+    relicId: string,
+    commentId: string,
+    patch: CommentPatch
+  ): Promise<CommentRow | undefined> {
+    const thread = this.comments.get(relicId);
+    const index = thread?.findIndex((c) => c.id === commentId) ?? -1;
+    if (thread === undefined || index === -1) return undefined;
+    // The merge rules live in one function shared with the GCS store, so a
+    // clearing patch behaves identically no matter where the row lives.
+    const updated = applyCommentPatch(thread[index] as CommentRow, patch);
+    thread[index] = updated;
+    return updated;
   }
 
   async deleteCommentsForRelic(relicId: string): Promise<number> {

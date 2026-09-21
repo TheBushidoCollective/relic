@@ -22,17 +22,19 @@
 import type { RendererClass } from '@relic/format';
 
 import { sha256Hex } from './gcs.ts';
-import type {
-  AbuseReport,
-  AuthLinkRow,
-  CommentedRelic,
-  CommentRow,
-  DedupEntry,
-  MintLogEntry,
-  RelicRow,
-  RelicStore,
-  SessionRow,
-  Tombstone,
+import {
+  type AbuseReport,
+  type AuthLinkRow,
+  applyCommentPatch,
+  type CommentedRelic,
+  type CommentPatch,
+  type CommentRow,
+  type DedupEntry,
+  type MintLogEntry,
+  type RelicRow,
+  type RelicStore,
+  type SessionRow,
+  type Tombstone,
 } from './store.ts';
 
 export interface GcsStoreOptions {
@@ -62,6 +64,29 @@ function toCommentRow(raw: CommentRow): CommentRow {
     ciphertext: raw.ciphertext,
     version: typeof raw.version === 'number' ? raw.version : undefined,
     addresses: typeof raw.addresses === 'string' ? raw.addresses : undefined,
+    editedAt: typeof raw.editedAt === 'number' ? raw.editedAt : undefined,
+    resolvedAt: typeof raw.resolvedAt === 'number' ? raw.resolvedAt : undefined,
+    resolvedBy: typeof raw.resolvedBy === 'string' ? raw.resolvedBy : undefined,
+  };
+}
+
+/**
+ * The document one comment occupies in the bucket. Optional keys are
+ * omitted rather than written as null, so an old reader and a fresh reader
+ * agree on what absence means and legacy rows stay legacy rows.
+ */
+function commentDoc(row: CommentRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    relicId: row.relicId,
+    author: row.author,
+    createdAt: row.createdAt,
+    ciphertext: row.ciphertext,
+    ...(typeof row.version === 'number' ? { version: row.version } : {}),
+    ...(typeof row.addresses === 'string' ? { addresses: row.addresses } : {}),
+    ...(row.editedAt !== undefined ? { editedAt: row.editedAt } : {}),
+    ...(row.resolvedAt !== undefined ? { resolvedAt: row.resolvedAt } : {}),
+    ...(row.resolvedBy !== undefined ? { resolvedBy: row.resolvedBy } : {}),
   };
 }
 
@@ -354,17 +379,7 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
     // compare-and-swap per comment, and two readers commenting at once would
     // make one of them lose their words rather than merely retry.
     async putComment(row: CommentRow): Promise<void> {
-      await put(key('comment', row.relicId, `${row.id}.json`), {
-        id: row.id,
-        relicId: row.relicId,
-        author: row.author,
-        createdAt: row.createdAt,
-        ciphertext: row.ciphertext,
-        ...(typeof row.version === 'number' ? { version: row.version } : {}),
-        ...(typeof row.addresses === 'string'
-          ? { addresses: row.addresses }
-          : {}),
-      });
+      await put(key('comment', row.relicId, `${row.id}.json`), commentDoc(row));
 
       // Maintain a per-author index so listing an author's commented relics
       // does not require an unbounded bucket scan. A failed index write must
@@ -403,6 +418,32 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
 
     async deleteComment(relicId: string, commentId: string): Promise<void> {
       await remove(key('comment', relicId, `${commentId}.json`));
+    },
+
+    // A patch is a read-modify-write on somebody's words, so it rides the
+    // same generation-checked retry `consumeMint` does: a lost update here
+    // would silently discard a person's edit or un-resolve feedback a
+    // publisher had already settled, and neither is an acceptable answer to
+    // losing a race.
+    async updateComment(
+      relicId: string,
+      commentId: string,
+      patch: CommentPatch
+    ): Promise<CommentRow | undefined> {
+      const name = key('comment', relicId, `${commentId}.json`);
+
+      for (let attempt = 0; attempt < casAttempts; attempt++) {
+        const current = await get<CommentRow>(name);
+        if (current === undefined) return undefined;
+
+        const next = applyCommentPatch(toCommentRow(current.value), patch);
+        if (await put(name, commentDoc(next), current.generation)) return next;
+      }
+
+      throw new Error(
+        `gcs comment ${relicId}/${commentId} lost ${casAttempts} ` +
+          'compare-and-swap races; refusing to overwrite on stale state'
+      );
     },
 
     async deleteCommentsForRelic(relicId: string): Promise<number> {
