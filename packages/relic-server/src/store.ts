@@ -491,12 +491,13 @@ export class MemoryStore implements RelicStore {
 
   async putComment(row: CommentRow): Promise<void> {
     const thread = this.comments.get(row.relicId) ?? [];
+    // Copied whole rather than field by field. Rebuilding it here meant this
+    // store silently dropped every field added to the row afterwards, which
+    // is how the clear routing hint went missing in development and how an
+    // edit stamp and a resolution would have followed it. A store that
+    // writes less than its own row type is a lie about what was stored.
     thread.push({
-      id: row.id,
-      relicId: row.relicId,
-      author: row.author,
-      createdAt: row.createdAt,
-      ciphertext: row.ciphertext,
+      ...row,
       version: typeof row.version === 'number' ? row.version : undefined,
     });
     this.comments.set(row.relicId, thread);

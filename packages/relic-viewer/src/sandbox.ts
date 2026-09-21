@@ -945,6 +945,25 @@ export function setupFrameInteraction(
 
     onActiveMark(id: string | null) {
       if (!doc.body) return;
+      // The parent asked for this mark and cannot measure it: the mark is
+      // inside this origin. Answering with its box is what lets a press on
+      // a row in the thread open the comment over the thing it covers,
+      // rather than nowhere, for a relic that renders in a frame.
+      if (id !== null) {
+        for (const mark of doc.body.querySelectorAll('[data-comment-id]')) {
+          if ((mark as HTMLElement).dataset?.commentId !== id) continue;
+          const rect = markFrameRect(mark as HTMLElement);
+          doc.defaultView?.parent?.postMessage(
+            {
+              type: 'relic:frame-mark-click',
+              id,
+              ...(rect === undefined ? {} : { rect }),
+            },
+            '*'
+          );
+          break;
+        }
+      }
       // Compared by dataset rather than folded into the selector so a mark
       // id containing quotes or brackets cannot break out of the attribute
       // matcher, and so every span of a multi-node quote lights together.

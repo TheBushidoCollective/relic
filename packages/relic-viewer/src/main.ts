@@ -874,6 +874,14 @@ function sandboxFrame(
     const type = (event.data as { type?: unknown } | null)?.type;
     if (type === 'relic:sandbox-ready') {
       post(payload);
+      // Announced on this origin too, because marks are posted into the
+      // frame and a post that arrives before the frame is listening is
+      // simply lost. The thread paints once when the conversation loads,
+      // and on a slow frame that paint landed nowhere: the relic showed no
+      // marks at all until some later repaint happened to save it.
+      frame.dispatchEvent(
+        new CustomEvent('relic:frame-ready', { bubbles: true })
+      );
       return;
     }
     // The captured tree is tag names, a fixed attribute allowlist, and text.
@@ -4797,6 +4805,11 @@ export function buildThread(
    * like every other mark.
    */
   const setActiveMark = (id: string | undefined): void => {
+    // Idempotent, and that is load bearing rather than tidy. The frame
+    // answers an active mark with its geometry so a row press can open the
+    // card over it, and re-announcing the same mark on the way would put
+    // the two origins in a loop.
+    if (activeId === id) return;
     if (activeId !== undefined) pair(activeId, false);
     activeId = id;
     if (id !== undefined) pair(id, true);
@@ -5153,6 +5166,15 @@ export function buildThread(
     });
     root.addEventListener('click', (event: Event) => {
       if (!(event.target instanceof Element)) return;
+      // Asked of the element rather than of the open panel, because a
+      // control inside a panel routinely replaces that panel: pressing
+      // Comment takes the offer down and puts a composer up in the same
+      // handler. A browser computes the propagation path before dispatch,
+      // so this listener still receives that press, by which time the
+      // element it came from is detached and no open panel contains it.
+      // Asking `popover.contains` alone therefore closed the composer the
+      // press had just opened.
+      if (event.target.closest('.popover') !== null) return;
       if (popover?.contains(event.target) === true) return;
       const id =
         event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
@@ -5598,6 +5620,9 @@ export function buildThread(
         bindPairing(next);
         bindMarkPointing(next);
         next.addEventListener('relic:page-changed', () => {
+          paintMarks(lastEntries);
+        });
+        next.addEventListener('relic:frame-ready', () => {
           paintMarks(lastEntries);
         });
       }

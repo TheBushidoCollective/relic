@@ -17,6 +17,7 @@ import {
   documentNode,
   installDom,
   mount,
+  Node,
   only,
   withClass,
 } from './annotate.test.ts';
@@ -83,6 +84,34 @@ describe('pointing at a mark', () => {
 
     documentNode.dispatch('keydown', { key: 'Escape' });
     expect(withClass(mounted.stage, 'popover-card')).toHaveLength(0);
+  });
+});
+
+describe('a press inside a panel is not a press on the document', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('a control that replaced its own panel does not close what it opened', async () => {
+    // Found in a browser. Pressing Comment removes the offer and opens a
+    // composer in one handler, and the stage still receives that press
+    // because a browser fixes the propagation path before dispatch. By the
+    // time it arrives, the element it came from is detached from every open
+    // panel, so asking the open panel whether it contains the target said
+    // no and the stage closed what the press had just opened.
+    const mounted = await mount({}, 'verified', [
+      { id: 'c1', body: 'mine', anchor: PINNED },
+    ]);
+    only(mounted.stage, 'comment-pin').dispatch('click');
+    expect(withClass(mounted.stage, 'popover-card')).toHaveLength(1);
+
+    const gone = new Node('div');
+    gone.className = 'popover popover-offer';
+    const pressed = new Node('button');
+    pressed.className = 'popover-action popover-comment';
+    gone.appendChild(pressed);
+    mounted.stage.dispatch('click', { target: pressed });
+
+    expect(withClass(mounted.stage, 'popover-card')).toHaveLength(1);
   });
 });
 
