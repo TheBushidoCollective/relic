@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   buildBar,
   markerLabelFor,
+  openFrameExternalLink,
   renderSandboxedHtml,
   renderSandboxedJsx,
   safeDownloadName,
@@ -419,6 +420,31 @@ describe('the usercontent frame the render routes build', () => {
     expect(sandboxAttributeOf(wrapper)).toBe('allow-scripts');
   });
 
+  test('opens only validated frame links without opener or referrer', () => {
+    const calls: string[][] = [];
+    const open = (url: string, target: string, features: string) => {
+      calls.push([url, target, features]);
+      return null;
+    };
+
+    expect(
+      openFrameExternalLink(
+        { type: 'relic:open-link', href: 'https://example.com/report' },
+        open
+      )
+    ).toBe(true);
+    expect(calls).toEqual([
+      ['https://example.com/report', '_blank', 'noopener,noreferrer'],
+    ]);
+
+    expect(
+      openFrameExternalLink(
+        { type: 'relic:open-link', href: 'javascript:alert(1)' },
+        open
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
   test('the marker states what each route actually does with author code', () => {
     // One string for every relic is how a five-second mp4 came to tell its
     // recipient it runs the author's code. Only the two sandboxed routes

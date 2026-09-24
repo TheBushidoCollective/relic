@@ -40,6 +40,7 @@ import { createRoot } from 'react-dom/client';
 import { rectFromCorners } from './anchoring.ts';
 import {
   FRAME_SELECTION_TEXT_LIMIT_BYTES,
+  normaliseFrameExternalLink,
   type FrameMarkPayload,
   type FramePointMessage,
   type FrameRect,
@@ -687,6 +688,24 @@ export function setupFrameInteraction(
   if (typeof win.addEventListener === 'function') {
     win.addEventListener('scroll', handleScroll, { passive: true });
   }
+  doc.addEventListener('click', (event: MouseEvent) => {
+    let node = event.target as Element | null;
+    if (node?.nodeType !== 1) node = node?.parentElement ?? null;
+    while (node !== null && node.tagName.toLowerCase() !== 'a') {
+      node = node.parentElement;
+    }
+    if (node === null) return;
+
+    // Every authored anchor is contained here. The frame never navigates and
+    // never opens its own popup, even when the URL is rejected or pointing is
+    // armed. Only a trusted reader action may ask the parent to navigate.
+    event.preventDefault();
+    if (armed || !event.isTrusted) return;
+
+    const href = normaliseFrameExternalLink(node.getAttribute('href'));
+    if (href === undefined) return;
+    postOutward({ type: 'relic:open-link', href });
+  });
 
   // A selection collapses by more paths than mouseup: clicking elsewhere,
   // a new armed drag, or the parent replacing the document. selectionchange

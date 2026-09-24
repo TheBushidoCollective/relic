@@ -174,6 +174,12 @@ The object fetch runs client-to-GCS on a signed URL, so the app server can't set
 **React is bundled into the frame's inlined bundle, and nothing is fetched from a CDN.** An earlier revision of this section had the frame importing React from a permissive CDN, because the render frame is an opaque origin, its module fetches are CORS requests carrying `Origin: null`, and Relic's own origins do not answer those while a permissive CDN does. Closing egress removed that middle ground: a policy that permits no remote source permits no CDN either, and in an opaque origin `'self'` matches nothing, so the frame cannot fetch even its own assets. Same-origin assets are the one thing this origin structurally cannot reach, which forces the only remaining answer: React is inlined into the `sandbox.html` response at build time and reaches transpiled component code as the global `globalThis.React`. The transpiler emits classic-runtime `React.createElement(...)` calls, which resolve against that global, so the mounted module needs no import statement at all.
 
 **The frame has no network reach, and the property is measured rather than argued.** The response that builds the frame carries a policy permitting no remote source of any kind, and under it `fetch`, `<img>`, `sendBeacon`, `WebSocket`, and `EventSource` all produced zero arrivals at a collector server, so whoever authored a JSX or HTML relic has no channel to the recipient through the rendered content. Two probe results are stated with their caveats, because each can be read as proving more than it does. `sendBeacon` returned `true` while delivering nothing, so its return value is not evidence. `window.open` was blocked in the probe, but no user gesture was present, so the policy is not what stopped it; popups are removed by dropping the `allow-popups` flag from the sandbox attribute, which leaves `allow-scripts` and nothing else. A form with `target=_blank` submitted and never arrived, blocked by `form-action 'none'`. What remains true of the boundary itself: the frame is opaque, holds no credentials, cannot read the fragment on the viewing origin, and cannot reach anything of Relic's. The cost is named rather than absorbed: a page or component that references a CDN stylesheet, a CDN script, an external font, or a remote image renders without it, and publishers must inline what their page needs (§6.3).
+A reader clicking an external link is not rendered-content network reach. The
+frame prevents its own navigation and sends only a canonical `http`, `https`,
+or `mailto` destination across the existing message boundary after a trusted
+click. The parent validates it again and opens a separate tab with `noopener`
+and `noreferrer`. Author code still cannot fetch, beacon, navigate, or open a
+popup, and a scripted click is rejected.
 
 ## 4. The sandbox boundary
 
@@ -207,6 +213,12 @@ Shim to parent: a `ready` handshake, a rendered-or-failed ack that names blocked
 **Letterboxing is a product consequence, and it's stated here before somebody finds it in review.** The taskbar and the content sit on different origins by construction, so the content iframe is never full-viewport, and a relic authored to fill the screen renders letterboxed.
 
 **Present the sandbox as deliberate.** An HTML relic can't navigate the top-level window, can't open popups, can't reach the decryption key, and can't reach the network: every remote source is blocked, so a page that references a CDN stylesheet, a CDN script, an external font, or a remote image renders without it. Left unexplained, the recipient concludes the relic is corrupt and the publisher concludes the product is broken, and a page stripped of its external assets makes both conclusions more likely rather than less. The taskbar says the content is sandboxed and says what that blocks, and the list it gives is the true one: top-level navigation, popups, everything same-origin, and the network itself. Publishers who need external assets must inline them.
+"Can't open popups" means author code has no popup capability. A reader may
+activate an absolute `http`, `https`, or `mailto` link. The frame contains
+that click, validates the destination, and asks the parent to open it in a new
+tab with no opener or referrer. The parent validates the destination again.
+Relative, fragment-only, executable, data, blob, and local-file URLs do not
+cross the boundary, and the sandbox attribute remains `allow-scripts` only.
 
 ## 5. Platform ceilings and degradation
 

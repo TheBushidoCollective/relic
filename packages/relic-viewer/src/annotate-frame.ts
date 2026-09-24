@@ -14,6 +14,7 @@
  *    - `relic:frame-point`: reader clicked a point while pointing was armed.
  *    - `relic:frame-region`: reader dragged a box while pointing was armed.
  *    - `relic:frame-mark-click`: reader clicked an existing mark inside the frame.
+ *    - `relic:open-link`: reader activated a permitted external link.
  *
  * 2. Inward (Parent to Frame):
  *    - `relic:arm-pointing`: arm or disarm click/drag capture inside the frame.
@@ -124,6 +125,47 @@ export function isValidAnchorRect(data: unknown): data is AnchorRect {
 // ---------------------------------------------------------------------------
 // Outward messages (Frame -> Parent)
 // ---------------------------------------------------------------------------
+/** Long enough for a real URL, bounded before it crosses the frame boundary. */
+export const FRAME_EXTERNAL_LINK_LIMIT_BYTES = 8 * 1024;
+
+/**
+ * A reader-activated destination the parent may open outside the sandbox.
+ *
+ * Relative URLs stay inside the opaque frame, while executable and local
+ * schemes would turn this narrow escape hatch into a second rendering path.
+ * Canonicalising here and validating again in the parent keeps the message
+ * contract identical on both sides of the boundary.
+ */
+export function normaliseFrameExternalLink(href: unknown): string | undefined {
+  if (typeof href !== 'string' || href.length === 0) return undefined;
+  if (new TextEncoder().encode(href).length > FRAME_EXTERNAL_LINK_LIMIT_BYTES) {
+    return undefined;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return undefined;
+  }
+
+  if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return undefined;
+  return url.href;
+}
+
+export interface FrameOpenLinkMessage {
+  readonly type: 'relic:open-link';
+  readonly href: string;
+}
+
+export function isFrameOpenLinkMessage(
+  data: unknown
+): data is FrameOpenLinkMessage {
+  if (typeof data !== 'object' || data === null) return false;
+  const msg = data as Record<string, unknown>;
+  if (msg.type !== 'relic:open-link') return false;
+  return normaliseFrameExternalLink(msg.href) === msg.href;
+}
 
 /**
  * A box in the frame's own client coordinates.

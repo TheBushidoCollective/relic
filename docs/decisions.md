@@ -219,6 +219,19 @@ delivering nothing, so its return value is not evidence. A form with
 'none'`. `window.open` was blocked in the probe, but no user gesture was
 present, so the policy is not what stopped it; popups are removed by
 dropping the `allow-popups` sandbox flag instead.
+### 2. Reader-activated external links
+
+**2026-09-24: permitted through the parent, not through the render frame.** A
+reader may activate an absolute `http`, `https`, or `mailto` link in an
+HTML or JSX relic. The frame prevents its own navigation, validates the scheme,
+and posts the canonical destination to the parent. The parent validates it
+again and opens a new top-level tab with `noopener` and `noreferrer`.
+
+This does not restore rendered-content egress or arbitrary popups. Author code
+cannot invoke the path because the frame accepts only a trusted click event,
+and the iframe still carries exactly `sandbox="allow-scripts"`. Relative,
+fragment-only, `javascript`, `data`, `blob`, and `file` destinations stay
+inside the boundary and do not navigate.
 
 ## What is not decided here
 
