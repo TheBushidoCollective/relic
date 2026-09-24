@@ -50,12 +50,14 @@ registerBuiltInAnchorAdapters();
 import {
   type FrameMarkClickMessage,
   type FrameMarkHoverMessage,
+  type FrameOpenLinkMessage,
   type FramePointMessage,
   type FrameRect,
   type FrameRegionMessage,
   type FrameSelectionMessage,
   isFrameMarkClickMessage,
   isFrameMarkHoverMessage,
+  isFrameOpenLinkMessage,
   isFramePointMessage,
   isFrameRegionMessage,
   isFrameSelectionClearedMessage,
@@ -86,7 +88,6 @@ import {
   plainLabel,
   postComment,
   quotedTargetLabel,
-  RESOLUTION_DISCLOSURE,
   type Refusal,
   readSession,
   requestMagicLink,
@@ -821,6 +822,22 @@ function renderImageView(view: ReadyView): HTMLElement {
 type RenderPayload =
   | { readonly type: 'relic:render'; readonly html: string }
   | { readonly type: 'relic:render-jsx'; readonly code: string };
+type OpenWindow = (
+  url: string,
+  target: string,
+  features: string
+) => WindowProxy | null;
+
+/** Open one frame-requested destination without an opener or referrer. */
+export function openFrameExternalLink(
+  message: FrameOpenLinkMessage,
+  open: OpenWindow = (url, target, features) =>
+    window.open(url, target, features)
+): boolean {
+  if (!isFrameOpenLinkMessage(message)) return false;
+  open(message.href, '_blank', 'noopener,noreferrer');
+  return true;
+}
 
 interface FrameHandle {
   readonly frame: HTMLIFrameElement;
@@ -847,6 +864,9 @@ interface FrameHandle {
  * Scripts and nothing else. Popups are removed by dropping the flag, not by
  * CSP: a popup opens a new top-level context this frame's policy does not
  * govern.
+ * Reader-activated external links are the deliberate exception: the frame
+ * sends a validated destination to the parent, which opens it without an
+ * opener or referrer while leaving the sandbox unchanged.
  *
  * A comparison needs two renders of untrusted content, and it gets them from
  * two of these rather than by relaxing the frame's one-render guard. The
@@ -949,6 +969,10 @@ function sandboxFrame(
           bubbles: true,
         })
       );
+      return;
+    }
+    if (isFrameOpenLinkMessage(event.data)) {
+      openFrameExternalLink(event.data);
       return;
     }
     if (isFrameScrollMessage(event.data)) {
@@ -3349,13 +3373,6 @@ export const MARK_PIN_HINT = 'Click the document to place a point';
 /** What an armed region tool tells the reader to do next. */
 export const MARK_REGION_HINT =
   'Click to place a point, or drag to select a region (use arrows and Enter for keyboard)';
-
-/**
- * The clearance between a selection and the button offered above it, in CSS
- * pixels. Small enough to read as attached to the selection, wide enough that
- * it does not sit on the words it is about.
- */
-const MARK_BUBBLE_GAP = 6;
 
 /**
  * How long a pointer rests on a mark before its comment opens.

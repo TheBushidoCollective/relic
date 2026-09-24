@@ -10,12 +10,14 @@ import {
   isClearMarksMessage,
   isFrameMarkClickMessage,
   isFrameMarkHoverMessage,
+  isFrameOpenLinkMessage,
   isFramePointMessage,
   isFrameRegionMessage,
   isFrameSelectionMessage,
   isPaintMarkMessage,
   isPaintMarksMessage,
   isRevealMarkMessage,
+  normaliseFrameExternalLink,
   takeHeadUtf8,
   takeTailUtf8,
 } from '../src/annotate-frame.ts';
@@ -858,6 +860,96 @@ describe('frame interaction and click capture', () => {
         (m as { type?: string }).type === 'relic:frame-region'
     );
     expect(pointMsgs.length).toBeGreaterThan(0);
+  });
+  test('posts a canonical external link only for a trusted reader click', () => {
+    const label = makeElement('span', {}, 'Open site');
+    const link = makeElement(
+      'a',
+      { href: 'https://example.com/report?q=1' },
+      label
+    );
+    mockDoc.body.appendChild(link);
+
+    const messages: object[] = [];
+    setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      (msg) => messages.push(msg)
+    );
+
+    let prevented = false;
+    label.dispatchEvent({
+      type: 'click',
+      target: label,
+      isTrusted: true,
+      preventDefault: () => {
+        prevented = true;
+      },
+    });
+
+    expect(prevented).toBe(true);
+    expect(messages).toContainEqual({
+      type: 'relic:open-link',
+      href: 'https://example.com/report?q=1',
+    });
+  });
+
+  test('contains rejected and scripted anchor clicks inside the frame', () => {
+    const messages: object[] = [];
+    setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      (msg) => messages.push(msg)
+    );
+
+    for (const [href, isTrusted] of [
+      ['/relative', true],
+      ['#section', true],
+      ['javascript:alert(1)', true],
+      ['data:text/html,hello', true],
+      ['blob:https://example.com/id', true],
+      ['file:///etc/passwd', true],
+      ['https://example.com/scripted', false],
+    ] as const) {
+      const link = makeElement('a', { href }, href);
+      mockDoc.body.appendChild(link);
+      let prevented = false;
+      link.dispatchEvent({
+        type: 'click',
+        target: link,
+        isTrusted,
+        preventDefault: () => {
+          prevented = true;
+        },
+      });
+      expect(prevented).toBe(true);
+    }
+
+    expect(messages).toHaveLength(0);
+  });
+
+  test('validates and bounds the frame link message', () => {
+    expect(normaliseFrameExternalLink('HTTP://EXAMPLE.COM')).toBe(
+      'http://example.com/'
+    );
+    expect(normaliseFrameExternalLink('mailto:reader@example.com')).toBe(
+      'mailto:reader@example.com'
+    );
+    expect(
+      isFrameOpenLinkMessage({
+        type: 'relic:open-link',
+        href: 'https://example.com/',
+      })
+    ).toBe(true);
+    expect(
+      isFrameOpenLinkMessage({
+        type: 'relic:open-link',
+        href: 'https://example.com',
+      })
+    ).toBe(false);
+    expect(
+      normaliseFrameExternalLink(`https://example.com/${'x'.repeat(9 * 1024)}`)
+    ).toBeUndefined();
   });
 });
 

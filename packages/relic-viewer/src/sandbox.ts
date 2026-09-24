@@ -53,6 +53,7 @@ import {
   isPaintMarksMessage,
   isQuietMarksMessage,
   isRevealMarkMessage,
+  normaliseFrameExternalLink,
   type RevealMarkMessage,
   takeHeadUtf8,
   takeTailUtf8,
@@ -687,6 +688,24 @@ export function setupFrameInteraction(
   if (typeof win.addEventListener === 'function') {
     win.addEventListener('scroll', handleScroll, { passive: true });
   }
+  doc.addEventListener('click', (event: MouseEvent) => {
+    let node = event.target as Element | null;
+    if (node?.nodeType !== 1) node = node?.parentElement ?? null;
+    while (node !== null && node.tagName.toLowerCase() !== 'a') {
+      node = node.parentElement;
+    }
+    if (node === null) return;
+
+    // Every authored anchor is contained here. The frame never navigates and
+    // never opens its own popup, even when the URL is rejected or pointing is
+    // armed. Only a trusted reader action may ask the parent to navigate.
+    event.preventDefault();
+    if (armed || !event.isTrusted) return;
+
+    const href = normaliseFrameExternalLink(node.getAttribute('href'));
+    if (href === undefined) return;
+    postOutward({ type: 'relic:open-link', href });
+  });
 
   // A selection collapses by more paths than mouseup: clicking elsewhere,
   // a new armed drag, or the parent replacing the document. selectionchange
@@ -1173,17 +1192,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const handle = createSandboxHandler(
     (html) => {
       document.open();
+      // Install the capture listener before authored inline scripts execute
+      // during document.write. A script-triggered anchor click must never win
+      // the race and replace the rendered relic before interaction is wired.
+      initInteraction();
       document.write(html);
       document.close();
-      initInteraction();
       listen();
       scheduleReport();
     },
     (code) => {
-      void mountComponent(code).then(() => {
-        initInteraction();
-        scheduleReport();
-      }, scheduleReport);
+      // React render and effects may run before the mount promise settles.
+      initInteraction();
+      void mountComponent(code).then(scheduleReport, scheduleReport);
     },
     (marks, anchors) => {
       const style = document.createElement('style');
