@@ -1192,17 +1192,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const handle = createSandboxHandler(
     (html) => {
       document.open();
+      // Install the capture listener before authored inline scripts execute
+      // during document.write. A script-triggered anchor click must never win
+      // the race and replace the rendered relic before interaction is wired.
+      initInteraction();
       document.write(html);
       document.close();
-      initInteraction();
       listen();
       scheduleReport();
     },
     (code) => {
-      void mountComponent(code).then(() => {
-        initInteraction();
-        scheduleReport();
-      }, scheduleReport);
+      // React render and effects may run before the mount promise settles.
+      initInteraction();
+      void mountComponent(code).then(scheduleReport, scheduleReport);
     },
     (marks, anchors) => {
       const style = document.createElement('style');
