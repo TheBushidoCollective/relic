@@ -88,7 +88,6 @@ import {
   plainLabel,
   postComment,
   quotedTargetLabel,
-  RESOLUTION_DISCLOSURE,
   type Refusal,
   readSession,
   requestMagicLink,
@@ -3374,13 +3373,6 @@ export const MARK_PIN_HINT = 'Click the document to place a point';
 /** What an armed region tool tells the reader to do next. */
 export const MARK_REGION_HINT =
   'Click to place a point, or drag to select a region (use arrows and Enter for keyboard)';
-
-/**
- * The clearance between a selection and the button offered above it, in CSS
- * pixels. Small enough to read as attached to the selection, wide enough that
- * it does not sit on the words it is about.
- */
-const MARK_BUBBLE_GAP = 6;
 
 /**
  * How long a pointer rests on a mark before its comment opens.

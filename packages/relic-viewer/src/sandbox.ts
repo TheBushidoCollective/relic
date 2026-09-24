@@ -40,7 +40,6 @@ import { createRoot } from 'react-dom/client';
 import { rectFromCorners } from './anchoring.ts';
 import {
   FRAME_SELECTION_TEXT_LIMIT_BYTES,
-  normaliseFrameExternalLink,
   type FrameMarkPayload,
   type FramePointMessage,
   type FrameRect,
@@ -54,6 +53,7 @@ import {
   isPaintMarksMessage,
   isQuietMarksMessage,
   isRevealMarkMessage,
+  normaliseFrameExternalLink,
   type RevealMarkMessage,
   takeHeadUtf8,
   takeTailUtf8,

@@ -38,11 +38,7 @@ import {
   COMMENT_ANCHOR_QUOTE_LIMIT_BYTES,
   type CommentAnchor,
 } from '@relic/format';
-import {
-  type AnchorAdapter,
-  type AnchorSurface,
-  registerAnchorAdapter,
-} from './anchoring.ts';
+import type { AnchorAdapter, AnchorSurface } from './anchoring.ts';
 
 /**
  * Take code points from the start of text up to maxBytes in UTF-8.
