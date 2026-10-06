@@ -3,6 +3,7 @@ import type { AnchorRect } from '@relic/format';
 import type { AnchorSurface } from '../src/anchoring.ts';
 import {
   type FrameMarkPayload,
+  framePinAdapter,
   frameQuoteAdapter,
   frameRegionAdapter,
   isArmPointingMessage,
@@ -954,6 +955,139 @@ describe('frame interaction and click capture', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Pointing at a long framed document. The reported dossier scrolls about
+// 1088 x 9583 px, where any share of the document is a lot of pixels.
+// ---------------------------------------------------------------------------
+
+describe('pointing at a long framed document', () => {
+  const sizeDocument = (width: number, height: number): void => {
+    for (const node of [mockDoc.documentElement, mockDoc.body]) {
+      node.scrollWidth = width;
+      node.scrollHeight = height;
+    }
+  };
+
+  const armedFrame = (messages: object[]) => {
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      (msg) => messages.push(msg)
+    );
+    interaction.setArmed(true);
+    return interaction;
+  };
+
+  const gesture = (
+    from: { x: number; y: number },
+    to: { x: number; y: number }
+  ): void => {
+    mockDoc.body.dispatchEvent({
+      type: 'mousedown',
+      pageX: from.x,
+      pageY: from.y,
+    });
+    mockDoc.body.dispatchEvent({ type: 'mouseup', pageX: to.x, pageY: to.y });
+  };
+
+  test('a drag across one line of text is the box that was drawn', () => {
+    sizeDocument(1088, 9583);
+    const messages: object[] = [];
+    armedFrame(messages);
+
+    // From "is ready" on one line back to "welcoming" on the next: the
+    // reported gesture, 150 x 35 px.
+    gesture({ x: 450, y: 4000 }, { x: 300, y: 4035 });
+
+    expect(messages.filter(isFramePointMessage)).toHaveLength(0);
+    const regions = messages.filter(isFrameRegionMessage);
+    expect(regions).toHaveLength(1);
+    const rect = regions[0]?.rect;
+    expect((rect?.x ?? 0) * 1088).toBeCloseTo(300, 6);
+    expect((rect?.y ?? 0) * 9583).toBeCloseTo(4000, 6);
+    expect((rect?.w ?? 0) * 1088).toBeCloseTo(150, 6);
+    expect((rect?.h ?? 0) * 9583).toBeCloseTo(35, 6);
+  });
+
+  test('a drag flat along a line keeps a box, inside the document', () => {
+    sizeDocument(1088, 9583);
+    const messages: object[] = [];
+    armedFrame(messages);
+
+    // Flat, and running off the right and bottom edges.
+    gesture({ x: 1000, y: 9582 }, { x: 1100, y: 9582 });
+
+    expect(messages.filter(isFramePointMessage)).toHaveLength(0);
+    const regions = messages.filter(isFrameRegionMessage);
+    expect(regions).toHaveLength(1);
+    const rect = regions[0]?.rect;
+    expect((rect?.h ?? 0) * 9583).toBeCloseTo(4, 6);
+    expect((rect?.x ?? 1) + (rect?.w ?? 1)).toBeLessThanOrEqual(1);
+    expect((rect?.y ?? 1) + (rect?.h ?? 1)).toBeLessThanOrEqual(1);
+  });
+
+  test('a click is a point at the press, not a box', () => {
+    sizeDocument(1088, 9583);
+    const messages: object[] = [];
+    armedFrame(messages);
+
+    // A hand on a mouse wobbles; two pixels is still a click.
+    gesture({ x: 152, y: 440 }, { x: 154, y: 441 });
+
+    expect(messages.filter(isFrameRegionMessage)).toHaveLength(0);
+    expect(messages.filter(isFramePointMessage)).toEqual([
+      { type: 'relic:frame-point', x: 152 / 1088, y: 440 / 9583 },
+    ]);
+  });
+
+  test('an armed press does not start a text selection; a disarmed one does', () => {
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      () => {}
+    );
+    let prevented = 0;
+    const press = (): void => {
+      mockDoc.body.dispatchEvent({
+        type: 'mousedown',
+        pageX: 10,
+        pageY: 10,
+        preventDefault: () => {
+          prevented += 1;
+        },
+      });
+      mockDoc.body.dispatchEvent({ type: 'mouseup', pageX: 10, pageY: 10 });
+    };
+
+    press();
+    expect(prevented).toBe(0);
+    interaction.setArmed(true);
+    press();
+    expect(prevented).toBe(1);
+  });
+
+  test('the frame draws a point it is sent at that point, at a fixed size', () => {
+    sizeDocument(1088, 9583);
+    const interaction = setupFrameInteraction(
+      mockDoc as unknown as Document,
+      mockWin as unknown as Window,
+      () => {}
+    );
+    const mark: FrameMarkPayload = { id: 'c1', kind: 'pin', x: 0.25, y: 0.5 };
+    expect(isPaintMarkMessage({ type: 'relic:paint-mark', mark })).toBe(true);
+    expect(interaction.onPaintMark(mark)).toBe(true);
+
+    const pin = mockDoc.body.querySelector('[data-comment-id="c1"]');
+    expect(pin?.classList.contains('relic-pin-mark')).toBe(true);
+    expect(pin?.style.left).toBe(`${0.25 * 1088}px`);
+    expect(pin?.style.top).toBe(`${0.5 * 9583}px`);
+    // Sized by the stylesheet in pixels, never by a share of the document.
+    expect(pin?.style.width).toBeUndefined();
+    expect(pin?.style.height).toBeUndefined();
+    expect(FRAME_MARK_CSS).toMatch(/\.relic-pin-mark \{[^}]*width: 20px/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Sandbox message handler security: source check and malformed input
 // ---------------------------------------------------------------------------
 
@@ -1106,6 +1240,81 @@ describe('frame adapters', () => {
     );
     expect(regionPlaced).toBe(true);
     expect(posted).toHaveLength(2);
+  });
+
+  // The mock iframe has no window of its own; the adapters only ever post
+  // to one, so a recorder is the whole of what they need.
+  const recordFramePosts = (): unknown[] => {
+    const posted: unknown[] = [];
+    const frame: { contentWindow?: { postMessage(msg: unknown): void } } =
+      iframe;
+    frame.contentWindow = {
+      postMessage: (msg: unknown) => {
+        posted.push(msg);
+      },
+    };
+    return posted;
+  };
+
+  const paintedKinds = (posted: readonly unknown[]): string[] =>
+    posted.filter(isPaintMarkMessage).map((msg) => msg.mark.kind);
+
+  test('a point is drawn inside the frame, where the document scrolls', () => {
+    const posted = recordFramePosts();
+
+    expect(framePinAdapter.supports(frameSurface)).toBe(true);
+    expect(framePinAdapter.supports(nonFrameSurface)).toBe(false);
+    expect(
+      framePinAdapter.paint(
+        frameSurface,
+        divHost as unknown as HTMLElement,
+        { kind: 'pin', x: 0.14, y: 0.05 },
+        'comment-3'
+      )
+    ).toBe(true);
+    framePinAdapter.reveal?.(frameSurface, { kind: 'pin', x: 0.14, y: 0.05 });
+
+    expect(posted).toEqual([
+      {
+        type: 'relic:paint-mark',
+        mark: { id: 'comment-3', kind: 'pin', x: 0.14, y: 0.05 },
+      },
+      { type: 'relic:reveal-mark', kind: 'pin', point: { x: 0.14, y: 0.05 } },
+    ]);
+    // Both survive the frame's own validation, or the frame drops them.
+    expect(isPaintMarkMessage(posted[0])).toBe(true);
+    expect(isRevealMarkMessage(posted[1])).toBe(true);
+  });
+
+  test('a point stored as the old three-hundredths box is drawn as a point', () => {
+    const posted = recordFramePosts();
+    const legacy = {
+      kind: 'region' as const,
+      rect: { x: 0.125, y: 0.03, w: 0.03, h: 0.03 },
+    };
+
+    expect(frameRegionAdapter.label(legacy)).toBe('Commenting on a point');
+    frameRegionAdapter.paint(
+      frameSurface,
+      divHost as unknown as HTMLElement,
+      legacy,
+      'old-1'
+    );
+    const [sent] = posted.filter(isPaintMarkMessage);
+    expect(sent?.mark.kind).toBe('pin');
+    if (sent?.mark.kind === 'pin') {
+      expect(sent.mark.x).toBeCloseTo(0.14, 9);
+      expect(sent.mark.y).toBeCloseTo(0.045, 9);
+    }
+
+    // A box someone drew is never mistaken for one.
+    frameRegionAdapter.paint(
+      frameSurface,
+      divHost as unknown as HTMLElement,
+      { kind: 'region', rect: { x: 0.125, y: 0.03, w: 0.031, h: 0.03 } },
+      'drawn-1'
+    );
+    expect(paintedKinds(posted)).toEqual(['pin', 'region']);
   });
 });
 
