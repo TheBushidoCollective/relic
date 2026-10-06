@@ -17,11 +17,13 @@ import {
   anchorLabel,
   boxFromUnit,
   contentOffset,
+  MIN_REGION_PX,
   rectFromCorners,
   registerAnchorAdapter,
   registeredAnchorKinds,
   resetAnchorAdapters,
   unitFromPointer,
+  unitMinimumForPixels,
 } from '../src/anchoring.ts';
 
 /**
@@ -195,6 +197,71 @@ describe('a drag', () => {
     const box = rect as NonNullable<typeof rect>;
     expect(box.x + box.w).toBeLessThanOrEqual(1);
     expect(box.y + box.h).toBeLessThanOrEqual(1);
+  });
+
+  test('accepts with per-axis minimum a drag that scalar 0.005 refuses on tall content', () => {
+    // Content is 1440 x 11000 px (a long document or screenshot).
+    // Drag covers 150 x 35 px (e.g. dragging across one line of text).
+    const width = 1440;
+    const height = 11000;
+    const dragW = 150;
+    const dragH = 35;
+    const from = { x: 0, y: 0 };
+    const to = { x: dragW / width, y: dragH / height };
+
+    // The scalar 0.005 threshold refuses this drag because 35 / 11000 (0.00318) < 0.005:
+    expect(rectFromCorners(from, to, 0.005)).toBeUndefined();
+    expect(rectFromCorners(from, to)).toBeUndefined();
+
+    // A per-axis minimum (e.g. 4px per axis) accepts it:
+    const perAxisMin = { x: 4 / width, y: 4 / height };
+    const rect = rectFromCorners(from, to, perAxisMin);
+    expect(rect).toBeDefined();
+    expect(rect?.w).toBe(dragW / width);
+    expect(rect?.h).toBe(dragH / height);
+
+    // Corners spanning less than perAxisMin (e.g. 2px wide < 4px minimum) are refused:
+    const tooNarrow = { x: 2 / width, y: 35 / height };
+    expect(
+      rectFromCorners({ x: 0, y: 0 }, tooNarrow, perAxisMin)
+    ).toBeUndefined();
+    const tooShort = { x: 150 / width, y: 2 / height };
+    expect(
+      rectFromCorners({ x: 0, y: 0 }, tooShort, perAxisMin)
+    ).toBeUndefined();
+  });
+});
+
+describe('unitMinimumForPixels', () => {
+  test('returns 4/width and 4/height for a measured surface and undefined for a zero-size one', () => {
+    const measured = surface(
+      { left: 0, top: 0, width: 800, height: 600 },
+      { left: 100, top: 50, width: 600, height: 400 }
+    );
+    expect(unitMinimumForPixels(measured, 4)).toEqual({
+      x: 4 / 600,
+      y: 4 / 400,
+    });
+    expect(unitMinimumForPixels(measured, MIN_REGION_PX)).toEqual({
+      x: MIN_REGION_PX / 600,
+      y: MIN_REGION_PX / 400,
+    });
+
+    const zeroWidth = surface(
+      { left: 0, top: 0, width: 800, height: 600 },
+      { left: 0, top: 0, width: 0, height: 400 }
+    );
+    const zeroHeight = surface(
+      { left: 0, top: 0, width: 800, height: 600 },
+      { left: 0, top: 0, width: 600, height: 0 }
+    );
+    const zeroBoth = surface(
+      { left: 0, top: 0, width: 800, height: 600 },
+      { left: 0, top: 0, width: 0, height: 0 }
+    );
+    expect(unitMinimumForPixels(zeroWidth, 4)).toBeUndefined();
+    expect(unitMinimumForPixels(zeroHeight, 4)).toBeUndefined();
+    expect(unitMinimumForPixels(zeroBoth, 4)).toBeUndefined();
   });
 });
 
