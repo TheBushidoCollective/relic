@@ -1246,13 +1246,13 @@ describe('frame adapters', () => {
   // to one, so a recorder is the whole of what they need.
   const recordFramePosts = (): unknown[] => {
     const posted: unknown[] = [];
-    const frame: { contentWindow?: { postMessage(msg: unknown): void } } =
-      iframe;
-    frame.contentWindow = {
-      postMessage: (msg: unknown) => {
-        posted.push(msg);
+    Object.assign(iframe, {
+      contentWindow: {
+        postMessage: (msg: unknown) => {
+          posted.push(msg);
+        },
       },
-    };
+    });
     return posted;
   };
 
