@@ -3439,6 +3439,15 @@ export function paintPendingMark(
     return;
   }
   if (anchor.kind === 'pin') {
+    // A framed relic scrolls inside its frame, so a pin over it is drawn
+    // there by its adapter, which marks the provisional one itself.
+    const surface = anchorSurfaceFor(host);
+    const framed =
+      surface === undefined ? undefined : adapterFor(anchor, surface);
+    if (surface !== undefined && framed !== undefined) {
+      framed.paint(surface, pins, anchor, PENDING_MARK_ID);
+      return;
+    }
     const pin = document.createElement('div');
     // Not a button: there is no comment to scroll to yet, and a control that
     // answers a press by doing nothing is the defect this whole change removed.
@@ -4676,15 +4685,10 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         if (!armed()) return;
         const msg = event.detail;
         if (!msg) return;
-        const w = 0.03;
-        const h = 0.03;
-        const rect = {
-          x: Math.max(0, Math.min(1 - w, msg.x - w / 2)),
-          y: Math.max(0, Math.min(1 - h, msg.y - h / 2)),
-          w,
-          h,
-        };
-        aim({ kind: 'region', rect });
+        // A point, exactly as a click places one on any other stage. It used
+        // to be a box three hundredths of the document on each side, which on
+        // a long document is a strip hundreds of pixels tall.
+        aim({ kind: 'pin', x: msg.x, y: msg.y });
       }) as EventListener);
       next.addEventListener('relic:frame-region', ((
         event: CustomEvent<FrameRegionMessage>
@@ -4980,6 +4984,16 @@ export function buildThread(
         continue;
       }
       if (entry.anchor.kind === 'pin') {
+        // A framed relic draws its own pins, inside the frame that scrolls.
+        const surface = anchorSurfaceFor(host);
+        const framed =
+          surface === undefined ? undefined : adapterFor(entry.anchor, surface);
+        if (surface !== undefined && framed !== undefined) {
+          if (!framed.paint(surface, pins, entry.anchor, entry.id)) {
+            unplaceable.add(entry.id);
+          }
+          continue;
+        }
         const pin = document.createElement('button');
         pin.type = 'button';
         pin.className = 'comment-pin';

@@ -32,7 +32,11 @@
  */
 
 import { registerAnchorAdapter, resetAnchorAdapters } from './anchoring.ts';
-import { frameQuoteAdapter, frameRegionAdapter } from './annotate-frame.ts';
+import {
+  framePinAdapter,
+  frameQuoteAdapter,
+  frameRegionAdapter,
+} from './annotate-frame.ts';
 import { pageAnchorAdapter } from './annotate-page.ts';
 import { quoteAdapter } from './annotate-quote.ts';
 import { regionAdapter } from './annotate-region.ts';
@@ -46,6 +50,9 @@ export function registerBuiltInAnchorAdapters(): void {
   // answer for a document they cannot reach into.
   registerAnchorAdapter(frameQuoteAdapter);
   registerAnchorAdapter(frameRegionAdapter);
+  // The only adapter for a point. A point on the page's own DOM is drawn by
+  // the stage over its own scroll and never asks the table.
+  registerAnchorAdapter(framePinAdapter);
   registerAnchorAdapter(quoteAdapter);
   registerAnchorAdapter(regionAdapter);
   registerAnchorAdapter(timeAdapter);

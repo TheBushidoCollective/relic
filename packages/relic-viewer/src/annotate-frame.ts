@@ -18,7 +18,7 @@
  *
  * 2. Inward (Parent to Frame):
  *    - `relic:arm-pointing`: arm or disarm click/drag capture inside the frame.
- *    - `relic:paint-mark`: paint an individual mark (quote or region) by ID.
+ *    - `relic:paint-mark`: paint an individual mark (quote, region or pin) by ID.
  *    - `relic:paint-marks`: paint a batch of marks by ID.
  *    - `relic:clear-mark`: remove a mark by ID.
  *    - `relic:clear-marks`: remove all comment marks from the frame.
@@ -304,14 +304,18 @@ export interface FramePointMessage {
   readonly y: number;
 }
 
+/** A unit coordinate on the frame's scrolling document: finite, in [0, 1]. */
+export function isUnitPoint(x: unknown, y: unknown): boolean {
+  if (typeof x !== 'number' || typeof y !== 'number') return false;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  return x >= 0 && x <= 1 && y >= 0 && y <= 1;
+}
+
 export function isFramePointMessage(data: unknown): data is FramePointMessage {
   if (typeof data !== 'object' || data === null) return false;
   const msg = data as Record<string, unknown>;
   if (msg.type !== 'relic:frame-point') return false;
-  if (typeof msg.x !== 'number' || typeof msg.y !== 'number') return false;
-  if (!Number.isFinite(msg.x) || !Number.isFinite(msg.y)) return false;
-  if (msg.x < 0 || msg.x > 1 || msg.y < 0 || msg.y > 1) return false;
-  return true;
+  return isUnitPoint(msg.x, msg.y);
 }
 
 export interface FrameRegionMessage {
@@ -459,6 +463,12 @@ export type FrameMarkPayload =
       readonly id: string;
       readonly kind: 'region';
       readonly rect: AnchorRect;
+    }
+  | {
+      readonly id: string;
+      readonly kind: 'pin';
+      readonly x: number;
+      readonly y: number;
     };
 
 export function isValidFrameMarkPayload(
@@ -501,6 +511,9 @@ export function isValidFrameMarkPayload(
   }
   if (mark.kind === 'region') {
     return isValidAnchorRect(mark.rect);
+  }
+  if (mark.kind === 'pin') {
+    return isUnitPoint(mark.x, mark.y);
   }
   return false;
 }
@@ -554,9 +567,10 @@ export function isClearMarksMessage(data: unknown): data is ClearMarksMessage {
 export interface RevealMarkMessage {
   readonly type: 'relic:reveal-mark';
   readonly id?: string;
-  readonly kind?: 'quote' | 'region';
+  readonly kind?: 'quote' | 'region' | 'pin';
   readonly exact?: string;
   readonly rect?: AnchorRect;
+  readonly point?: { readonly x: number; readonly y: number };
 }
 
 export function isRevealMarkMessage(data: unknown): data is RevealMarkMessage {
@@ -564,11 +578,21 @@ export function isRevealMarkMessage(data: unknown): data is RevealMarkMessage {
   const msg = data as Record<string, unknown>;
   if (msg.type !== 'relic:reveal-mark') return false;
   if (msg.id !== undefined && typeof msg.id !== 'string') return false;
-  if (msg.kind !== undefined && msg.kind !== 'quote' && msg.kind !== 'region') {
+  if (
+    msg.kind !== undefined &&
+    msg.kind !== 'quote' &&
+    msg.kind !== 'region' &&
+    msg.kind !== 'pin'
+  ) {
     return false;
   }
   if (msg.exact !== undefined && typeof msg.exact !== 'string') return false;
   if (msg.rect !== undefined && !isValidAnchorRect(msg.rect)) return false;
+  if (msg.point !== undefined) {
+    if (typeof msg.point !== 'object' || msg.point === null) return false;
+    const point = msg.point as Record<string, unknown>;
+    if (!isUnitPoint(point.x, point.y)) return false;
+  }
   return true;
 }
 
@@ -680,7 +704,26 @@ export const frameQuoteAdapter: AnchorAdapter<'quote'> = {
 };
 
 /**
- * Adapter for region anchors targeting a box or point on a sandboxed iframe.
+ * The box this viewer used to store for a click on a framed relic.
+ *
+ * Until a click there placed a pin, it was saved as a region three
+ * hundredths of the document wide and three hundredths tall, centred on the
+ * click. Both sides are shares of the whole scrolling document, so on a long
+ * document the "point" was a strip sixty pixels wide and hundreds tall
+ * running down the page. A posted anchor is sealed under the relic's key by
+ * whoever wrote it and cannot be rewritten, so it is drawn as what the
+ * reader placed: a point at the box's centre. A dragged box never has these
+ * exact sides, because its sides are the distance the pointer travelled.
+ */
+export function legacyFramePoint(
+  rect: AnchorRect
+): { readonly x: number; readonly y: number } | undefined {
+  if (rect.w !== 0.03 || rect.h !== 0.03) return undefined;
+  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+}
+
+/**
+ * Adapter for region anchors targeting a box on a sandboxed iframe.
  *
  * Coordinates are unit rectangles relative to the frame's scrolling document box.
  * Claims kind 'region' strictly when the rendered stage holds an iframe.usercontent-frame.
@@ -688,8 +731,10 @@ export const frameQuoteAdapter: AnchorAdapter<'quote'> = {
 export const frameRegionAdapter: AnchorAdapter<'region'> = {
   kind: 'region',
 
-  label(_anchor: Extract<CommentAnchor, { kind: 'region' }>): string {
-    return 'Commenting on a region';
+  label(anchor: Extract<CommentAnchor, { kind: 'region' }>): string {
+    return legacyFramePoint(anchor.rect) === undefined
+      ? 'Commenting on a region'
+      : 'Commenting on a point';
   },
 
   supports(surface: AnchorSurface): boolean {
@@ -698,11 +743,20 @@ export const frameRegionAdapter: AnchorAdapter<'region'> = {
 
   paint(
     surface: AnchorSurface,
-    _overlay: HTMLElement,
+    overlay: HTMLElement,
     anchor: Extract<CommentAnchor, { kind: 'region' }>,
     commentId: string
   ): boolean {
     if (!isFrameSurface(surface)) return false;
+    const point = legacyFramePoint(anchor.rect);
+    if (point !== undefined) {
+      return framePinAdapter.paint(
+        surface,
+        overlay,
+        { kind: 'pin', ...point },
+        commentId
+      );
+    }
     const win = frameWindow(surface);
     win?.postMessage(
       {
@@ -722,12 +776,71 @@ export const frameRegionAdapter: AnchorAdapter<'region'> = {
     anchor: Extract<CommentAnchor, { kind: 'region' }>
   ): void {
     if (!isFrameSurface(surface)) return;
+    const point = legacyFramePoint(anchor.rect);
+    if (point !== undefined) {
+      framePinAdapter.reveal?.(surface, { kind: 'pin', ...point });
+      return;
+    }
     const win = frameWindow(surface);
     win?.postMessage(
       {
         type: 'relic:reveal-mark',
         kind: 'region',
         rect: anchor.rect,
+      } satisfies RevealMarkMessage,
+      '*'
+    );
+  },
+};
+
+/**
+ * Adapter for a point placed on a sandboxed iframe.
+ *
+ * A point on the page's own DOM is drawn by the stage over its own scroll.
+ * A framed relic scrolls inside the frame, out of this origin's reach, so a
+ * pin drawn out here would stay put while the passage it marks scrolled
+ * away. The frame draws it instead, at the stored share of its scrolling
+ * document and at a fixed size in pixels, which is what makes it a point on
+ * a document of any length.
+ */
+export const framePinAdapter: AnchorAdapter<'pin'> = {
+  kind: 'pin',
+
+  label(_anchor: Extract<CommentAnchor, { kind: 'pin' }>): string {
+    return 'Commenting on a point';
+  },
+
+  supports(surface: AnchorSurface): boolean {
+    return isFrameSurface(surface);
+  },
+
+  paint(
+    surface: AnchorSurface,
+    _overlay: HTMLElement,
+    anchor: Extract<CommentAnchor, { kind: 'pin' }>,
+    commentId: string
+  ): boolean {
+    if (!isFrameSurface(surface)) return false;
+    frameWindow(surface)?.postMessage(
+      {
+        type: 'relic:paint-mark',
+        mark: { id: commentId, kind: 'pin', x: anchor.x, y: anchor.y },
+      } satisfies PaintMarkMessage,
+      '*'
+    );
+    return true;
+  },
+
+  reveal(
+    surface: AnchorSurface,
+    anchor: Extract<CommentAnchor, { kind: 'pin' }>
+  ): void {
+    if (!isFrameSurface(surface)) return;
+    frameWindow(surface)?.postMessage(
+      {
+        type: 'relic:reveal-mark',
+        kind: 'pin',
+        point: { x: anchor.x, y: anchor.y },
       } satisfies RevealMarkMessage,
       '*'
     );
