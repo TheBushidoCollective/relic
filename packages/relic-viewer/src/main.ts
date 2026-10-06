@@ -26,9 +26,11 @@ import {
   anchorLabel,
   boxFromUnit,
   MARK_UNPLACEABLE_NOTE,
+  MIN_REGION_PX,
   rectFromCorners,
   UNSUPPORTED_ANCHOR_LABEL,
   unitFromPointer,
+  unitMinimumForPixels,
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
@@ -4049,7 +4051,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       return;
     }
 
-    const rect = rectFromCorners(dragOrigin.unit, current);
+    const rect = rectFromCorners(
+      dragOrigin.unit,
+      current,
+      unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+    );
     if (rect === undefined) {
       drawingBox.style.display = 'none';
       return;
@@ -4085,7 +4091,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       // A drag ending in the letterbox outside the image must not silently
       // clamp onto the picture; it produces no anchor and leaves the tool armed.
       if (current === undefined) return;
-      const rect = rectFromCorners(start, current);
+      const rect = rectFromCorners(
+        start,
+        current,
+        unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+      );
       if (rect === undefined) return;
       aim({ kind: 'region', rect });
     }
@@ -4149,7 +4159,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       return;
     }
 
-    const rect = rectFromCorners(dragOrigin.unit, current);
+    const rect = rectFromCorners(
+      dragOrigin.unit,
+      current,
+      unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+    );
     if (rect === undefined) {
       drawingBox.style.display = 'none';
       return;
@@ -4185,7 +4199,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       if (surface === undefined) return;
       const current = unitFromPointer(surface, touch.clientX, touch.clientY);
       if (current === undefined) return;
-      const rect = rectFromCorners(start, current);
+      const rect = rectFromCorners(
+        start,
+        current,
+        unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+      );
       if (rect === undefined) return;
       aim({ kind: 'region', rect });
     }
@@ -4752,7 +4770,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         if (surface === undefined) return;
         const current = unitFromPointer(surface, event.clientX, event.clientY);
         if (current === undefined) return;
-        const rect = rectFromCorners(dragStart, current);
+        const rect = rectFromCorners(
+          dragStart,
+          current,
+          unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+        );
         if (rect !== undefined) {
           isDragging = true;
           anchor = { kind: 'page', page: dragPage, rect };
@@ -4772,7 +4794,13 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         if (surface === undefined) return;
         const current = unitFromPointer(surface, event.clientX, event.clientY);
         const rect =
-          current !== undefined ? rectFromCorners(start, current) : undefined;
+          current !== undefined
+            ? rectFromCorners(
+                start,
+                current,
+                unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+              )
+            : undefined;
         if (rect !== undefined) {
           aim({ kind: 'page', page: dragPage, rect });
         }
