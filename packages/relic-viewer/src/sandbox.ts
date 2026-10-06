@@ -37,7 +37,6 @@ import {
 } from '@relic/format';
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
-import { rectFromCorners } from './anchoring.ts';
 import {
   FRAME_SELECTION_TEXT_LIMIT_BYTES,
   type FrameMarkPayload,
@@ -199,10 +198,48 @@ export const FRAME_MARK_CSS = `
 .relic-region-mark.is-pending {
   background: rgba(180, 140, 60, 0.12) !important;
   border: 2px dashed rgba(180, 140, 60, 0.85) !important;
+  pointer-events: none !important;
 }
 .relic-region-mark.is-paired {
   background: rgba(180, 140, 60, 0.38) !important;
   box-shadow: 0 0 0 2px rgba(180, 140, 60, 0.85) !important;
+}
+.relic-region-mark.is-drawing {
+  pointer-events: none !important;
+  cursor: crosshair !important;
+}
+.relic-pin-mark {
+  position: absolute !important;
+  box-sizing: border-box !important;
+  width: 20px !important;
+  height: 20px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 2px solid #fff !important;
+  border-radius: 999px !important;
+  background: rgba(180, 140, 60, 0.95) !important;
+  box-shadow: 0 0 0 1px rgba(60, 45, 20, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3) !important;
+  transform: translate(-50%, -50%) !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+}
+.relic-pin-mark:hover {
+  box-shadow: 0 0 0 4px rgba(180, 140, 60, 0.35) !important;
+}
+.relic-pin-mark.is-active,
+.relic-pin-mark.is-paired {
+  outline: 2px solid rgba(180, 140, 60, 0.9) !important;
+  outline-offset: 2px !important;
+}
+.relic-pin-mark.is-resolved {
+  background: rgba(140, 140, 140, 0.7) !important;
+}
+.relic-pin-mark.is-pending {
+  background: rgba(180, 140, 60, 0.18) !important;
+  border: 2px dashed rgba(180, 140, 60, 0.95) !important;
+  box-shadow: none !important;
+  pointer-events: none !important;
+  cursor: default !important;
 }
 .relic-pointing-active, .relic-pointing-active * {
   cursor: crosshair !important;
@@ -457,24 +494,38 @@ export function unwrapFrameQuotes(root: HTMLElement, id?: string): void {
   }
 }
 
-export function paintFrameRegion(
-  root: HTMLElement,
-  rect: AnchorRect,
-  id: string
-): HTMLElement | undefined {
-  const doc = root.ownerDocument;
-  if (!doc || !doc.body) return undefined;
-  ensureFrameStyles(doc);
-
-  const docWidth = Math.max(
+/** The scrolling document's size in pixels, or undefined before it has one. */
+function documentSize(
+  doc: Document
+): { readonly width: number; readonly height: number } | undefined {
+  const width = Math.max(
     doc.documentElement.scrollWidth,
-    doc.body.scrollWidth
+    doc.body?.scrollWidth ?? 0
   );
-  const docHeight = Math.max(
+  const height = Math.max(
     doc.documentElement.scrollHeight,
-    doc.body.scrollHeight
+    doc.body?.scrollHeight ?? 0
   );
-  if (docWidth <= 0 || docHeight <= 0) return undefined;
+  if (width <= 0 || height <= 0) return undefined;
+  return { width, height };
+}
+
+/**
+ * The layer every box and pin is drawn on, sized to the scrolling document,
+ * together with that size. Undefined before the document has a body or a
+ * size, which is a mark with nowhere to land rather than an error.
+ */
+function frameOverlay(doc: Document):
+  | {
+      readonly overlay: HTMLElement;
+      readonly docWidth: number;
+      readonly docHeight: number;
+    }
+  | undefined {
+  if (!doc.body) return undefined;
+  ensureFrameStyles(doc);
+  const size = documentSize(doc);
+  if (size === undefined) return undefined;
 
   let overlay = doc.getElementById('relic-frame-overlay');
   if (!overlay) {
@@ -484,14 +535,21 @@ export function paintFrameRegion(
       'position: absolute; left: 0; top: 0; pointer-events: none; z-index: 99999;';
     doc.body.appendChild(overlay);
   }
-  overlay.style.width = `${docWidth}px`;
-  overlay.style.height = `${docHeight}px`;
+  overlay.style.width = `${size.width}px`;
+  overlay.style.height = `${size.height}px`;
+  return { overlay, docWidth: size.width, docHeight: size.height };
+}
 
-  for (const old of Array.from(
-    overlay.querySelectorAll(`[data-comment-id="${id}"]`)
-  )) {
-    old.remove();
-  }
+export function paintFrameRegion(
+  root: HTMLElement,
+  rect: AnchorRect,
+  id: string
+): HTMLElement | undefined {
+  const doc = root.ownerDocument;
+  const layer = doc ? frameOverlay(doc) : undefined;
+  if (!doc || layer === undefined) return undefined;
+  const { overlay, docWidth, docHeight } = layer;
+  clearFrameRegions(doc.body, id);
 
   const div = doc.createElement('div');
   div.className = `relic-region-mark${id === 'pending:target' ? ' is-pending' : ''}`;
@@ -505,6 +563,103 @@ export function paintFrameRegion(
 
   overlay.appendChild(div);
   return div;
+}
+
+/**
+ * Draw a point at a share of the scrolling document.
+ *
+ * Positioned by share and sized in pixels, so it is the same small marker on
+ * a one-screen page and on a document eleven thousand pixels long. Drawing
+ * it as a share-sized box is what made a point on a long document a strip
+ * hundreds of pixels tall.
+ */
+export function paintFramePin(
+  root: HTMLElement,
+  point: { readonly x: number; readonly y: number },
+  id: string
+): HTMLElement | undefined {
+  const doc = root.ownerDocument;
+  const layer = doc ? frameOverlay(doc) : undefined;
+  if (!doc || layer === undefined) return undefined;
+  clearFrameRegions(doc.body, id);
+
+  const pending = id === 'pending:target';
+  const pin = doc.createElement('div');
+  pin.className = `relic-pin-mark${pending ? ' is-pending' : ''}`;
+  pin.dataset.commentId = id;
+  pin.style.left = `${point.x * layer.docWidth}px`;
+  pin.style.top = `${point.y * layer.docHeight}px`;
+  // A point nobody has commented on yet has no comment to open.
+  if (!pending) wireFrameMark(pin, id, doc);
+
+  layer.overlay.appendChild(pin);
+  return pin;
+}
+
+/**
+ * How far, in the frame's own pixels, a pressed pointer travels before the
+ * gesture is a drag rather than a click, and the smallest side a dragged box
+ * keeps.
+ *
+ * Pixels and never a share of the document. A share of an eleven-thousand
+ * pixel document is tens of pixels, and measuring it that way turned every
+ * drag across a single line of text into a point.
+ */
+export const FRAME_DRAG_MIN_PX = 4;
+
+export type FrameGesture =
+  | { readonly kind: 'point'; readonly x: number; readonly y: number }
+  | { readonly kind: 'region'; readonly rect: AnchorRect };
+
+/**
+ * What a press and a release at two document positions placed, in unit
+ * coordinates of the scrolling document.
+ *
+ * Positions are document pixels (`pageX`/`pageY`), so a mark placed while
+ * scrolled stays on the element it was placed on after scrolling elsewhere.
+ */
+export function frameGestureTarget(
+  start: { readonly x: number; readonly y: number },
+  end: { readonly x: number; readonly y: number },
+  docWidth: number,
+  docHeight: number
+): FrameGesture | undefined {
+  if (!(docWidth > 0) || !(docHeight > 0)) return undefined;
+  const clamp = (value: number, size: number): number =>
+    Math.min(Math.max(value, 0), size);
+  const x0 = clamp(start.x, docWidth);
+  const y0 = clamp(start.y, docHeight);
+  const x1 = clamp(end.x, docWidth);
+  const y1 = clamp(end.y, docHeight);
+
+  if (Math.hypot(x1 - x0, y1 - y0) < FRAME_DRAG_MIN_PX) {
+    return { kind: 'point', x: x0 / docWidth, y: y0 / docHeight };
+  }
+
+  // A flat drag along a line of text is still a box the reader drew, so its
+  // thin side is widened to the minimum rather than the drag thrown away.
+  const width = Math.min(
+    Math.max(Math.abs(x1 - x0), FRAME_DRAG_MIN_PX),
+    docWidth
+  );
+  const height = Math.min(
+    Math.max(Math.abs(y1 - y0), FRAME_DRAG_MIN_PX),
+    docHeight
+  );
+  const x = Math.min(x0, x1, docWidth - width) / docWidth;
+  const y = Math.min(y0, y1, docHeight - height) / docHeight;
+  // Clamped again in unit space: the format refuses a box whose far edge
+  // passes 1, and dividing back out of pixels can overshoot by a rounding
+  // error.
+  return {
+    kind: 'region',
+    rect: {
+      x,
+      y,
+      w: Math.min(width / docWidth, 1 - x),
+      h: Math.min(height / docHeight, 1 - y),
+    },
+  };
 }
 
 export function clearFrameRegions(root: HTMLElement, id?: string): void {
@@ -643,6 +798,15 @@ export function setupFrameInteraction(
   let startX = 0;
   let startY = 0;
   let isDown = false;
+  // The box being drawn, shown while the pointer is down so the reader sees
+  // what they are about to point at. Never carries a comment id, so nothing
+  // that clears, pairs or lights marks can mistake it for one.
+  let drawing: HTMLElement | undefined;
+  const stopDrawing = (): void => {
+    isDown = false;
+    drawing?.remove();
+    drawing = undefined;
+  };
   let suppressScroll = false;
   let scrollResetTimer: number | undefined;
   // True from the moment a nonempty selection is reported until the frame
@@ -717,9 +881,56 @@ export function setupFrameInteraction(
 
   doc.addEventListener('mousedown', (event: MouseEvent) => {
     if (!armed) return;
+    // A posted mark is a control: pressing it opens its comment rather than
+    // placing a new one on top of it.
+    const target = event.target as Element | null;
+    if (
+      typeof target?.closest === 'function' &&
+      target.closest('.relic-region-mark, .relic-pin-mark') !== null
+    ) {
+      return;
+    }
+    // Pointing, not selecting. Left to the browser, a drag across text
+    // paints a text selection over the box being drawn, which reads as a
+    // selection the reader never asked for.
+    event.preventDefault?.();
     isDown = true;
     startX = event.pageX;
     startY = event.pageY;
+  });
+
+  doc.addEventListener('mousemove', (event: MouseEvent) => {
+    if (!armed || !isDown) return;
+    // Released outside the frame, where this document never hears the
+    // mouseup. The next move with no button down ends the drag.
+    if (typeof event.buttons === 'number' && (event.buttons & 1) === 0) {
+      stopDrawing();
+      return;
+    }
+    const layer = frameOverlay(doc);
+    if (layer === undefined) return;
+    const gesture = frameGestureTarget(
+      { x: startX, y: startY },
+      { x: event.pageX, y: event.pageY },
+      layer.docWidth,
+      layer.docHeight
+    );
+    if (gesture?.kind !== 'region') {
+      if (drawing !== undefined) drawing.style.display = 'none';
+      return;
+    }
+    // Repainting the marks empties the overlay, and the box with it.
+    if (drawing === undefined || drawing.isConnected === false) {
+      drawing = doc.createElement('div');
+      drawing.className = 'relic-region-mark is-pending is-drawing';
+      layer.overlay.appendChild(drawing);
+    }
+    const { rect } = gesture;
+    drawing.style.display = 'block';
+    drawing.style.left = `${rect.x * layer.docWidth}px`;
+    drawing.style.top = `${rect.y * layer.docHeight}px`;
+    drawing.style.width = `${rect.w * layer.docWidth}px`;
+    drawing.style.height = `${rect.h * layer.docHeight}px`;
   });
 
   function handleSelection(): void {
@@ -828,45 +1039,30 @@ export function setupFrameInteraction(
     }
 
     if (!isDown) return;
-    isDown = false;
+    stopDrawing();
     event.preventDefault?.();
     event.stopPropagation?.();
 
-    const endX = event.pageX;
-    const endY = event.pageY;
-
-    const docWidth = Math.max(
-      doc.documentElement.scrollWidth,
-      doc.body?.scrollWidth ?? 0
+    const size = documentSize(doc);
+    if (size === undefined) return;
+    const gesture = frameGestureTarget(
+      { x: startX, y: startY },
+      { x: event.pageX, y: event.pageY },
+      size.width,
+      size.height
     );
-    const docHeight = Math.max(
-      doc.documentElement.scrollHeight,
-      doc.body?.scrollHeight ?? 0
-    );
-    if (docWidth <= 0 || docHeight <= 0) return;
-
-    // Unit coordinates are measured relative to the scrolling document,
-    // not the visible viewport. If measured against the visible viewport,
-    // a mark placed while scrolled would point at the wrong element after
-    // scrolling elsewhere.
-    const from = {
-      x: Math.max(0, Math.min(1, startX / docWidth)),
-      y: Math.max(0, Math.min(1, startY / docHeight)),
-    };
-    const to = {
-      x: Math.max(0, Math.min(1, endX / docWidth)),
-      y: Math.max(0, Math.min(1, endY / docHeight)),
-    };
-
-    const rect = rectFromCorners(from, to, 0.005);
-    if (rect !== undefined) {
-      const msg: FrameRegionMessage = { type: 'relic:frame-region', rect };
+    if (gesture === undefined) return;
+    if (gesture.kind === 'region') {
+      const msg: FrameRegionMessage = {
+        type: 'relic:frame-region',
+        rect: gesture.rect,
+      };
       postOutward(msg);
     } else {
       const msg: FramePointMessage = {
         type: 'relic:frame-point',
-        x: from.x,
-        y: from.y,
+        x: gesture.x,
+        y: gesture.y,
       };
       postOutward(msg);
     }
@@ -875,6 +1071,7 @@ export function setupFrameInteraction(
   return {
     setArmed(nextArmed: boolean) {
       armed = nextArmed;
+      if (!armed) stopDrawing();
       if (doc.documentElement) {
         doc.documentElement.classList.toggle('relic-pointing-active', armed);
       }
@@ -898,6 +1095,9 @@ export function setupFrameInteraction(
       }
       if (mark.kind === 'region') {
         return paintFrameRegion(doc.body, mark.rect, mark.id) !== undefined;
+      }
+      if (mark.kind === 'pin') {
+        return paintFramePin(doc.body, mark, mark.id) !== undefined;
       }
       return false;
     },
@@ -946,6 +1146,19 @@ export function setupFrameInteraction(
         );
         win.scrollTo({
           top: msg.rect.y * docHeight,
+          behavior: 'smooth',
+        });
+      }
+      if (msg.kind === 'pin' && msg.point) {
+        const size = documentSize(doc);
+        if (size === undefined) return;
+        // Centred: a point at the very top edge of the window reads as the
+        // window's edge rather than as a place in the document.
+        win.scrollTo({
+          top: Math.max(
+            0,
+            msg.point.y * size.height - (win.innerHeight || 0) / 2
+          ),
           behavior: 'smooth',
         });
       }

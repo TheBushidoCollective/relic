@@ -26,9 +26,11 @@ import {
   anchorLabel,
   boxFromUnit,
   MARK_UNPLACEABLE_NOTE,
+  MIN_REGION_PX,
   rectFromCorners,
   UNSUPPORTED_ANCHOR_LABEL,
   unitFromPointer,
+  unitMinimumForPixels,
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
@@ -3439,6 +3441,15 @@ export function paintPendingMark(
     return;
   }
   if (anchor.kind === 'pin') {
+    // A framed relic scrolls inside its frame, so a pin over it is drawn
+    // there by its adapter, which marks the provisional one itself.
+    const surface = anchorSurfaceFor(host);
+    const framed =
+      surface === undefined ? undefined : adapterFor(anchor, surface);
+    if (surface !== undefined && framed !== undefined) {
+      framed.paint(surface, pins, anchor, PENDING_MARK_ID);
+      return;
+    }
     const pin = document.createElement('div');
     // Not a button: there is no comment to scroll to yet, and a control that
     // answers a press by doing nothing is the defect this whole change removed.
@@ -4040,7 +4051,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       return;
     }
 
-    const rect = rectFromCorners(dragOrigin.unit, current);
+    const rect = rectFromCorners(
+      dragOrigin.unit,
+      current,
+      unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+    );
     if (rect === undefined) {
       drawingBox.style.display = 'none';
       return;
@@ -4076,7 +4091,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       // A drag ending in the letterbox outside the image must not silently
       // clamp onto the picture; it produces no anchor and leaves the tool armed.
       if (current === undefined) return;
-      const rect = rectFromCorners(start, current);
+      const rect = rectFromCorners(
+        start,
+        current,
+        unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+      );
       if (rect === undefined) return;
       aim({ kind: 'region', rect });
     }
@@ -4140,7 +4159,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       return;
     }
 
-    const rect = rectFromCorners(dragOrigin.unit, current);
+    const rect = rectFromCorners(
+      dragOrigin.unit,
+      current,
+      unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+    );
     if (rect === undefined) {
       drawingBox.style.display = 'none';
       return;
@@ -4176,7 +4199,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
       if (surface === undefined) return;
       const current = unitFromPointer(surface, touch.clientX, touch.clientY);
       if (current === undefined) return;
-      const rect = rectFromCorners(start, current);
+      const rect = rectFromCorners(
+        start,
+        current,
+        unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+      );
       if (rect === undefined) return;
       aim({ kind: 'region', rect });
     }
@@ -4676,15 +4703,10 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         if (!armed()) return;
         const msg = event.detail;
         if (!msg) return;
-        const w = 0.03;
-        const h = 0.03;
-        const rect = {
-          x: Math.max(0, Math.min(1 - w, msg.x - w / 2)),
-          y: Math.max(0, Math.min(1 - h, msg.y - h / 2)),
-          w,
-          h,
-        };
-        aim({ kind: 'region', rect });
+        // A point, exactly as a click places one on any other stage. It used
+        // to be a box three hundredths of the document on each side, which on
+        // a long document is a strip hundreds of pixels tall.
+        aim({ kind: 'pin', x: msg.x, y: msg.y });
       }) as EventListener);
       next.addEventListener('relic:frame-region', ((
         event: CustomEvent<FrameRegionMessage>
@@ -4748,7 +4770,11 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         if (surface === undefined) return;
         const current = unitFromPointer(surface, event.clientX, event.clientY);
         if (current === undefined) return;
-        const rect = rectFromCorners(dragStart, current);
+        const rect = rectFromCorners(
+          dragStart,
+          current,
+          unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+        );
         if (rect !== undefined) {
           isDragging = true;
           anchor = { kind: 'page', page: dragPage, rect };
@@ -4768,7 +4794,13 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
         if (surface === undefined) return;
         const current = unitFromPointer(surface, event.clientX, event.clientY);
         const rect =
-          current !== undefined ? rectFromCorners(start, current) : undefined;
+          current !== undefined
+            ? rectFromCorners(
+                start,
+                current,
+                unitMinimumForPixels(surface, MIN_REGION_PX) ?? 0.005
+              )
+            : undefined;
         if (rect !== undefined) {
           aim({ kind: 'page', page: dragPage, rect });
         }
@@ -4980,6 +5012,16 @@ export function buildThread(
         continue;
       }
       if (entry.anchor.kind === 'pin') {
+        // A framed relic draws its own pins, inside the frame that scrolls.
+        const surface = anchorSurfaceFor(host);
+        const framed =
+          surface === undefined ? undefined : adapterFor(entry.anchor, surface);
+        if (surface !== undefined && framed !== undefined) {
+          if (!framed.paint(surface, pins, entry.anchor, entry.id)) {
+            unplaceable.add(entry.id);
+          }
+          continue;
+        }
         const pin = document.createElement('button');
         pin.type = 'button';
         pin.className = 'comment-pin';

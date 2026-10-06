@@ -1058,6 +1058,23 @@ describe('a relic that renders in a sandboxed frame', () => {
     });
     expect(mounted.chip()).toContain('Commenting on a region');
   });
+
+  test('a click inside the frame is a point, drawn by the frame', async () => {
+    const mounted = await mount(framed);
+    only(mounted.thread, 'mark-mode').dispatch('click');
+    mounted.stage.dispatch('relic:frame-point', {
+      detail: { type: 'relic:frame-point', x: 0.14, y: 0.05 },
+    });
+    // It was a box three hundredths of the document on each side, which on
+    // a long document is a strip hundreds of pixels tall.
+    expect(mounted.chip()).toContain('Commenting on a point');
+    // The document scrolls inside the frame, so a pin drawn out here would
+    // stay put while the passage it marks scrolled away.
+    expect(withClass(mounted.stage, 'comment-pin')).toHaveLength(0);
+
+    const posted = await mounted.post('about this spot');
+    expect(posted.anchor).toEqual({ kind: 'pin', x: 0.14, y: 0.05 });
+  });
   test('still announces what a comment would be about', async () => {
     const mounted = await mount(framed);
     expect(mounted.chip()).toContain('Commenting on the whole document');

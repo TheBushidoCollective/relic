@@ -114,6 +114,31 @@ export function unitFromPointer(
 }
 
 /**
+ * Smallest visual drag that counts as a region rather than a click or stray tap,
+ * in painted pixels per axis.
+ */
+export const MIN_REGION_PX = 4;
+
+/**
+ * Converts a pixel threshold into unit fractions of the content box.
+ *
+ * Used so a minimum drag distance is measured in screen pixels rather than
+ * content percentage, which keeps tall or wide surfaces from demanding huge drags.
+ * Returns `undefined` when the surface has no measurable size.
+ */
+export function unitMinimumForPixels(
+  surface: AnchorSurface,
+  px = MIN_REGION_PX
+): { readonly x: number; readonly y: number } | undefined {
+  const box = contentOffset(surface);
+  if (box.width <= 0 || box.height <= 0) return undefined;
+  return {
+    x: px / box.width,
+    y: px / box.height,
+  };
+}
+
+/**
  * Two unit points as a normalised rectangle.
  *
  * A drag has no guaranteed direction, so the corners are sorted rather than
@@ -123,13 +148,15 @@ export function unitFromPointer(
 export function rectFromCorners(
   from: { readonly x: number; readonly y: number },
   to: { readonly x: number; readonly y: number },
-  minimum = 0.005
+  minimum: number | { readonly x: number; readonly y: number } = 0.005
 ): AnchorRect | undefined {
+  const minX = typeof minimum === 'number' ? minimum : minimum.x;
+  const minY = typeof minimum === 'number' ? minimum : minimum.y;
   const x = Math.min(from.x, to.x);
   const y = Math.min(from.y, to.y);
   const w = Math.abs(to.x - from.x);
   const h = Math.abs(to.y - from.y);
-  if (w < minimum || h < minimum) return undefined;
+  if (w < minX || h < minY) return undefined;
   // Clamped so the stored rectangle cannot overhang the edge, which the
   // format refuses. Clamping here rather than refusing keeps a drag that ran
   // one pixel past the corner from being thrown away.
