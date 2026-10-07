@@ -7,11 +7,13 @@ import {
 } from '@relic/format';
 import { keyToMnemonic } from '@relic/format/mnemonic';
 import { boot, buildBar, renderDashboard, renderDead } from '../src/main.ts';
-import type { KeyVault, VaultEntry } from '../src/vault.ts';
 import {
   buildCommentedDashboardRows,
   buildLocalDashboardRows,
   type CommentedRelic,
+} from '../src/relic-rows.ts';
+import type { KeyVault, VaultEntry } from '../src/vault.ts';
+import {
   type DeadView,
   isKeyEntryRecoverable,
   openRelicWithKey,
