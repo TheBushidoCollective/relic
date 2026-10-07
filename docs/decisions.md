@@ -451,3 +451,30 @@ retitle is allowed and then refused on repeat, an entry with no digest
 republishes once and records one, and a malformed digest refuses loudly instead
 of comparing against a value nothing can equal. Removing the gate fails four of
 them; trusting a malformed digest fails the fifth.
+
+## 2026-10-06: Homepage relics list and script execution on /
+
+`docs/spec/viewer.md` §6.7 and `docs/frame.md` originally ruled that the landing page `/` was strictly script-free under `default-src 'none'`, and that Relic offered no dashboard or relics list because there was no logged-in surface to host one.
+
+**Jason Waldrip authorised an explicit reversal of that rule.** The homepage now displays the relics this browser has opened, giving returning readers immediate access to their files without navigating away or signing in.
+
+**What changed on `GET /`:**
+- The server template emits an empty, hidden container immediately after `<p class="lede">`: `<section id="home-relics" class="home-relics" aria-labelledby="home-relics-title" hidden></section>`.
+- The server template emits `<script type="module" src="/assets/home.js"></script>` immediately after `</main>`.
+- The CSP for `/` is: `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'`.
+- The client bundle `/assets/home.js` reads this browser's localStorage vault. When keys exist, it unhides `#home-relics` and populates:
+  - `<h2 id="home-relics-title">Your relics</h2>`
+  - `<p class="home-relics-note">Relics this browser has opened. The list is read here and sent nowhere.</p>`
+  - `<ul class="home-relic-list">` with rows sorted by `lastOpenedAt` descending (and relics without timestamps following in vault order). Each row contains `<span class="home-relic-kind">{previewLabel}</span>` and `<a class="home-relic-link" href="/{encodeURIComponent(relicId)}#{fragment}">{title}</a>`.
+  - `<p class="home-relics-more"><a href="/dashboard">Back up keys, forget a relic, or find relics you commented on</a></p>`.
+- All DOM nodes are built via `createElement` and `textContent`; `innerHTML` is forbidden because relic titles are untrusted.
+
+**What stays true:**
+- The client bundle `/assets/home.js` makes no request to assemble the list: no session check, no `/api/auth/relics`, and automated tests pin that absence.
+- The CSP on `/` omits `connect-src`, falling back to `default-src 'none'`, which refuses request APIs (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`) as a backstop.
+- `/install` stays completely static and script-free, served under the original script-denying CSP (`default-src 'none'`). Both routes share one template function so install instructions cannot drift.
+- When JavaScript is disabled, or when this browser holds no keys in its vault, `/` renders identically to the previous static landing page.
+- Relics only commented on, email sign-in, key export/import backup, and Forget operations remain on `/dashboard`, which `/` links to.
+
+**The disclosed cost and risk:**
+Running script on `/` puts first-party code onto the origin where local storage holds decryption keys. The original objection in §6.7 remains true: a static page with nothing to execute is the easiest to keep honest. What keeps the list in the browser is the script we serve, which is the same trust a reader already extends to the viewer that holds the key. The CSP's missing `connect-src` refuses request APIs, but CSP does not govern top-level navigation, and `img-src 'self'` still permits a same-origin image request whose URL could carry data to our own server. The script makes no requests, and tests pin that behaviour; the rest is operator intent in the code we author.

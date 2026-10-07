@@ -138,6 +138,11 @@ import {
 import { transpileJsx } from './jsx.ts';
 import { highlightCode, renderMarkdown } from './markdown.ts';
 import {
+  buildCommentedDashboardRows,
+  buildLocalDashboardRows,
+  type DashboardRelicRow,
+} from './relic-rows.ts';
+import {
   type Anchor,
   applyAnchors,
   applyMarks,
@@ -147,9 +152,6 @@ import {
   type TreeNode,
 } from './rendered-tree.ts';
 import {
-  buildCommentedDashboardRows,
-  buildLocalDashboardRows,
-  type DashboardRelicRow,
   type DeadView,
   formatBytes,
   type HistoricalVersionState,

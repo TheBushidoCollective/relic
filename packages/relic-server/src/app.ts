@@ -118,7 +118,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
     // The homepage is a landing page, not the viewer. It used to be the shell
     // fed the literal string "Relic" as an id, so the first thing a visitor
     // saw was a relic that does not exist.
-    if (segments.length === 0) return landingPage(config);
+    if (segments.length === 0)
+      return landingPage(config, { listsRelics: true });
 
     // Reserved segments win at the router, before anything is read as an ID.
     if (head !== undefined && RESERVED.has(head)) {
@@ -160,9 +161,9 @@ export function createApp(options: AppOptions = {}): RelicApp {
       });
     }
 
-    // The same page as the homepage, because a shared /install link should
-    // keep working and two copies of install copy would drift.
-    if (head === 'install') return landingPage(config);
+    // Shares the landing template with the homepage so install copy cannot
+    // drift, but serves it without client script or the relics mount.
+    if (head === 'install') return landingPage(config, { listsRelics: false });
     if (head === 'dashboard' || head === 'dashb0ard') {
       if (segments.length === 1 && request.method === 'GET') {
         return shell(config, { view: 'dashboard' }, store, now);
@@ -2216,7 +2217,7 @@ async function shell(
 }
 
 /**
- * The homepage, and the only screen here aimed at a publisher.
+ * The homepage and install page, aimed at a publisher.
  *
  * It replaces two defects at once. `/` used to serve the viewer shell with a
  * placeholder relic id, so the homepage rendered as a relic that does not
@@ -2227,10 +2228,20 @@ async function shell(
  * because `relic-mcp` has no default origin on purpose: a wrong one turns
  * "you did not configure me" into a DNS error on the first publish.
  *
- * Self-contained CSS and no script at all, so the CSP denies scripts outright
- * instead of allowing a source the page does not use.
+ * Both routes share this template so install instructions cannot drift.
+ * `/install` carries no script at all and keeps a CSP that denies scripts
+ * outright. `/` loads a client script to list relics held in this browser's
+ * local vault, using `script-src 'self'`. That script makes no request; it
+ * reads storage and writes DOM. `connect-src` is left out so the request
+ * APIs fall back to `default-src 'none'` as a backstop. It is not a wall: the
+ * CSP does not govern navigation, and `img-src 'self'` still loads images
+ * from this origin, so what keeps the list here is the script we serve.
  */
-export function landingPage(config: RelicConfig): Response {
+export function landingPage(
+  config: RelicConfig,
+  options?: { listsRelics?: boolean }
+): Response {
+  const listsRelics = options?.listsRelics ?? false;
   const origin = escapeHtml(new URL(config.serviceOrigin).origin);
   // The hosted service does not ask a reader to configure which host they are
   // already using. A self-hosted deployment has to, because its client would
@@ -2338,6 +2349,76 @@ export function landingPage(config: RelicConfig): Response {
     border: 1px solid var(--rule);
   }
   .note p:last-child { margin: 0; }
+  .home-relics {
+    margin-bottom: 2.5rem;
+  }
+  .home-relics[hidden] {
+    display: none;
+  }
+  .home-relics h2 {
+    margin-top: 0;
+  }
+  .home-relics-note {
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+  }
+  .home-relic-list {
+    list-style: none;
+    margin: 0 0 1rem;
+    padding: 0;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+  }
+  .home-relic {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.6rem 1rem;
+  }
+  .home-relic + .home-relic {
+    border-top: 1px solid var(--rule);
+  }
+  .home-relic-kind {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-soft);
+    width: 6rem;
+    flex: none;
+  }
+  .home-relic-link {
+    font-family: var(--serif);
+    font-size: 1.02rem;
+    color: var(--ink);
+    text-decoration: none;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .home-relic-link:hover,
+  .home-relic-link:focus-visible {
+    text-decoration: underline;
+    text-decoration-color: var(--patina);
+  }
+  .home-relics-more {
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+  }
+  @media (max-width: 30rem) {
+    .home-relic {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.25rem;
+    }
+    .home-relic-kind {
+      width: auto;
+    }
+    .home-relic-link {
+      max-width: 100%;
+    }
+  }
   footer {
     margin-top: 3rem;
     padding-top: 1rem;
@@ -2355,7 +2436,11 @@ export function landingPage(config: RelicConfig): Response {
   <h1>Publish a file as an encrypted link</h1>
   <p class="lede">Relic turns a file on your machine into one URL you can hand
   to a person. The file is encrypted before it is uploaded, and the key lives
-  in the link rather than on our servers.</p>
+  in the link rather than on our servers.</p>${
+    listsRelics
+      ? '<section id="home-relics" class="home-relics" aria-labelledby="home-relics-title" hidden></section>'
+      : ''
+  }
 
   <h2>How it goes</h2>
   <p>Install the MCP server below, then tell your agent:
@@ -2435,7 +2520,7 @@ claude plugin install relic@relic</code></pre>
     <a href="/policy">What we store and what we can see</a> &middot;
     <a href="/abuse">Report a relic</a>
   </footer>
-</main>
+</main>${listsRelics ? '<script type="module" src="/assets/home.js"></script>' : ''}
 `;
   return new Response(body, {
     headers: {
@@ -2446,6 +2531,7 @@ claude plugin install relic@relic</code></pre>
       'x-robots-tag': 'noindex',
       'content-security-policy': [
         "default-src 'none'",
+        ...(listsRelics ? ["script-src 'self'"] : []),
         "style-src 'unsafe-inline'",
         "img-src 'self'",
         // The page links the manifest so a browser can offer to install it,
