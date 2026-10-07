@@ -205,9 +205,18 @@ jobs:
           grep -qi '^referrer-policy: no-referrer' /tmp/h
 
           echo "every asset the shell names resolves"
-          for P in /assets/viewer.js /assets/styles.css /assets/register-sw.js /manifest.webmanifest /sw.js /assets/icon.svg; do
+          for P in /assets/viewer.js /assets/home.js /assets/styles.css /assets/register-sw.js /manifest.webmanifest /sw.js /assets/icon.svg; do
             curl -fsS -o/dev/null "$SERVICE$P" || { echo "MISSING $P"; exit 1; }
           done
+
+          echo "the homepage references the home script, but /install carries no script"
+          curl -fsS -o/tmp/root "$SERVICE/"
+          grep -q '/assets/home.js' /tmp/root
+          curl -fsS -o/tmp/install "$SERVICE/install"
+          if grep -q '<script' /tmp/install; then
+            echo "/install carries a script tag"
+            exit 1
+          fi
 
           echo "the published disclosure is readable before anybody publishes"
           curl -fsS -o/tmp/policy "$SERVICE/policy"

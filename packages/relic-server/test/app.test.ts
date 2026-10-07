@@ -656,14 +656,20 @@ describe('reserved segments beat ids at the router', () => {
   test('/install is noindex and needs no script', async () => {
     const response = await app.fetch(req('/install'));
     expect(response.headers.get('x-robots-tag')).toBe('noindex');
-    expect(response.headers.get('content-security-policy')).toContain(
-      "default-src 'none'"
+    expect(response.headers.get('content-security-policy')).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'"
     );
-    expect(await response.text()).not.toContain('<script');
+    const body = await response.text();
+    expect(body).not.toContain('<script');
+    expect(body).not.toContain('id="home-relics"');
   });
 });
 
 describe('the landing page', () => {
+  const mount =
+    '<section id="home-relics" class="home-relics" aria-labelledby="home-relics-title" hidden></section>';
+  const script = '<script type="module" src="/assets/home.js"></script>';
+
   test('/ is a real page, not the shell with a bogus relic id', async () => {
     const response = await app.fetch(req('/'));
     expect(response.status).toBe(200);
@@ -677,24 +683,42 @@ describe('the landing page', () => {
     expect(body).not.toContain('/assets/viewer.js');
   });
 
-  test('/install serves the same body as /, so the two paths cannot drift', async () => {
-    const root = await app.fetch(req('/')).then((r) => r.text());
-    const install = await app.fetch(req('/install')).then((r) => r.text());
-    expect(install).toBe(root);
-  });
-
-  test('carries no script at all, so the CSP can deny scripts outright', async () => {
+  test('/ contains the home relics mount between the lede and how it goes', async () => {
     const body = await app.fetch(req('/')).then((r) => r.text());
-    expect(body).not.toContain('<script');
+    expect(body).toContain(mount);
+    const ledeIndex = body.indexOf('class="lede"');
+    const mountIndex = body.indexOf(mount);
+    const headingIndex = body.indexOf('<h2>How it goes</h2>');
+    expect(ledeIndex).toBeGreaterThan(-1);
+    expect(mountIndex).toBeGreaterThan(ledeIndex);
+    expect(headingIndex).toBeGreaterThan(mountIndex);
   });
 
-  test('sends exactly the contract headers', async () => {
+  test('/ contains exactly one script tag and no inline script', async () => {
+    const body = await app.fetch(req('/')).then((r) => r.text());
+    const scripts = body.match(/<script\b[^>]*>/g) ?? [];
+    expect(scripts).toEqual(['<script type="module" src="/assets/home.js">']);
+    expect(body).toContain(script);
+    expect(body).not.toMatch(/<script(?:\s+type="module")?\s*>/i);
+  });
+
+  test('/ sends exactly the contract headers with script-src and no connect-src', async () => {
     const response = await app.fetch(req('/'));
-    expect(response.headers.get('content-security-policy')).toBe(
-      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'"
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).toBe(
+      "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'"
     );
+    expect(csp).not.toContain('connect-src');
     expect(response.headers.get('x-robots-tag')).toBe('noindex');
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+  });
+
+  test('/ with the mount and script removed equals /install byte-for-byte', async () => {
+    const root = await app.fetch(req('/')).then((r) => r.text());
+    const install = await app.fetch(req('/install')).then((r) => r.text());
+    expect(root).toContain(mount);
+    expect(root).toContain(script);
+    expect(root.replace(mount, '').replace(script, '')).toBe(install);
   });
 
   test('carries the three install forms, each naming the configured origin', async () => {
