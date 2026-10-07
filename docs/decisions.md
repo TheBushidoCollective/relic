@@ -470,11 +470,11 @@ them; trusting a malformed digest fails the fifth.
 - All DOM nodes are built via `createElement` and `textContent`; `innerHTML` is forbidden because relic titles are untrusted.
 
 **What stays true:**
-- The homepage makes zero network requests to assemble the list: no session check, no `/api/auth/relics`.
-- The CSP on `/` has no `connect-src` directive, falling back to `default-src 'none'`. The script structurally cannot send the list or keys off the origin.
+- The client bundle `/assets/home.js` makes no request to assemble the list: no session check, no `/api/auth/relics`, and automated tests pin that absence.
+- The CSP on `/` omits `connect-src`, falling back to `default-src 'none'`, which refuses request APIs (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`) as a backstop.
 - `/install` stays completely static and script-free, served under the original script-denying CSP (`default-src 'none'`). Both routes share one template function so install instructions cannot drift.
 - When JavaScript is disabled, or when this browser holds no keys in its vault, `/` renders identically to the previous static landing page.
 - Relics only commented on, email sign-in, key export/import backup, and Forget operations remain on `/dashboard`, which `/` links to.
 
 **The disclosed cost and risk:**
-Running script on `/` puts first-party code onto the origin where local storage holds decryption keys. The original objection in §6.7 remains true: a static page with nothing to execute is the easiest to keep honest. We trade that absolute absence for convenience, bounded by CSP enforcement preventing outbound network access.
+Running script on `/` puts first-party code onto the origin where local storage holds decryption keys. The original objection in §6.7 remains true: a static page with nothing to execute is the easiest to keep honest. What keeps the list in the browser is the script we serve, which is the same trust a reader already extends to the viewer that holds the key. The CSP's missing `connect-src` refuses request APIs, but CSP does not govern top-level navigation, and `img-src 'self'` still permits a same-origin image request whose URL could carry data to our own server. The script makes no requests, and tests pin that behaviour; the rest is operator intent in the code we author.
