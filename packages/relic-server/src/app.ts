@@ -2231,9 +2231,11 @@ async function shell(
  * Both routes share this template so install instructions cannot drift.
  * `/install` carries no script at all and keeps a CSP that denies scripts
  * outright. `/` loads a client script to list relics held in this browser's
- * local vault, using `script-src 'self'`. It omits `connect-src` entirely:
- * falling back to `default-src 'none'` makes "the list is sent nowhere"
- * structural rather than an assertion in copy.
+ * local vault, using `script-src 'self'`. That script makes no request; it
+ * reads storage and writes DOM. `connect-src` is left out so the request
+ * APIs fall back to `default-src 'none'` as a backstop. It is not a wall: the
+ * CSP does not govern navigation, and `img-src 'self'` still loads images
+ * from this origin, so what keeps the list here is the script we serve.
  */
 export function landingPage(
   config: RelicConfig,
@@ -2439,6 +2441,7 @@ export function landingPage(
       ? '<section id="home-relics" class="home-relics" aria-labelledby="home-relics-title" hidden></section>'
       : ''
   }
+
   <h2>How it goes</h2>
   <p>Install the MCP server below, then tell your agent:
   <em>publish ./report.md as a relic</em>. It hands back a link. Send the link.

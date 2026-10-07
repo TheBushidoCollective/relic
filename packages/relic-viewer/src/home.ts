@@ -54,26 +54,14 @@ export function renderHomeRelics(root: Document, vault: KeyVault): void {
   section.replaceChildren(h2, note, ul, more);
   section.removeAttribute('hidden');
 }
-function autoInit(): void {
-  if (
-    typeof document === 'undefined' ||
-    typeof document.getElementById !== 'function'
-  ) {
-    return;
-  }
-  const section = document.getElementById('home-relics');
-  if (section) {
-    renderHomeRelics(document, localStorageKeyVault());
-  }
-}
 
+// A module script runs once the document is parsed, so the mount is already
+// there. Guarded on the method rather than on `document` alone, because the
+// viewer tests install a partial `document` stub that this import would
+// otherwise run against.
 if (
   typeof document !== 'undefined' &&
   typeof document.getElementById === 'function'
 ) {
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', autoInit, { once: true });
-  } else {
-    autoInit();
-  }
+  renderHomeRelics(document, localStorageKeyVault());
 }
