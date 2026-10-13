@@ -17,11 +17,12 @@
       "name": "relic-mcp",
       "version": "0.3.0",
       "bin": {
-        "relic-mcp": "./dist/relic-mcp.js",
+        "relic-mcp": "dist/relic-mcp.js",
       },
       "devDependencies": {
         "@relic/format": "workspace:*",
         "@relic/server": "workspace:*",
+        "@relic/viewer": "workspace:*",
       },
     },
     "packages/relic-server": {

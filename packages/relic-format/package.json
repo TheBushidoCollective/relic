@@ -6,6 +6,7 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./cover": "./src/cover.ts",
     "./mnemonic": "./src/mnemonic.ts",
     "./wordlist": "./src/wordlist.ts"
   },

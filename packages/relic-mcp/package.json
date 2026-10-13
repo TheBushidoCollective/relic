@@ -45,6 +45,7 @@
   },
   "devDependencies": {
     "@relic/format": "workspace:*",
-    "@relic/server": "workspace:*"
+    "@relic/server": "workspace:*",
+    "@relic/viewer": "workspace:*"
   }
 }

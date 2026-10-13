@@ -155,6 +155,7 @@ import {
   type DeadView,
   formatBytes,
   type HistoricalVersionState,
+  isAudioMedia,
   isKeyEntryRecoverable,
   load,
   loadCommentedRelics,
@@ -1142,24 +1143,6 @@ export function renderPdfView(view: ReadyView): HTMLElement {
     });
 
   return wrapper;
-}
-
-const AUDIO_EXTENSIONS: Record<string, true> = {
-  mp3: true,
-  wav: true,
-  aac: true,
-  ogg: true,
-  flac: true,
-  m4a: true,
-  weba: true,
-  opus: true,
-};
-
-function isAudioMedia(mimetype: string, filename: string): boolean {
-  const mime = mimetype.toLowerCase().split(';')[0]?.trim() ?? '';
-  if (mime.startsWith('audio/')) return true;
-  const ext = filename.toLowerCase().split('.').pop() ?? '';
-  return AUDIO_EXTENSIONS[ext] === true;
 }
 
 export function renderMediaView(view: ReadyView): HTMLElement {
