@@ -72,6 +72,11 @@ beforeEach(async () => {
     files: nodeFiles,
     fetch: shimFetch(),
     clientName: 'relic-mcp/republish-comments-test',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
 });
 

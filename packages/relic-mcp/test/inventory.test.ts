@@ -72,6 +72,11 @@ beforeEach(async () => {
       path,
       description: path,
     }),
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
 });
 

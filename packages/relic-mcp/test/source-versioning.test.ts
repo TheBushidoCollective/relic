@@ -42,6 +42,11 @@ beforeEach(async () => {
     files: nodeFiles,
     fetch: grantFetch(),
     clientName: 'relic-mcp/source-versioning-test',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
 });
 
@@ -151,6 +156,7 @@ async function lookupInFreshProcess(path: string): Promise<{
     cwd: packageRoot,
     env: {
       ...process.env,
+      RELIC_CHROME_PATH: 'none',
       RELIC_SERVICE_ORIGIN: SERVICE,
       RELIC_PUBLISH_STATE: publishStatePath(),
     },

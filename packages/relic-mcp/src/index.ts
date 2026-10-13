@@ -59,6 +59,12 @@ const deps: PublishDeps = {
   // remembers to edit, and a wrong version in a log is worse than none.
   // Whatever installs this can set the variable to something more specific.
   clientName: process.env['RELIC_CLIENT_NAME'] ?? 'relic-mcp',
+  // Wired to the real chromeCoverRenderer at integration.
+  renderCover: async () => ({
+    status: 'skipped',
+    reason: 'browser_disabled',
+    detail: 'real renderer wired at integration',
+  }),
 };
 
 if (process.env['RELIC_MCP_HTTP'] === '1') {

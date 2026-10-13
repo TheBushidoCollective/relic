@@ -18,6 +18,7 @@ import {
   normalizeTitle,
   type RendererClass,
 } from '@relic/format';
+import type { CoverOutcome, CoverReport } from '@relic/format/cover';
 import { keyToMnemonic } from '@relic/format/mnemonic';
 import {
   type CommentResult,
@@ -25,6 +26,7 @@ import {
   postComment,
   readComments,
 } from './comments.ts';
+import { uploadCover } from './cover/upload.ts';
 import {
   contentDigest,
   guessMimetype,
@@ -70,6 +72,11 @@ export interface RepublishInput {
    * either by an entry here or by a prior reply.
    */
   readonly addresses?: readonly RepublishAddressEntry[] | undefined;
+  /**
+   * Optional cover image flag. Defaults to true. Pass false to decline
+   * rendering and uploading a cover image for link previews.
+   */
+  readonly cover?: boolean | undefined;
 }
 
 export interface RepublishResult {
@@ -103,6 +110,7 @@ export interface RepublishResult {
    * the first publish disclosed it once and that is the disclosure that
    * counts.
    */
+  readonly cover: CoverReport;
 }
 
 export async function republish(
@@ -204,19 +212,99 @@ export async function republish(
     filename,
     title: normalizedTitle,
   });
-  if (state.content_sha256 !== undefined && state.content_sha256 === digest) {
-    throw new PublishError(
-      'duplicate_version',
-      `version ${state.version} of relic ${input.relic_id} already holds ` +
-        'exactly this content, under this name and title, so a new version ' +
-        'would show a reader nothing they are not already reading at the ' +
-        'same link. Change the file, or leave the relic where it is.',
-      {
-        relic_id: input.relic_id,
-        version: state.version,
-        content_sha256: digest,
+  const same =
+    state.content_sha256 !== undefined && state.content_sha256 === digest;
+  const requested = input.cover !== false;
+  const previous = state.cover_uploaded === true;
+
+  let renderedOutcome: CoverOutcome | undefined;
+
+  if (same) {
+    if (!requested) {
+      if (!previous) {
+        throw new PublishError(
+          'duplicate_version',
+          `version ${state.version} of relic ${input.relic_id} already holds ` +
+            'exactly this content, under this name and title, so a new version ' +
+            'would show a reader nothing they are not already reading at the ' +
+            'same link. Change the file, or leave the relic where it is.',
+          {
+            relic_id: input.relic_id,
+            version: state.version,
+            content_sha256: digest,
+          }
+        );
       }
-    );
+      // same && !requested && previous -> proceed (removes the cover)
+    } else {
+      if (previous) {
+        throw new PublishError(
+          'duplicate_version',
+          `version ${state.version} of relic ${input.relic_id} already holds ` +
+            'exactly this content, under this name and title, so a new version ' +
+            'would show a reader nothing they are not already reading at the ' +
+            'same link. Change the file, or leave the relic where it is.',
+          {
+            relic_id: input.relic_id,
+            version: state.version,
+            content_sha256: digest,
+          }
+        );
+      }
+      // same && requested && !previous -> render first
+      const outcome = await deps.renderCover({
+        bytes: source.bytes,
+        filename,
+        mimetype: guessMimetype(filename, rendererClass),
+        rendererClass,
+      });
+      if (outcome.status === 'rendered') {
+        renderedOutcome = outcome;
+        // proceed (adds the cover)
+      } else {
+        throw new PublishError(
+          'duplicate_version',
+          `version ${state.version} of relic ${input.relic_id} already holds ` +
+            'exactly this content, under this name and title, so a new version ' +
+            'would show a reader nothing they are not already reading at the ' +
+            `same link, and no cover could be rendered: ${outcome.detail}. ` +
+            'Change the file, or leave the relic where it is.',
+          {
+            relic_id: input.relic_id,
+            version: state.version,
+            content_sha256: digest,
+            cover_skip_reason: outcome.reason,
+            cover_skip_detail: outcome.detail,
+          }
+        );
+      }
+    }
+  }
+
+  let coverOutcome: CoverOutcome;
+  if (!requested) {
+    coverOutcome = {
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'declined by publisher',
+    };
+  } else if (renderedOutcome !== undefined) {
+    coverOutcome = renderedOutcome;
+  } else {
+    try {
+      coverOutcome = await deps.renderCover({
+        bytes: source.bytes,
+        filename,
+        mimetype: guessMimetype(filename, rendererClass),
+        rendererClass,
+      });
+    } catch (error) {
+      coverOutcome = {
+        status: 'skipped',
+        reason: 'render_failed',
+        detail: (error as Error).message,
+      };
+    }
   }
 
   // The comment gate: before publishing a new version, read the relic's
@@ -348,6 +436,7 @@ export async function republish(
       filename,
       content_sha256: digest,
       updated_at: new Date().toISOString(),
+      cover_uploaded: false,
     });
   } catch (error) {
     throw new PublishError(
@@ -357,6 +446,40 @@ export async function republish(
         `report a stale version number: ${(error as Error).message}`,
       { relic_id: input.relic_id, version }
     );
+  }
+
+  let coverReport: CoverReport;
+  if (!requested) {
+    coverReport = { status: 'declined' };
+  } else if (coverOutcome.status === 'skipped') {
+    coverReport = {
+      status: 'skipped',
+      reason: coverOutcome.reason,
+      detail: coverOutcome.detail,
+    };
+  } else {
+    coverReport = await uploadCover(deps, {
+      relicId: input.relic_id,
+      publishToken: state.publish_token,
+      version,
+      kind: coverOutcome.kind,
+      type: coverOutcome.type,
+      bytes: coverOutcome.bytes,
+    });
+    if (coverReport.status === 'uploaded') {
+      try {
+        await savePublishState(input.relic_id, {
+          ...state,
+          version,
+          filename,
+          content_sha256: digest,
+          updated_at: new Date().toISOString(),
+          cover_uploaded: true,
+        });
+      } catch {
+        // If the second write fails the publish still succeeds
+      }
+    }
   }
 
   // After the new version lands, post an acknowledgement comment for each
@@ -391,5 +514,6 @@ export async function republish(
     disclosure_url: String(grant['disclosure_url']),
     key_phrase: keyToMnemonic(decodeKey(state.key)).join(' '),
     ...(acknowledgements.length > 0 ? { acknowledgements } : {}),
+    cover: coverReport,
   };
 }

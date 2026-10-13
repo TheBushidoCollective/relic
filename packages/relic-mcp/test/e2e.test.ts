@@ -160,6 +160,11 @@ beforeEach(async () => {
       path,
       description: path,
     }),
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
 
   // Redirected per test, into a directory this run created, so no test
@@ -581,8 +586,11 @@ describe('the MCP surface', () => {
     expect(result.isError).toBe(false);
     expect(disk.size).toBe(before);
     expect(result.structuredContent['key_transmitted_to_service']).toBe(false);
-    expect(result.structuredContent['plaintext_transmitted_to_service']).toBe(
-      false
+    expect(
+      result.structuredContent['plaintext_bytes_transmitted_to_service']
+    ).toBe(false);
+    expect(result.structuredContent['cover_image']).toContain(
+      'picture of the first screen'
     );
     expect(result.structuredContent['plaintext_title']).toBe(
       'relic title, defaulting to the source filename, stored by the service in the clear and shown by every link preview'
@@ -618,6 +626,7 @@ describe('the MCP surface', () => {
       'title',
       'ttl_days',
       'force_new',
+      'cover',
     ]);
     expect(schema.properties.force_new).toMatchObject({
       type: 'boolean',
@@ -804,6 +813,7 @@ describe('the MCP surface', () => {
       result.content.some(({ text }) => text === VERSION_HISTORY_DISCLOSURE)
     ).toBe(true);
     expect(Object.keys(result.structuredContent).sort()).toEqual([
+      'cover',
       'disclosure_url',
       'filename',
       'key_phrase',
@@ -884,6 +894,7 @@ describe('republish', () => {
       'title',
       'ttl_days',
       'addresses',
+      'cover',
     ]);
     expect(schema.required).toEqual(['relic_id', 'path']);
     expect(schema.additionalProperties).toBe(false);
@@ -934,6 +945,7 @@ describe('republish', () => {
       result.content.some(({ text }) => text === VERSION_HISTORY_DISCLOSURE)
     ).toBe(true);
     expect(Object.keys(result.structuredContent).sort()).toEqual([
+      'cover',
       'disclosure_url',
       'filename',
       'key_phrase',

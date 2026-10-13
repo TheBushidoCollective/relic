@@ -72,6 +72,11 @@ beforeEach(async () => {
     files: nodeFiles,
     fetch: commentFetch(),
     clientName: 'relic-mcp/comments-test',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
 });
 
@@ -945,7 +950,7 @@ describe('what an agent is told before it calls anything', () => {
   test('the handshake instructions name the comment tools', () => {
     expect(INSTRUCTIONS).toMatch(/relic_read_comments/);
     expect(INSTRUCTIONS).toMatch(/relic_comment/);
-    expect(INSTRUCTIONS).toMatch(/Seven things/);
+    expect(INSTRUCTIONS).toMatch(/Eight things/);
   });
 });
 

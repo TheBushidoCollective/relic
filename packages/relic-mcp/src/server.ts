@@ -20,6 +20,7 @@
  * unusable in most of the agents this product exists to serve.
  */
 
+import type { CoverKind, CoverReport } from '@relic/format/cover';
 import { MNEMONIC_WORDS } from '@relic/format/mnemonic';
 import {
   type CommentAnchorInput,
@@ -219,6 +220,33 @@ export const REPUBLISH_DISCIPLINE_DISCLOSURE =
   'token can call the HTTP API directly, and the service cannot enforce this ' +
   'because it cannot read comments.';
 
+export const COVER_PHRASE: Readonly<Record<CoverKind, string>> = {
+  markdown: 'the top of the rendered document',
+  code: 'the first lines of the file',
+  html: 'the top of the rendered page',
+  jsx: 'the top of the rendered component',
+  image: 'the image, cropped to fit',
+  pdf: 'the top of the first page',
+  video: 'a frame from the opening seconds of this video',
+  'audio-artwork': 'the artwork embedded in this audio file',
+  'audio-waveform': 'the waveform of the audio',
+  archive: 'the list of files inside',
+};
+
+export function formatCoverText(cover: CoverReport): string {
+  if (cover.status === 'uploaded') {
+    return (
+      `Cover image: uploaded. Link previews now show ${COVER_PHRASE[cover.kind]}. ` +
+      'It is NOT encrypted: the service and anyone holding the link, even without the key, can see it. ' +
+      'Republish with cover: false to remove it.'
+    );
+  }
+  if (cover.status === 'declined') {
+    return 'Cover image: none, as asked. Link previews show the generic Relic card.';
+  }
+  return `Cover image: none. ${cover.detail} Link previews show the generic Relic card.`;
+}
+
 export const TOOL_DEFINITION = {
   name: TOOL_NAME,
   title: 'Publish a relic',
@@ -232,7 +260,9 @@ export const TOOL_DEFINITION = {
     'The relic carries a plaintext title, which defaults to the filename and ' +
     'is NOT encrypted: the service stores it and every link preview shows ' +
     'it. Pass an empty string to publish without one. ' +
-    'Takes a filesystem path, never ' +
+    'By default a picture of the first screen is rendered locally and ' +
+    'uploaded unencrypted for link previews; pass cover: false to withhold ' +
+    'it. Takes a filesystem path, never ' +
     'inline content.',
   inputSchema: {
     type: 'object',
@@ -272,6 +302,12 @@ export const TOOL_DEFINITION = {
           'machine already published the same source. Defaults to false. Use ' +
           'only when you want two independent URLs for one file.',
       },
+      cover: {
+        type: 'boolean',
+        default: true,
+        description:
+          'Optional. Render a picture of the first screen of the file on this machine and upload it for link previews. Defaults to true. NOT encrypted: the service stores it and anyone who fetches the link sees it, with or without the key. Pass false for anything you would not show in a chat preview.',
+      },
     },
     required: ['path'],
     additionalProperties: false,
@@ -295,6 +331,20 @@ export const TOOL_DEFINITION = {
         type: 'string',
         description: `A ${MNEMONIC_WORDS}-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
       },
+      cover: {
+        type: 'object',
+        properties: {
+          status: { enum: ['uploaded', 'declined', 'skipped'] },
+          kind: { type: 'string' },
+          type: { type: 'string' },
+          url: { type: 'string' },
+          bytes: { type: 'integer' },
+          reason: { type: 'string' },
+          detail: { type: 'string' },
+        },
+        required: ['status'],
+        additionalProperties: false,
+      },
     },
     required: [
       'url',
@@ -308,6 +358,7 @@ export const TOOL_DEFINITION = {
       'report_url',
       'disclosure_url',
       'key_phrase',
+      'cover',
     ],
     additionalProperties: false,
   },
@@ -321,7 +372,10 @@ export const REPUBLISH_TOOL_DEFINITION = {
     'encrypting under the same key so the existing share URL keeps working. ' +
     VERSION_HISTORY_DISCLOSURE +
     " Only possible from the machine that holds the relic's key and publish " +
-    'token; a relic that was taken down can never be revived.' +
+    'token; a relic that was taken down can never be revived. ' +
+    'By default a picture of the first screen is rendered locally and ' +
+    'uploaded unencrypted for link previews; pass cover: false to withhold ' +
+    'it.' +
     REPUBLISH_DISCIPLINE_DISCLOSURE,
   inputSchema: {
     type: 'object',
@@ -380,6 +434,12 @@ export const REPUBLISH_TOOL_DEFINITION = {
           additionalProperties: false,
         },
       },
+      cover: {
+        type: 'boolean',
+        default: true,
+        description:
+          'Optional. Render a picture of the first screen of the file on this machine and upload it for link previews. Defaults to true. NOT encrypted: the service stores it and anyone who fetches the link sees it, with or without the key. Pass false for anything you would not show in a chat preview.',
+      },
     },
     required: ['relic_id', 'path'],
     additionalProperties: false,
@@ -402,6 +462,20 @@ export const REPUBLISH_TOOL_DEFINITION = {
         type: 'string',
         description: `A ${MNEMONIC_WORDS}-word spoken phrase for the key. ${KEY_PHRASE_DISCLOSURE}`,
       },
+      cover: {
+        type: 'object',
+        properties: {
+          status: { enum: ['uploaded', 'declined', 'skipped'] },
+          kind: { type: 'string' },
+          type: { type: 'string' },
+          url: { type: 'string' },
+          bytes: { type: 'integer' },
+          reason: { type: 'string' },
+          detail: { type: 'string' },
+        },
+        required: ['status'],
+        additionalProperties: false,
+      },
     },
     required: [
       'relic_id',
@@ -414,6 +488,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
       'report_url',
       'disclosure_url',
       'key_phrase',
+      'cover',
     ],
     additionalProperties: false,
   },
@@ -1372,7 +1447,7 @@ export const INSTRUCTIONS = `Relic encrypts a file on this machine and uploads \
 only ciphertext. The key lives in the URL fragment, which browsers never send \
 to a server.
 
-Seven things that change how you should act:
+Eight things that change how you should act:
 
 1. The link is the credential: anyone holding it, fragment included, can read \
 the file. Never paste it into a tracker, log, or channel.
@@ -1391,7 +1466,11 @@ styles, scripts, fonts, and images: a CDN reference renders as nothing.
 7. People can comment on a relic. Read with relic_read_comments before \
 changing reviewed content, answer with relic_comment. relic_edit_comment \
 rewrites one, relic_resolve_comment settles one, and settled counts as \
-handled. All take the relic id and attribute you as publisher.`;
+handled. All take the relic id and attribute you as publisher.
+8. By default relic_publish and relic_republish upload a picture of the file's \
+first screen, unencrypted, for link previews: the service and anyone holding \
+the link without the key can see it. Pass cover: false for anything you would \
+not show in a chat preview.`;
 
 /**
  * Handle one JSON-RPC message.
@@ -1519,7 +1598,9 @@ async function callTool(
           encryption: 'AES-128-GCM, RFC 8188 aes128gcm framing',
           key_origin: 'crypto.getRandomValues on this machine',
           key_transmitted_to_service: false,
-          plaintext_transmitted_to_service: false,
+          plaintext_bytes_transmitted_to_service: false,
+          cover_image:
+            'by default a 1200x630 picture of the first screen, rendered on this machine by a local Chrome, Chromium, or Edge with networking disabled (ffmpeg for audio and video), uploaded unencrypted and shown in link previews; cover: false withholds it',
           plaintext_title:
             'relic title, defaulting to the source filename, stored by the ' +
             'service in the clear and shown by every link preview',
@@ -1622,6 +1703,15 @@ async function callTool(
       '`force_new` must be a boolean or omitted'
     );
   }
+  const rawCover = args['cover'];
+  if (rawCover !== undefined && typeof rawCover !== 'boolean') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`cover` must be a boolean or omitted'
+    );
+  }
+  const cover = typeof rawCover === 'boolean' ? rawCover : undefined;
 
   try {
     const result = await publish(
@@ -1631,6 +1721,7 @@ async function callTool(
         title,
         ttl_days: ttlDays.days,
         force_new: forceNew === true,
+        cover,
       },
       deps
     );
@@ -1653,6 +1744,7 @@ async function callTool(
                   ? `The title "${result.title}" is not encrypted: the service stores it and every link preview shows it. Pass an empty title to publish without one.`
                   : 'Published without a title, so a link preview shows only that it is a relic.'
               }\n\n` +
+              `${formatCoverText(result.cover)}\n\n` +
               // No lifetime is the default, so the agent relaying this needs
               // a sentence that says so, not a date-shaped hole.
               (result.relic_expires_at === null
@@ -2045,6 +2137,15 @@ async function callRepublish(
     }
     addresses = rawAddresses as readonly RepublishAddressEntry[];
   }
+  const rawCover = args['cover'];
+  if (rawCover !== undefined && typeof rawCover !== 'boolean') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`cover` must be a boolean or omitted'
+    );
+  }
+  const cover = typeof rawCover === 'boolean' ? rawCover : undefined;
 
   try {
     const result = await republish(
@@ -2055,6 +2156,7 @@ async function callRepublish(
         title,
         ttl_days: ttlDays.days,
         addresses,
+        cover,
       },
       deps
     );
@@ -2081,6 +2183,7 @@ async function callRepublish(
                   ? `The title "${result.title}" is not encrypted: the service stores it and every link preview shows it. Pass an empty title to publish without one.`
                   : 'Published without a title, so a link preview shows only that it is a relic.'
               }\n\n` +
+              `${formatCoverText(result.cover)}\n\n` +
               (result.relic_expires_at === null
                 ? 'The relic does not expire; it is kept until it is deleted.'
                 : `Expires ${result.relic_expires_at}.`) +
@@ -2645,11 +2748,15 @@ What happens when you publish a file:
    nonces, and a per-record authentication tag.
 4. Only ciphertext is uploaded, straight to object storage under a signed URL.
    It does not pass through ${deps.serviceOrigin}.
-5. The service is told four things and nothing more: a coarse renderer class
+5. By default a 1200x630 picture of the first screen, rendered on this machine
+   by a local Chrome, Chromium, or Edge with networking disabled (ffmpeg for
+   audio and video), is uploaded unencrypted and shown in link previews;
+   cover: false withholds it.
+6. The service is told four things and nothing more: a coarse renderer class
    from an eight-value list, the name of this client, the exact byte length
    of the ciphertext, and the title, which defaults to the filename and is
    stored in the clear. Not the mimetype, not the contents.
-6. You get back a URL whose fragment carries the key. Fragments are never sent
+7. You get back a URL whose fragment carries the key. Fragments are never sent
    to a server by a browser.
 
 What the service operator can see: that a relic exists, roughly how big it is,
