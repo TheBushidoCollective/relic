@@ -205,6 +205,22 @@ jobs:
             }
           done
 
+          # The package renders covers inside headless Chrome using assets
+          # bundled into dist/cover/. Assert that all six assets survived packing.
+          for FILE in \
+            node_modules/relic-mcp/dist/cover/index.html \
+            node_modules/relic-mcp/dist/cover/cover.js \
+            node_modules/relic-mcp/dist/cover/cover.css \
+            node_modules/relic-mcp/dist/cover/styles.css \
+            node_modules/relic-mcp/dist/cover/frame.html \
+            node_modules/relic-mcp/dist/cover/pdf.worker.mjs
+          do
+            test -f "$FILE" || {
+              echo "$FILE is missing from the tarball; the package would not be able to render covers"
+              exit 1
+            }
+          done
+
           # And the installer has to run from the packed copy, not just in dev.
           ./node_modules/.bin/relic-mcp --help | grep -q 'relic-mcp install'
 

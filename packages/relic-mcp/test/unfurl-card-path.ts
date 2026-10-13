@@ -39,12 +39,25 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { CoverOutcome, CoverSource } from '@relic/format/cover';
 import { createApp } from '@relic/server/src/app.ts';
 import { diskAssets } from '@relic/server/src/assets.ts';
 import { MemoryStorage } from '@relic/server/src/storage.ts';
 import { MemoryStore } from '@relic/server/src/store.ts';
 import { nodeFiles } from '../src/files.ts';
-import { type PublishDeps, publish } from '../src/publish.ts';
+import {
+  type PublishDeps,
+  type PublishInput,
+  publish,
+} from '../src/publish.ts';
+
+interface ExtendedPublishDeps extends PublishDeps {
+  readonly renderCover?: (source: CoverSource) => Promise<CoverOutcome>;
+}
+
+interface ExtendedPublishInput extends PublishInput {
+  readonly cover?: boolean | undefined;
+}
 
 const viewerDist = fileURLToPath(
   new URL('../../relic-viewer/dist/', import.meta.url)
@@ -110,12 +123,19 @@ function routedFetch(): typeof globalThis.fetch {
   }) as typeof globalThis.fetch;
 }
 
-const deps: PublishDeps = {
+const deps: ExtendedPublishDeps = {
   serviceOrigin: origin,
   relicOrigin: origin,
   files: nodeFiles,
   fetch: routedFetch(),
   clientName: 'relic-mcp/unfurl-card-path',
+  // Repin to the fallback: when cover rendering is skipped, link previews
+  // fall back to the constant card.v1.png.
+  renderCover: async () => ({
+    status: 'skipped',
+    reason: 'browser_not_found',
+    detail: 'unfurl-card-path tests the fallback card, not the renderer',
+  }),
 };
 
 /**
@@ -186,11 +206,15 @@ try {
       body.includes('<title>quarterly-review.md · Relic</title>'),
     'the served head does not carry the published title'
   );
+  // This assertion is the reverse of its former self: previously, card.v1.png
+  // was the sole, unconditional raster for every relic under the "one constant
+  // raster" invariant. Now, per-relic covers are the default, and card.v1.png
+  // is the fallback when cover rendering is skipped or declined.
   assert.ok(
     body.includes(
       `<meta property="og:image" content="${origin}/assets/card.v1.png">`
     ),
-    'the card image is not the immutable versioned path'
+    'the card image is not the fallback card.v1.png path'
   );
   console.log('CARD_TITLE og:title=quarterly-review.md title=… · Relic');
 
@@ -207,11 +231,14 @@ try {
   );
   console.log('CARD_DESCRIPTION class=markdown tail=browser');
 
-  // --- The same publish, declining the title -----------------------------
-  const declined = await publish(
-    { path: source, title: '', force_new: true },
-    deps
-  );
+  // --- The same publish, declining the title and cover -------------------
+  const declinedInput: ExtendedPublishInput = {
+    path: source,
+    title: '',
+    cover: false,
+    force_new: true,
+  };
+  const declined = await publish(declinedInput, deps);
   assert.equal(declined.title, null);
 
   const declinedRow = await store.getRelic(declined.relic_id);
