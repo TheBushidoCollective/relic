@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import { deflateSync } from 'node:zlib';
 import {
   decryptComment,
   deriveCommentKey,
@@ -9,6 +10,12 @@ import {
   generateRelicId,
   RESERVED_SEGMENTS,
 } from '@relic/format';
+import {
+  COVER_CAP_BYTES,
+  COVER_HEIGHT,
+  COVER_WIDTH,
+  crc32,
+} from '@relic/format/cover';
 import {
   createApp,
   type Mailer,
@@ -3957,5 +3964,1105 @@ describe('comment edits and resolutions', () => {
     expect(row?.resolvedAt).toBe(now);
     expect(row?.resolvedBy).toBe('alice@example.com');
     expect(row?.editedAt).toBe(now);
+  });
+});
+
+describe('cover image upload, serving, and lifecycle', () => {
+  function makeChunk(type: string, data: Uint8Array): Uint8Array {
+    const typeBytes = new TextEncoder().encode(type);
+    const len = data.length;
+    const chunk = new Uint8Array(4 + 4 + len + 4);
+    const view = new DataView(chunk.buffer);
+    view.setUint32(0, len);
+    chunk.set(typeBytes, 4);
+    chunk.set(data, 8);
+    const crcTarget = chunk.subarray(4, 8 + len);
+    view.setUint32(8 + len, crc32(crcTarget));
+    return chunk;
+  }
+
+  function concatBytes(...arrays: Uint8Array[]): Uint8Array {
+    const total = arrays.reduce((acc, a) => acc + a.length, 0);
+    const out = new Uint8Array(total);
+    let pos = 0;
+    for (const a of arrays) {
+      out.set(a, pos);
+      pos += a.length;
+    }
+    return out;
+  }
+
+  function makeValidPng(colorType: 2 | 6 = 2): Uint8Array {
+    const bpp = colorType === 2 ? 3 : 4;
+    const rawPixels = new Uint8Array(COVER_HEIGHT * (1 + COVER_WIDTH * bpp));
+    const idat = makeChunk('IDAT', deflateSync(rawPixels));
+    const iend = makeChunk('IEND', new Uint8Array(0));
+    const ihdrData = new Uint8Array(13);
+    const view = new DataView(ihdrData.buffer);
+    view.setUint32(0, COVER_WIDTH);
+    view.setUint32(4, COVER_HEIGHT);
+    ihdrData[8] = 8;
+    ihdrData[9] = colorType;
+    ihdrData[10] = 0;
+    ihdrData[11] = 0;
+    ihdrData[12] = 0;
+    return concatBytes(
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      makeChunk('IHDR', ihdrData),
+      idat,
+      iend
+    );
+  }
+
+  function makeValidJpeg(): Uint8Array {
+    return new Uint8Array([
+      0xff,
+      0xd8,
+      0xff,
+      0xe0,
+      0x00,
+      0x10,
+      0x4a,
+      0x46,
+      0x49,
+      0x46,
+      0x00,
+      0x01,
+      0x01,
+      0x00,
+      0x00,
+      0x01,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0xff,
+      0xdb,
+      0x00,
+      0x43,
+      0x00,
+      ...new Array(64).fill(1),
+      0xff,
+      0xc0,
+      0x00,
+      0x11,
+      0x08,
+      0x02,
+      0x76,
+      0x04,
+      0xb0,
+      0x03,
+      0x01,
+      0x11,
+      0x00,
+      0x02,
+      0x11,
+      0x00,
+      0x03,
+      0x11,
+      0x00,
+      0xff,
+      0xc4,
+      0x00,
+      0x1f,
+      0x00,
+      0x00,
+      0x01,
+      0x05,
+      0x01,
+      0x01,
+      0x01,
+      0x01,
+      0x01,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x02,
+      0x03,
+      0x04,
+      0x05,
+      0x06,
+      0x07,
+      0x08,
+      0x09,
+      0x0a,
+      0x0b,
+      0xff,
+      0xda,
+      0x00,
+      0x0c,
+      0x03,
+      0x01,
+      0x00,
+      0x02,
+      0x00,
+      0x03,
+      0x00,
+      0x00,
+      0x3f,
+      0x00,
+      0x12,
+      0x34,
+      0xff,
+      0x00,
+      0x56,
+      0xff,
+      0xd9,
+    ]);
+  }
+
+  function toBase64(bytes: Uint8Array): string {
+    return Buffer.from(bytes).toString('base64');
+  }
+
+  describe('upload refusals in exact check order', () => {
+    test('refusal 1: returns service_paused when kill switch is engaged', async () => {
+      const pausedApp = build({ config: { killSwitchEngaged: true } });
+      const res = await pausedApp.fetch(
+        req('/api/relics/invalid_id/cover', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+      );
+      expect(res.status).toBe(503);
+      const problem = (await res.json()) as { code: string };
+      expect(problem.code).toBe('service_paused');
+    });
+
+    test('refusal 2: returns publish_rate_limited when cover rate limit is exceeded', async () => {
+      const limitedApp = build({
+        config: { publishRateLimit: { limit: 1, windowSeconds: 3600 } },
+      });
+      const ip = '198.51.100.99';
+      // First request passes rate limiter
+      await limitedApp.fetch(
+        req('/api/relics/bad_id/cover', {
+          method: 'POST',
+          ip,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+      );
+      // Second request is rate limited before checking relic id
+      const res = await limitedApp.fetch(
+        req('/api/relics/bad_id/cover', {
+          method: 'POST',
+          ip,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+      );
+      expect(res.status).toBe(429);
+      const problem = (await res.json()) as { code: string };
+      expect(problem.code).toBe('publish_rate_limited');
+    });
+
+    test('refusal 3: returns invalid_relic_id for malformed id', async () => {
+      const res = await app.fetch(
+        req('/api/relics/not-a-valid-id!/cover', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as { code: string };
+      expect(problem.code).toBe('invalid_relic_id');
+    });
+
+    test('refusal 4: returns relic_removed for tombstoned relic', async () => {
+      const { id } = await publish();
+      await app.fetch(
+        req(`/api/relics/${id}`, {
+          method: 'DELETE',
+          headers: { authorization: 'Bearer operator-secret' },
+        })
+      );
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: 'malformed json body',
+        })
+      );
+      expect(res.status).toBe(410);
+      const problem = (await res.json()) as { code: string };
+      expect(problem.code).toBe('relic_removed');
+    });
+
+    test('refusal 5: returns relic_not_found when relic row does not exist', async () => {
+      const unissuedId = generateRelicId();
+      const res = await app.fetch(
+        req(`/api/relics/${unissuedId}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: 'malformed json body',
+        })
+      );
+      expect(res.status).toBe(404);
+      const problem = (await res.json()) as { code: string };
+      expect(problem.code).toBe('relic_not_found');
+    });
+
+    test('refusal 6: returns invalid_cover size when body exceeds 720000 bytes', async () => {
+      const { id } = await publish();
+      const largeBody = 'a'.repeat(720_001);
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': String(largeBody.length),
+          },
+          body: largeBody,
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('size');
+    });
+
+    test('refusal 6b: returns invalid_cover structure when content-type is not application/json', async () => {
+      const { id } = await publish();
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'text/plain' },
+          body: JSON.stringify({}),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('structure');
+    });
+
+    test('refusal 6c: returns invalid_cover structure when json is malformed', async () => {
+      const { id } = await publish();
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{ invalid json',
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('structure');
+    });
+
+    test('refusal 6d: returns invalid_cover structure when json is not an object', async () => {
+      const { id } = await publish();
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(['array', 'not', 'object']),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('structure');
+    });
+
+    test('refusal 7: returns invalid_publish_token when publish token is missing or wrong', async () => {
+      const { id } = await publish();
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: 'wrong-token',
+            version: 99,
+          }),
+        })
+      );
+      expect(res.status).toBe(403);
+      const problem = (await res.json()) as { code: string };
+      expect(problem.code).toBe('invalid_publish_token');
+    });
+
+    test('refusal 8: returns cover_version_stale when version does not match row version', async () => {
+      const { id, grant } = await publish();
+      const token = grant.publish_token as string;
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: token,
+            version: 2,
+          }),
+        })
+      );
+      expect(res.status).toBe(409);
+      const problem = (await res.json()) as {
+        code: string;
+        relic_id: string;
+        current_version: number;
+      };
+      expect(problem.code).toBe('cover_version_stale');
+      expect(problem.relic_id).toBe(id);
+      expect(problem.current_version).toBe(1);
+    });
+
+    test('refusal 9: returns relic_not_yet_published when ciphertext is absent from storage', async () => {
+      const challengeResponse = await app.fetch(
+        req('/api/challenge', { method: 'POST' })
+      );
+      const challenge = (await challengeResponse.json()) as {
+        challenge_nonce: string;
+      };
+      const id = generateRelicId();
+      const grantResponse = await app.fetch(
+        req('/api/grant', {
+          method: 'POST',
+          body: JSON.stringify({
+            challenge_nonce: challenge.challenge_nonce,
+            relic_id: id,
+            renderer_class: 'markdown',
+            publishing_client: 'relic-mcp/0.1.0',
+            declared_size_bytes: 10,
+            declared_ciphertext_bytes: encryptedSize(10),
+          }),
+        })
+      );
+      const grant = (await grantResponse.json()) as { publish_token: string };
+      // Note: we intentionally do NOT put the object into storage
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'unknown_kind',
+          }),
+        })
+      );
+      expect(res.status).toBe(409);
+      const problem = (await res.json()) as { code: string };
+      expect(problem.code).toBe('relic_not_yet_published');
+    });
+
+    test('refusal 10: returns invalid_cover structure when kind is unrecognized', async () => {
+      const { id, grant } = await publish();
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'invalid-kind',
+            type: 'image/png',
+            data: 'AAAA',
+          }),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('structure');
+    });
+
+    test('refusal 10b: returns invalid_cover structure when type is unsupported', async () => {
+      const { id, grant } = await publish();
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/gif',
+            data: 'AAAA',
+          }),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('structure');
+    });
+
+    test('refusal 11: returns invalid_cover structure when data is invalid base64', async () => {
+      const { id, grant } = await publish();
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: 'not!base64!!!',
+          }),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('structure');
+    });
+
+    test('refusal 12: returns invalid_cover size when decoded raster exceeds coverCapBytes', async () => {
+      const { id, grant } = await publish();
+      const oversizedBytes = new Uint8Array(COVER_CAP_BYTES + 1);
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(oversizedBytes),
+          }),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+        size_limit_bytes?: number;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('size');
+      expect(problem.size_limit_bytes).toBe(COVER_CAP_BYTES);
+    });
+
+    test('refusal 13: returns invalid_cover with validation failure when raster fails validation', async () => {
+      const { id, grant } = await publish();
+      // 8 bytes of garbage with PNG signature broken
+      const badRaster = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(badRaster),
+          }),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('signature');
+    });
+
+    test('refusal 14: returns invalid_cover signature when declared type does not match detected signature', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/jpeg', // Declaring JPEG for a PNG raster
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+      expect(res.status).toBe(400);
+      const problem = (await res.json()) as {
+        code: string;
+        cover_validation_failure?: string;
+      };
+      expect(problem.code).toBe('invalid_cover');
+      expect(problem.cover_validation_failure).toBe('signature');
+    });
+  });
+
+  describe('valid PNG and JPEG uploads', () => {
+    test('accepts valid PNG cover and returns 200 with metadata and cover url', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        relic_id: string;
+        version: number;
+        kind: string;
+        type: string;
+        sha256: string;
+        bytes: number;
+        cover_url: string;
+      };
+      expect(body.relic_id).toBe(id);
+      expect(body.version).toBe(1);
+      expect(body.kind).toBe('markdown');
+      expect(body.type).toBe('image/png');
+      expect(body.sha256).toBe(sha256);
+      expect(body.bytes).toBe(pngBytes.byteLength);
+      expect(body.cover_url).toBe(
+        `https://relic.example/${id}/cover/${sha256}.png`
+      );
+    });
+
+    test('accepts valid JPEG cover and returns 200 with metadata and cover url', async () => {
+      const { id, grant } = await publish({ rendererClass: 'code' });
+      const jpegBytes = makeValidJpeg();
+      const sha256 = await sha256Hex(jpegBytes);
+
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'code',
+            type: 'image/jpeg',
+            data: toBase64(jpegBytes),
+          }),
+        })
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        relic_id: string;
+        version: number;
+        kind: string;
+        type: string;
+        sha256: string;
+        bytes: number;
+        cover_url: string;
+      };
+      expect(body.relic_id).toBe(id);
+      expect(body.version).toBe(1);
+      expect(body.kind).toBe('code');
+      expect(body.type).toBe('image/jpeg');
+      expect(body.sha256).toBe(sha256);
+      expect(body.bytes).toBe(jpegBytes.byteLength);
+      expect(body.cover_url).toBe(
+        `https://relic.example/${id}/cover/${sha256}.jpg`
+      );
+    });
+  });
+
+  describe('G1 state table and cover route', () => {
+    test('no cover: shell serves card.v1.png and cover route returns 404', async () => {
+      const { id } = await publish();
+      const shellRes = await app.fetch(req(`/${id}`));
+      const shellBody = await shellRes.text();
+      expect(shellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+      expect(shellBody).not.toContain('/cover/');
+
+      const dummySha = 'a'.repeat(64);
+      const coverRes = await app.fetch(req(`/${id}/cover/${dummySha}.png`));
+      expect(coverRes.status).toBe(404);
+    });
+
+    test('declined: shell serves card.v1.png and cover route returns 404', async () => {
+      const { id } = await publish();
+      const shellRes = await app.fetch(req(`/${id}`));
+      const shellBody = await shellRes.text();
+      expect(shellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+
+      const dummySha = 'b'.repeat(64);
+      const coverRes = await app.fetch(req(`/${id}/cover/${dummySha}.png`));
+      expect(coverRes.status).toBe(404);
+    });
+
+    test('stale version cover route returns 404 and shell serves card.v1.png', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      // Simulate a stale version cover: row is version 2, cover is version 1
+      const row = await app.store.getRelic(id);
+      if (row !== undefined) {
+        const staleRow = { ...row, version: 2 };
+        await app.store.putRelic(staleRow);
+      }
+
+      const coverRes = await app.fetch(req(`/${id}/cover/${sha256}.png`));
+      expect(coverRes.status).toBe(404);
+      expect(await coverRes.text()).toBe('Not found');
+
+      const shellRes = await app.fetch(req(`/${id}`));
+      const shellBody = await shellRes.text();
+      expect(shellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+      expect(shellBody).not.toContain('/cover/');
+    });
+
+    test('tombstoned relic cover route returns 404 and shell serves card.v1.png', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      await app.store.putTombstone({
+        id,
+        publishIp: '198.51.100.10',
+        publishedAt: now,
+        publishingClient: 'relic-mcp/0.1.0 (test)',
+        rendererClass: 'markdown',
+        ciphertextHash: 'dummyhash',
+        deletedAt: now,
+        operator: 'jason',
+        reasonClass: 'abuse',
+        reportReference: undefined,
+      });
+
+      const coverRes = await app.fetch(req(`/${id}/cover/${sha256}.png`));
+      expect(coverRes.status).toBe(404);
+      expect(await coverRes.text()).toBe('Not found');
+
+      const shellRes = await app.fetch(req(`/${id}`));
+      const shellBody = await shellRes.text();
+      expect(shellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+    });
+
+    test('expired relic cover route returns 404 and shell serves card.v1.png', async () => {
+      const { id, grant } = await publish({ ttlDays: 1 });
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      // Advance clock past expiration
+      now += 2 * 86_400 * 1000;
+
+      const coverRes = await app.fetch(req(`/${id}/cover/${sha256}.png`));
+      expect(coverRes.status).toBe(404);
+
+      const shellRes = await app.fetch(req(`/${id}`));
+      const shellBody = await shellRes.text();
+      expect(shellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+    });
+
+    test('unknown relic id cover route returns 404 and shell serves card.v1.png', async () => {
+      const unissuedId = generateRelicId();
+      const sha256 = 'c'.repeat(64);
+      const coverRes = await app.fetch(
+        req(`/${unissuedId}/cover/${sha256}.png`)
+      );
+      expect(coverRes.status).toBe(404);
+
+      const shellRes = await app.fetch(req(`/${unissuedId}`));
+      const shellBody = await shellRes.text();
+      expect(shellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+    });
+
+    test('store throws error: cover route returns 503 and shell serves card.v1.png', async () => {
+      const throwingStore = new MemoryStore();
+      throwingStore.getTombstone = async () => {
+        throw new Error('store failure');
+      };
+      const customApp = build({ store: throwingStore });
+      const id = generateRelicId();
+      const sha256 = 'd'.repeat(64);
+
+      const coverRes = await customApp.fetch(req(`/${id}/cover/${sha256}.png`));
+      expect(coverRes.status).toBe(503);
+      expect(coverRes.headers.get('cache-control')).toBe('no-store');
+
+      const shellRes = await customApp.fetch(req(`/${id}`));
+      expect(shellRes.status).toBe(200);
+      const shellBody = await shellRes.text();
+      expect(shellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+    });
+
+    test('hash mismatch: cover route returns 404', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      const wrongSha = 'e'.repeat(64);
+      const res = await app.fetch(req(`/${id}/cover/${wrongSha}.png`));
+      expect(res.status).toBe(404);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex');
+    });
+
+    test('extension mismatch: cover route returns 404', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      // PNG cover requested with .jpg extension
+      const res = await app.fetch(req(`/${id}/cover/${sha256}.jpg`));
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('cover route headers and HEAD', () => {
+    test('cover route serves exact 200 headers with no content encoding', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      const res = await app.fetch(
+        req(`/${id}/cover/${sha256}.png`, {
+          headers: { 'accept-encoding': 'gzip, br' },
+        })
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('image/png');
+      expect(res.headers.get('content-length')).toBe(
+        String(pngBytes.byteLength)
+      );
+      expect(res.headers.get('cache-control')).toBe('public, max-age=86400');
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex');
+      expect(res.headers.get('content-security-policy')).toBe(
+        "default-src 'none'; sandbox"
+      );
+      expect(res.headers.get('content-encoding')).toBeNull();
+
+      const bodyBytes = new Uint8Array(await res.arrayBuffer());
+      expect(Array.from(bodyBytes)).toEqual(Array.from(pngBytes));
+    });
+
+    test('HEAD cover route returns 200 with exact headers and null body', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      const res = await app.fetch(
+        req(`/${id}/cover/${sha256}.png`, { method: 'HEAD' })
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('image/png');
+      expect(res.headers.get('content-length')).toBe(
+        String(pngBytes.byteLength)
+      );
+      expect(res.headers.get('cache-control')).toBe('public, max-age=86400');
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex');
+      expect(res.headers.get('content-security-policy')).toBe(
+        "default-src 'none'; sandbox"
+      );
+      expect(res.headers.get('content-encoding')).toBeNull();
+      expect(await res.text()).toBe('');
+    });
+  });
+
+  describe('mint accounting', () => {
+    test('shell and cover route fetches do not mint and do not append to mint log', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      // Fetch shell
+      await app.fetch(req(`/${id}`));
+      // Fetch cover
+      await app.fetch(req(`/${id}/cover/${sha256}.png`));
+
+      const row = await app.store.getRelic(id);
+      expect(row?.mintsUsed).toBe(0);
+      const mintLog = await app.store.readMintLog();
+      expect(mintLog.length).toBe(0);
+    });
+  });
+
+  describe('lifecycle: republish and operator delete', () => {
+    test('republish without upload clears cover, deletes stored object, and serves card.v1.png', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+
+      // Upload cover for v1
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      // Verify cover is serving on v1
+      const v1CoverRes = await app.fetch(req(`/${id}/cover/${sha256}.png`));
+      expect(v1CoverRes.status).toBe(200);
+      const v1Shell = await app.fetch(req(`/${id}`));
+      expect(await v1Shell.text()).toContain(
+        `https://relic.example/${id}/cover/${sha256}.png`
+      );
+
+      // In the republish flow, beginVersion clears cover: undefined
+      const v2Row = await app.store.beginVersion(id, 'markdown', 20);
+      expect(v2Row?.version).toBe(2);
+      expect(v2Row?.cover).toBeUndefined();
+
+      // And deleteCovers deletes the stored objects
+      const deletedCovers = await app.store.deleteCovers(id);
+      expect(deletedCovers).toBe(1);
+
+      const covers = await app.store.listCovers(id);
+      expect(covers.length).toBe(0);
+
+      // Assert v1 cover URL now returns 404
+      const oldCoverRes = await app.fetch(req(`/${id}/cover/${sha256}.png`));
+      expect(oldCoverRes.status).toBe(404);
+
+      // Assert shell now falls back to card.v1.png
+      const v2Shell = await app.fetch(req(`/${id}`));
+      const v2ShellBody = await v2Shell.text();
+      expect(v2ShellBody).toContain(
+        'content="https://relic.example/assets/card.v1.png"'
+      );
+      expect(v2ShellBody).not.toContain('/cover/');
+    });
+
+    test('operator delete removes cover objects and reports covers_deleted', async () => {
+      const { id, grant } = await publish();
+      const pngBytes = makeValidPng(2);
+      const sha256 = await sha256Hex(pngBytes);
+
+      await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+
+      const deleteRes = await app.fetch(
+        req(`/api/relics/${id}`, {
+          method: 'DELETE',
+          headers: { authorization: 'Bearer operator-secret' },
+        })
+      );
+      expect(deleteRes.status).toBe(200);
+      const deleteJson = (await deleteRes.json()) as {
+        deleted: boolean;
+        covers_deleted: number;
+      };
+      expect(deleteJson.deleted).toBe(true);
+      expect(deleteJson.covers_deleted).toBe(1);
+
+      const covers = await app.store.listCovers(id);
+      expect(covers.length).toBe(0);
+
+      const coverRes = await app.fetch(req(`/${id}/cover/${sha256}.png`));
+      expect(coverRes.status).toBe(404);
+    });
+
+    test('uploading cover for stale version after republish returns 409 cover_version_stale', async () => {
+      const { id, grant } = await publish();
+      await app.fetch(
+        req(`/api/relics/${id}/republish`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            renderer_class: 'markdown',
+            declared_size_bytes: 20,
+            declared_ciphertext_bytes: encryptedSize(20),
+          }),
+        })
+      );
+
+      const pngBytes = makeValidPng(2);
+      const res = await app.fetch(
+        req(`/api/relics/${id}/cover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            publish_token: grant.publish_token,
+            version: 1,
+            kind: 'markdown',
+            type: 'image/png',
+            data: toBase64(pngBytes),
+          }),
+        })
+      );
+      expect(res.status).toBe(409);
+      const problem = (await res.json()) as {
+        code: string;
+        current_version: number;
+      };
+      expect(problem.code).toBe('cover_version_stale');
+      expect(problem.current_version).toBe(2);
+    });
   });
 });

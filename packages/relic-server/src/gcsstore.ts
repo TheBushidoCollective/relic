@@ -31,6 +31,7 @@ import {
   type CommentRow,
   type DedupEntry,
   type MintLogEntry,
+  type RelicCover,
   type RelicRow,
   type RelicStore,
   type SessionRow,
@@ -214,6 +215,70 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
       .filter((d): d is Versioned<T> => d !== undefined)
       .map((d) => d.value);
   }
+  async function putMedia(
+    name: string,
+    body: Uint8Array,
+    contentType: string
+  ): Promise<void> {
+    const params = new URLSearchParams({ uploadType: 'media', name });
+    const url =
+      `${host}/upload/storage/v1/b/${encodeURIComponent(options.bucket)}/o` +
+      `?${params.toString()}`;
+
+    const response = await authorized(url, {
+      method: 'POST',
+      headers: { 'content-type': contentType },
+      body: body as unknown as BodyInit,
+    });
+    if (!response.ok) {
+      throw new Error(
+        `gcs put media ${name} returned ${response.status}: ${await response.text()}`
+      );
+    }
+  }
+
+  async function getMedia(name: string): Promise<Uint8Array | undefined> {
+    const url =
+      `${host}/storage/v1/b/${encodeURIComponent(options.bucket)}` +
+      `/o/${encodeURIComponent(name)}?alt=media`;
+
+    const response = await authorized(url);
+    if (response.status === 404) return undefined;
+    if (!response.ok) {
+      throw new Error(
+        `gcs get media ${name} returned ${response.status}: ${await response.text()}`
+      );
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  async function listObjectNames(under: string): Promise<readonly string[]> {
+    const names: string[] = [];
+    let pageToken: string | undefined;
+
+    do {
+      const params = new URLSearchParams({ prefix: under });
+      if (pageToken !== undefined) params.set('pageToken', pageToken);
+
+      const url =
+        `${host}/storage/v1/b/${encodeURIComponent(options.bucket)}/o` +
+        `?${params.toString()}`;
+
+      const response = await authorized(url);
+      if (!response.ok) {
+        throw new Error(`gcs list ${under} returned ${response.status}`);
+      }
+
+      const body = (await response.json()) as {
+        items?: readonly { name: string }[];
+        nextPageToken?: string;
+      };
+      for (const item of body.items ?? []) names.push(item.name);
+      pageToken = body.nextPageToken;
+    } while (pageToken !== undefined);
+
+    return names;
+  }
 
   return {
     async getRelic(id: string): Promise<RelicRow | undefined> {
@@ -237,6 +302,90 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         objectCrc32c: crc32c,
       }));
     },
+    async putCover(
+      id: string,
+      cover: RelicCover,
+      bytes: Uint8Array
+    ): Promise<'stored' | 'stale_version' | 'not_found'> {
+      const objectName = key('cover', id, cover.sha256);
+      await putMedia(objectName, bytes, cover.type);
+
+      const rowName = key('relic', `${id}.json`);
+      let stored = false;
+      for (let attempt = 0; attempt < casAttempts; attempt++) {
+        const current = await get<RelicRow>(rowName);
+        if (current === undefined) {
+          await remove(objectName);
+          return 'not_found';
+        }
+        if (current.value.version !== cover.version) {
+          await remove(objectName);
+          return 'stale_version';
+        }
+        const next: RelicRow = {
+          ...current.value,
+          cover,
+        };
+        if (await put(rowName, next, current.generation)) {
+          stored = true;
+          break;
+        }
+      }
+
+      if (!stored) {
+        await remove(objectName);
+        throw new Error(
+          `gcs relic ${id} lost ${casAttempts} compare-and-swap races; ` +
+            'refusing to write cover derived from stale state'
+        );
+      }
+
+      const prefixUnder = `${key('cover', id)}/`;
+      const allNames = await listObjectNames(prefixUnder);
+      for (const name of allNames) {
+        if (name !== objectName) {
+          await remove(name);
+        }
+      }
+
+      return 'stored';
+    },
+
+    async getCoverBytes(
+      id: string,
+      sha256: string
+    ): Promise<Uint8Array | undefined> {
+      return getMedia(key('cover', id, sha256));
+    },
+
+    async listCovers(id: string): Promise<readonly string[]> {
+      const prefixUnder = `${key('cover', id)}/`;
+      const names = await listObjectNames(prefixUnder);
+      return names.map((name) => name.slice(prefixUnder.length));
+    },
+
+    async deleteCovers(id: string): Promise<number> {
+      const prefixUnder = `${key('cover', id)}/`;
+      const names = await listObjectNames(prefixUnder);
+      for (const name of names) {
+        await remove(name);
+      }
+
+      const rowName = key('relic', `${id}.json`);
+      for (let attempt = 0; attempt < casAttempts; attempt++) {
+        const current = await get<RelicRow>(rowName);
+        if (current === undefined) break;
+        const next: RelicRow = {
+          ...current.value,
+          cover: undefined,
+        };
+        if (await put(rowName, next, current.generation)) {
+          break;
+        }
+      }
+
+      return names.length;
+    },
 
     /**
      * Opening a version is a read-modify-write like any other, so it rides
@@ -258,6 +407,7 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         publishedAt: undefined,
         objectLength: undefined,
         objectCrc32c: undefined,
+        cover: undefined,
         title: titleUpdate !== undefined ? titleUpdate.title : row.title,
         ownerEmail:
           ownerUpdate !== undefined ? ownerUpdate.ownerEmail : row.ownerEmail,

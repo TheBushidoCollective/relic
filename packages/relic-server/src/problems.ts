@@ -10,6 +10,7 @@
  * status-only surface reads, which is why `413` beats `422` for an oversized
  * declared object even though `422` fits the letter better.
  */
+import type { CoverValidationFailure } from '@relic/format/cover';
 
 /** Every code the app server can emit. */
 export type ProblemCode =
@@ -52,7 +53,9 @@ export type ProblemCode =
   | 'nothing_to_change'
   // Magic-link session. A dead or spent link is not a malformed request.
   | 'invalid_session'
-  | 'auth_rate_limited';
+  | 'auth_rate_limited'
+  | 'invalid_cover'
+  | 'cover_version_stale';
 
 const STATUS: Readonly<Record<ProblemCode, number>> = {
   relic_not_found: 404,
@@ -78,6 +81,8 @@ const STATUS: Readonly<Record<ProblemCode, number>> = {
   nothing_to_change: 400,
   invalid_session: 401,
   auth_rate_limited: 429,
+  invalid_cover: 400,
+  cover_version_stale: 409,
 };
 
 /** `title` SHOULD NOT change from occurrence to occurrence, per RFC 9457. */
@@ -105,6 +110,8 @@ const TITLE: Readonly<Record<ProblemCode, string>> = {
   nothing_to_change: 'Nothing to change',
   invalid_session: 'Sign-in link is dead or already used',
   auth_rate_limited: 'Too many sign-in requests',
+  invalid_cover: 'Invalid cover image',
+  cover_version_stale: 'Cover is for a version that is no longer current',
 };
 
 export interface ProblemExtensions {
@@ -117,6 +124,8 @@ export interface ProblemExtensions {
   readonly download_cap?: number;
   readonly report_url?: string;
   readonly comment_id?: string;
+  readonly cover_validation_failure?: CoverValidationFailure;
+  readonly current_version?: number;
 }
 
 export interface ProblemOptions extends ProblemExtensions {

@@ -14,6 +14,7 @@
  *    launch-blocking, since the abuse intake is a go/no-go obligation.
  */
 
+import { inflateSync } from 'node:zlib';
 import {
   COMMENT_ADDRESSES_LIMIT_BYTES,
   encryptedSize,
@@ -26,8 +27,16 @@ import {
   RESERVED_SEGMENTS,
   type RendererClass,
 } from '@relic/format';
+import {
+  COVER_TYPES,
+  type CoverKind,
+  type CoverType,
+  coverExtension,
+  isCoverKind,
+  validateCoverRaster,
+} from '@relic/format/cover';
 import { type AssetSource, memoryAssets, REGISTER_SW_JS } from './assets.ts';
-import { cardCopy } from './card.ts';
+import { COVER_ALT, cardCopy } from './card.ts';
 import { assertConfig, DEFAULT_CONFIG, type RelicConfig } from './config.ts';
 import {
   commentNotificationMail,
@@ -46,7 +55,10 @@ import {
   MemoryStore,
   type MintLogEntry,
   type ReasonClass,
+  type RelicCover,
+  type RelicRow,
   type RelicStore,
+  type Tombstone,
 } from './store.ts';
 
 const RESERVED = new Set(RESERVED_SEGMENTS);
@@ -129,6 +141,16 @@ export function createApp(options: AppOptions = {}): RelicApp {
     if (segments.length === 1 && head !== undefined) {
       // The shell only. No mint, no counter, no cap.
       return shell(config, head, store, now);
+    }
+    if (
+      segments.length === 3 &&
+      segments[1] === 'cover' &&
+      head !== undefined &&
+      segments[2] !== undefined &&
+      !RESERVED.has(head) &&
+      (request.method === 'GET' || request.method === 'HEAD')
+    ) {
+      return coverRoute(head, segments[2], request, now);
     }
 
     return new Response('Not found', { status: 404 });
@@ -364,6 +386,15 @@ export function createApp(options: AppOptions = {}): RelicApp {
       request.method === 'POST'
     ) {
       return republish(second, request, ip, now);
+    }
+    if (
+      first === 'relics' &&
+      second !== undefined &&
+      third === 'cover' &&
+      fourth === undefined &&
+      request.method === 'POST'
+    ) {
+      return uploadCover(second, request, ip, now);
     }
     if (
       first === 'relics' &&
@@ -823,6 +854,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     if (next === undefined) {
       return refuse('relic_not_found', { relic_id: relicId });
     }
+    await store.deleteCovers(relicId);
 
     const upload = await storage.signUpload(
       objectKey(relicId, next.version),
@@ -886,6 +918,211 @@ export function createApp(options: AppOptions = {}): RelicApp {
       object_length: object.length,
       object_crc32c: object.crc32c,
       relic_expires_at: relicExpiryIso(row.expiresAt),
+    });
+  }
+  async function uploadCover(
+    rawId: string,
+    request: Request,
+    ip: string,
+    now: number
+  ): Promise<Response> {
+    if (config.killSwitchEngaged) {
+      return refuse('service_paused', { retry_after_seconds: 300 });
+    }
+
+    const verdict = limiter.check(`cover ${ip}`, config.publishRateLimit, now);
+    if (!verdict.allowed) {
+      return refuse('publish_rate_limited', {
+        retry_after_seconds: verdict.retryAfterSeconds,
+      });
+    }
+
+    let relicId: string;
+    try {
+      relicId = parseRelicId(rawId);
+    } catch (error) {
+      const failure =
+        error instanceof InvalidRelicIdError ? error.failure : 'alphabet';
+      return refuse('invalid_relic_id', { id_validation_failure: failure });
+    }
+
+    const tombstone = await store.getTombstone(relicId);
+    if (tombstone !== undefined) {
+      return refuse('relic_removed', { relic_id: relicId });
+    }
+
+    const row = await store.getRelic(relicId);
+    if (row === undefined) {
+      return refuse('relic_not_found', { relic_id: relicId });
+    }
+
+    const contentType = request.headers.get('content-type') ?? '';
+    if (!contentType.toLowerCase().startsWith('application/json')) {
+      return refuse('invalid_cover', { cover_validation_failure: 'structure' });
+    }
+
+    const MAX_UPLOAD_BODY_BYTES = 720_000;
+    const contentLengthHeader = request.headers.get('content-length');
+    if (contentLengthHeader !== null) {
+      const contentLength = Number.parseInt(contentLengthHeader, 10);
+      if (
+        Number.isNaN(contentLength) ||
+        contentLength > MAX_UPLOAD_BODY_BYTES
+      ) {
+        return refuse('invalid_cover', { cover_validation_failure: 'size' });
+      }
+    }
+
+    let rawBytes: Uint8Array;
+    if (!request.body) {
+      return refuse('invalid_cover', { cover_validation_failure: 'structure' });
+    }
+    try {
+      const reader = request.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_UPLOAD_BODY_BYTES) {
+          reader.cancel();
+          return refuse('invalid_cover', { cover_validation_failure: 'size' });
+        }
+        chunks.push(value);
+      }
+      rawBytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        rawBytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    } catch {
+      return refuse('invalid_cover', { cover_validation_failure: 'structure' });
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(rawBytes);
+      const parsed = JSON.parse(text);
+      if (
+        parsed === null ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed)
+      ) {
+        return refuse('invalid_cover', {
+          cover_validation_failure: 'structure',
+        });
+      }
+      body = parsed as Record<string, unknown>;
+    } catch {
+      return refuse('invalid_cover', { cover_validation_failure: 'structure' });
+    }
+
+    const publishToken = body['publish_token'];
+    if (typeof publishToken !== 'string') {
+      return refuse('invalid_publish_token', { relic_id: relicId });
+    }
+    const tokenHash = await sha256Hex(publishToken);
+    if (!timingSafeEqual(tokenHash, row.publishTokenHash)) {
+      return refuse('invalid_publish_token', { relic_id: relicId });
+    }
+
+    const version = body['version'];
+    if (
+      typeof version !== 'number' ||
+      !Number.isInteger(version) ||
+      version !== row.version
+    ) {
+      return refuse('cover_version_stale', {
+        relic_id: relicId,
+        current_version: row.version,
+      });
+    }
+
+    const object = await storage.stat(objectKey(relicId, row.version));
+    if (object === undefined) {
+      return refuse('relic_not_yet_published', { relic_id: relicId });
+    }
+
+    const kind = body['kind'];
+    const type = body['type'];
+    if (
+      !isCoverKind(kind) ||
+      typeof type !== 'string' ||
+      !(COVER_TYPES as readonly string[]).includes(type)
+    ) {
+      return refuse('invalid_cover', { cover_validation_failure: 'structure' });
+    }
+
+    const data = body['data'];
+    if (
+      typeof data !== 'string' ||
+      data.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(data)
+    ) {
+      return refuse('invalid_cover', { cover_validation_failure: 'structure' });
+    }
+
+    const rasterBytes = Uint8Array.from(Buffer.from(data, 'base64'));
+    if (rasterBytes.byteLength > config.coverCapBytes) {
+      return refuse('invalid_cover', {
+        cover_validation_failure: 'size',
+        size_limit_bytes: config.coverCapBytes,
+      });
+    }
+
+    const validation = validateCoverRaster(
+      rasterBytes,
+      (compressed, maxOutputLength) =>
+        inflateSync(compressed, { maxOutputLength })
+    );
+    if (!validation.ok) {
+      return refuse('invalid_cover', {
+        cover_validation_failure: validation.failure,
+        detail: validation.detail,
+      });
+    }
+
+    if (validation.type !== type) {
+      return refuse('invalid_cover', {
+        cover_validation_failure: 'signature',
+        detail: `Declared type ${type} does not match detected raster type ${validation.type}`,
+      });
+    }
+
+    const sha256 = await sha256Hex(rasterBytes);
+    const cover: RelicCover = {
+      version: row.version,
+      sha256,
+      type: type as CoverType,
+      kind: kind as CoverKind,
+      bytes: rasterBytes.byteLength,
+      uploadedAt: now,
+    };
+
+    const putResult = await store.putCover(relicId, cover, rasterBytes);
+    if (putResult === 'stale_version') {
+      return refuse('cover_version_stale', {
+        relic_id: relicId,
+        current_version:
+          (await store.getRelic(relicId))?.version ?? row.version,
+      });
+    }
+    if (putResult === 'not_found') {
+      return refuse('relic_not_found', { relic_id: relicId });
+    }
+
+    const ext = coverExtension(cover.type);
+    const coverUrl = `${config.serviceOrigin.replace(/\/+$/, '')}/${relicId}/cover/${sha256}.${ext}`;
+    return Response.json({
+      relic_id: relicId,
+      version: cover.version,
+      kind: cover.kind,
+      type: cover.type,
+      sha256: cover.sha256,
+      bytes: cover.bytes,
+      cover_url: coverUrl,
     });
   }
 
@@ -1189,6 +1426,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     for (let version = 1; version <= row.version; version++) {
       await storage.delete(objectKey(relicId, version));
     }
+    const coversRemoved = await store.deleteCovers(relicId);
     await store.putTombstone({
       id: relicId,
       publishIp: row.publishIp,
@@ -1225,6 +1463,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       blocklisted: shouldBlocklist,
       ciphertext_hash: hash,
       comments_deleted: commentsRemoved,
+      covers_deleted: coversRemoved,
     });
   }
 
@@ -1983,6 +2222,86 @@ export function createApp(options: AppOptions = {}): RelicApp {
       occurrenceId
     );
   }
+  function coverNotFound(): Response {
+    return new Response('Not found', {
+      status: 404,
+      headers: {
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'x-robots-tag': 'noindex',
+      },
+    });
+  }
+
+  async function coverRoute(
+    rawId: string,
+    name: string,
+    request: Request,
+    now: number
+  ): Promise<Response> {
+    const nameMatch = /^([0-9a-f]{64})\.(png|jpg)$/.exec(name);
+    if (nameMatch === null) {
+      return coverNotFound();
+    }
+    const expectedSha256 = nameMatch[1];
+    const expectedExt = nameMatch[2];
+
+    let relicId: string;
+    try {
+      relicId = parseRelicId(rawId);
+    } catch {
+      return coverNotFound();
+    }
+
+    let tombstone: Tombstone | undefined;
+    let row: RelicRow | undefined;
+    try {
+      tombstone = await store.getTombstone(relicId);
+      if (tombstone !== undefined) return coverNotFound();
+      row = await store.getRelic(relicId);
+    } catch {
+      return new Response('Service unavailable', {
+        status: 503,
+        headers: { 'cache-control': 'no-store' },
+      });
+    }
+
+    if (row === undefined) return coverNotFound();
+    if (row.expiresAt !== undefined && now >= row.expiresAt) {
+      return coverNotFound();
+    }
+    if (row.cover === undefined) return coverNotFound();
+    if (row.cover.version !== row.version) return coverNotFound();
+    if (row.cover.sha256 !== expectedSha256) return coverNotFound();
+    if (coverExtension(row.cover.type) !== expectedExt) return coverNotFound();
+
+    let bytes: Uint8Array | undefined;
+    try {
+      bytes = await store.getCoverBytes(relicId, row.cover.sha256);
+    } catch {
+      return new Response('Service unavailable', {
+        status: 503,
+        headers: { 'cache-control': 'no-store' },
+      });
+    }
+
+    if (bytes === undefined) return coverNotFound();
+
+    const headers = {
+      'content-type': row.cover.type,
+      'content-length': String(bytes.byteLength),
+      'cache-control': 'public, max-age=86400',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-robots-tag': 'noindex',
+      'content-security-policy': "default-src 'none'; sandbox",
+    };
+
+    if (request.method === 'HEAD') {
+      return new Response(null, { status: 200, headers });
+    }
+    return new Response(bytes as unknown as BodyInit, { status: 200, headers });
+  }
 
   return {
     config,
@@ -2060,10 +2379,12 @@ function mintPublishToken(): string {
     .replace(/=+$/, '');
 }
 
-async function sha256Hex(value: string): Promise<string> {
+async function sha256Hex(value: string | Uint8Array): Promise<string> {
+  const bytes =
+    typeof value === 'string' ? new TextEncoder().encode(value) : value;
   const digest = await crypto.subtle.digest(
     'SHA-256',
-    new TextEncoder().encode(value)
+    bytes as unknown as BufferSource
   );
   return [...new Uint8Array(digest)]
     .map((b) => b.toString(16).padStart(2, '0'))
@@ -2108,6 +2429,7 @@ async function shell(
   // link fetchers off the open counter and the download cap.
   let storedTitle: string | undefined;
   let storedRendererClass: RendererClass | undefined;
+  let storedCover: RelicCover | undefined;
   let canonicalId: string | undefined;
 
   if (typeof target === 'string') {
@@ -2129,6 +2451,12 @@ async function shell(
               if (row.title !== undefined && row.title.length > 0) {
                 storedTitle = row.title;
               }
+              if (
+                row.cover !== undefined &&
+                row.cover.version === row.version
+              ) {
+                storedCover = row.cover;
+              }
             }
           }
         }
@@ -2137,6 +2465,7 @@ async function shell(
         // never a 500.
         storedTitle = undefined;
         storedRendererClass = undefined;
+        storedCover = undefined;
       }
     }
   }
@@ -2148,7 +2477,14 @@ async function shell(
         ? `${serviceOrigin}/${canonicalId}`
         : `${serviceOrigin}/`
       : `${serviceOrigin}/dashboard`;
-  const ogImage = `${serviceOrigin}/assets/card.v1.png`;
+  const ogImage =
+    storedCover !== undefined && canonicalId !== undefined
+      ? `${serviceOrigin}/${canonicalId}/cover/${storedCover.sha256}.${coverExtension(storedCover.type)}`
+      : `${serviceOrigin}/assets/card.v1.png`;
+  const ogImageType =
+    storedCover !== undefined ? storedCover.type : 'image/png';
+  const ogImageAlt =
+    storedCover !== undefined ? COVER_ALT[storedCover.kind] : CARD_IMAGE_ALT;
   const card = cardCopy(storedRendererClass);
   const cardTitle = storedTitle ?? card.title;
   const documentTitle =
@@ -2175,10 +2511,10 @@ async function shell(
 <meta property="og:description" content="${escapeHtml(card.description)}">
 <meta property="og:url" content="${escapeHtml(ogUrl)}">
 <meta property="og:image" content="${escapeHtml(ogImage)}">
-<meta property="og:image:type" content="image/png">
+<meta property="og:image:type" content="${escapeHtml(ogImageType)}">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="${escapeHtml(CARD_IMAGE_ALT)}">
+<meta property="og:image:alt" content="${escapeHtml(ogImageAlt)}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${escapeHtml(cardTitle)}">
 <meta name="twitter:description" content="${escapeHtml(card.description)}">
@@ -2637,6 +2973,14 @@ site data for this origin removes every remembered key.
 - **A title, in the clear.** The publishing tool defaults it to your
   filename. We store it, the relic's page carries it in its metadata, and
   every link preview shows it.
+- **A cover image, unencrypted.** By default relic-mcp renders the first screen
+  of the file on your machine and uploads a 1200x630 preview image. The server
+  stores it and serves it at \`/\${id}/cover/\${sha256}.{png|jpg}\` for link previews;
+  anyone who fetches the link, unfurl services, and their caches can see it
+  without the decryption key. Publishing with \`cover: false\` or republishing
+  with \`cover: false\` clears the cover. Takedown deletes it. When a relic expires,
+  the cover stops serving immediately while the underlying storage object
+  remains until deletion per our soft-delete retention policy.
 This moves us from knowing nothing to knowing what kind of thing you published
 and roughly how often it was fetched. It is metadata. It is never content.
 
