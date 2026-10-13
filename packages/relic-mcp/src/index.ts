@@ -15,6 +15,8 @@
 
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
+import { coverAssetDir } from './cover/assets.ts';
+import { chromeCoverRenderer, DEFAULT_DEADLINE_MS } from './cover/render.ts';
 import { nodeFiles } from './files.ts';
 import { createHttpHandler } from './http.ts';
 import { runInstall, USAGE } from './installer.ts';
@@ -59,11 +61,14 @@ const deps: PublishDeps = {
   // remembers to edit, and a wrong version in a log is worse than none.
   // Whatever installs this can set the variable to something more specific.
   clientName: process.env['RELIC_CLIENT_NAME'] ?? 'relic-mcp',
-  // Wired to the real chromeCoverRenderer at integration.
-  renderCover: async () => ({
-    status: 'skipped',
-    reason: 'browser_disabled',
-    detail: 'real renderer wired at integration',
+  // Renders the cover in the publisher's own Chrome, Chromium or Edge, with
+  // networking closed. RELIC_CHROME_PATH names the browser, or turns covers
+  // off with `none`; unset means the per-platform discovery in chrome.ts.
+  renderCover: chromeCoverRenderer({
+    chromePath: process.env['RELIC_CHROME_PATH'],
+    ffmpegPath: undefined,
+    assetDir: coverAssetDir(),
+    deadlineMs: DEFAULT_DEADLINE_MS,
   }),
 };
 
