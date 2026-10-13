@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { buildCurrentStage, renderMediaView } from '../src/main.ts';
 import { type ReadyView, routeForClass } from '../src/viewer.ts';
 
+/** Every element a fullscreen request was made on, in order. */
+const fullscreenRequests: ElementStub[] = [];
+
 class ElementStub {
   readonly tagName: string;
   className = '';
@@ -21,6 +24,7 @@ class ElementStub {
   download = '';
   href = '';
   readonly children: ElementStub[] = [];
+  parentElement: ElementStub | null = null;
   readonly attributes = new Map<string, string>();
   readonly dataset: Record<string, string> = {};
   readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -55,17 +59,23 @@ class ElementStub {
     return this.attributes.has(name);
   }
 
+  // Appending moves, as in the DOM, so `parentElement` always says where an
+  // element really is.
   appendChild(child: ElementStub): ElementStub {
+    child.remove();
+    child.parentElement = this;
     this.children.push(child);
     return child;
   }
 
   append(...children: ElementStub[]): void {
-    this.children.push(...children);
+    for (const child of children) this.appendChild(child);
   }
 
   replaceChildren(...children: ElementStub[]): void {
-    this.children.splice(0, this.children.length, ...children);
+    for (const child of this.children) child.parentElement = null;
+    this.children.length = 0;
+    this.append(...children);
   }
 
   addEventListener(
@@ -96,7 +106,18 @@ class ElementStub {
     this.dispatchEvent('click');
   }
 
-  remove(): void {}
+  remove(): void {
+    const holder = this.parentElement;
+    if (holder === null) return;
+    const at = holder.children.indexOf(this);
+    if (at >= 0) holder.children.splice(at, 1);
+    this.parentElement = null;
+  }
+
+  requestFullscreen(): Promise<void> {
+    fullscreenRequests.push(this);
+    return Promise.resolve();
+  }
 }
 
 function descendants(element: ElementStub): ElementStub[] {
@@ -134,6 +155,7 @@ describe('media playback support', () => {
   const origRevokeObjectUrl = URL.revokeObjectURL;
 
   beforeEach(() => {
+    fullscreenRequests.length = 0;
     createdUrls = [];
     revokedUrls = [];
     URL.createObjectURL = (_blob: Blob): string => {
@@ -190,7 +212,9 @@ describe('media playback support', () => {
     expect(container).toBeDefined();
     if (!container) return;
 
-    const video = container.children.find((child) => child.tagName === 'VIDEO');
+    const video = descendants(container).find(
+      (child) => child.tagName === 'VIDEO'
+    );
     expect(video).toBeDefined();
     if (!video) return;
 
@@ -233,7 +257,9 @@ describe('media playback support', () => {
     expect(container).toBeDefined();
     if (!container) return;
 
-    const audio = container.children.find((child) => child.tagName === 'AUDIO');
+    const audio = descendants(container).find(
+      (child) => child.tagName === 'AUDIO'
+    );
     expect(audio).toBeDefined();
     if (!audio) return;
 
@@ -269,5 +295,32 @@ describe('media playback support', () => {
 
     container.dispatchEvent('cleanup');
     expect(revokedUrls).toEqual(createdUrls);
+  });
+
+  test('fullscreen takes the picture and its controls, and leaves the filename strip on the page', () => {
+    const container = renderMediaView(
+      makeMediaView({ filename: 'sample.mp4', declaredMimetype: 'video/mp4' })
+    ) as unknown as ElementStub;
+
+    const button = descendants(container).find((element) =>
+      element.className.split(' ').includes('media-fullscreen-btn')
+    );
+    expect(button).toBeDefined();
+    if (!button) return;
+    button.click();
+
+    expect(fullscreenRequests).toHaveLength(1);
+    const target = fullscreenRequests[0];
+    if (!target) return;
+    const inside = descendants(target);
+    expect(inside.some((element) => element.tagName === 'VIDEO')).toBe(true);
+    expect(
+      inside.some((element) =>
+        element.className.split(' ').includes('media-chrome')
+      )
+    ).toBe(true);
+    expect(
+      inside.some((element) => element.className === 'media-meta-strip')
+    ).toBe(false);
   });
 });

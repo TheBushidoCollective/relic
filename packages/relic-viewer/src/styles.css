@@ -948,6 +948,18 @@ body {
 .media-audio {
   background: var(--surface);
 }
+
+/* The picture and its controls, the element fullscreen takes. Inline it lays
+   them out exactly as the card did when they were its own children: full
+   width, stacked, the card's gap between them. */
+.media-stage {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+}
+
 .media-chrome {
   width: 100%;
   background: var(--surface);
@@ -1258,6 +1270,77 @@ body {
   font-size: 0.76rem;
   color: var(--ink-soft);
   word-break: break-word;
+}
+
+/* ---------- media fullscreen ----------
+
+   Only the stage goes fullscreen, so this is the whole screen: the picture
+   letterboxed on black and the controls laid over the bottom of the frame on
+   a dark band. The band keeps the label's language, a hairline rule, square
+   corners and patina for interaction, and reads light on dark in either
+   scheme because the ground here is the film rather than the page. Every
+   control rule above takes its colours from these tokens, so redefining them
+   on the stage is the whole of the restyle. */
+
+.media-stage:fullscreen {
+  color-scheme: dark;
+  --surface: #171b1c;
+  --ink: #e6e9e7;
+  --ink-soft: #969e9d;
+  --rule: #3b4345;
+  --rule-strong: #4d5759;
+  --patina: #4fb3a6;
+  --patina-ink: #a7ded6;
+  display: block;
+  background: #000;
+}
+
+.media-stage::backdrop {
+  background: #000;
+}
+
+.media-stage:fullscreen .media-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  object-fit: contain;
+}
+
+.media-stage:fullscreen .media-chrome {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: auto;
+  padding: 0 1rem 0.5rem;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  background: rgb(8 10 11 / 0.82);
+}
+
+/* Idle playback leaves the bare frame. Markers, the span handle and the hover
+   button opt back into pointer events on their own, so the band's descendants
+   are released too: nothing invisible can be pressed. */
+.media-stage.is-idle:fullscreen {
+  cursor: none;
+}
+
+.media-stage.is-idle:fullscreen .media-chrome {
+  opacity: 0;
+}
+
+.media-stage.is-idle:fullscreen .media-chrome,
+.media-stage.is-idle:fullscreen .media-chrome * {
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .media-stage:fullscreen .media-chrome {
+    transition: opacity 200ms ease;
+  }
 }
 
 .doc-html,

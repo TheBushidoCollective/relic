@@ -11,13 +11,16 @@
  * - Markers painted on the scrubber for moments and spans.
  * - Marker clustering reporting its member count.
  * - Backward compatibility with old time anchor shapes including rect frame boxes.
+ * - Fullscreen playback idling to the bare frame, and staying awake while
+ *   paused or while the pointer rests on the controls.
+ * - Comment actions leaving fullscreen before the composer opens.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import type { AnchorRect, CommentAnchor } from '@relic/format';
 import type { AnchorSurface } from '../src/anchoring.ts';
 import { paintTimeMark, revealTimeMark } from '../src/annotate-time.ts';
-import { createMediaPlayer } from '../src/media-player.ts';
+import { createMediaPlayer, FULLSCREEN_IDLE_MS } from '../src/media-player.ts';
 import { spanFromDrag, stepSpanEnd } from '../src/media-timeline.ts';
 
 class TestNode {
@@ -203,6 +206,15 @@ class TestNode {
   setPointerCapture(_id: number): void {}
   releasePointerCapture(_id: number): void {}
 
+  // The browser's element fullscreen, reduced to what the player reads back:
+  // the document's fullscreen element and the change event announcing it.
+  requestFullscreen(): Promise<void> {
+    const doc = fullscreenDocument();
+    doc.fullscreenElement = this;
+    doc.dispatchEvent({ type: 'fullscreenchange' });
+    return Promise.resolve();
+  }
+
   getBoundingClientRect(): {
     left: number;
     top: number;
@@ -283,6 +295,33 @@ function requireNode(node: TestNode | null, label: string): TestNode {
   return node;
 }
 
+interface FullscreenDocument {
+  fullscreenElement: TestNode | null;
+  fullscreenExits: number;
+  dispatchEvent(event: unknown): boolean;
+}
+
+function fullscreenDocument(): FullscreenDocument {
+  return document as unknown as FullscreenDocument;
+}
+
+/** A video player taken fullscreen through its own button. */
+function fullscreenVideoPlayer(): {
+  video: MediaTestNode;
+  stage: TestNode;
+  chrome: TestNode;
+} {
+  const video = new MediaTestNode('video');
+  const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+    isAudio: false,
+  });
+  const stage = player.stage as unknown as TestNode;
+  const chrome = player.chrome as unknown as TestNode;
+  requireNode(chrome.querySelector('.media-fullscreen-btn'), 'fsBtn').click();
+  expect(fullscreenDocument().fullscreenElement).toBe(stage);
+  return { video, stage, chrome };
+}
+
 describe('custom media player and comment timeline', () => {
   let origDocument: unknown;
   let origWindow: unknown;
@@ -310,7 +349,7 @@ describe('custom media player and comment timeline', () => {
 
     const docNode = new TestNode('#document');
 
-    (globalThis as { document?: unknown }).document = {
+    const fakeDocument = {
       createElement: (tag: string) => {
         if (tag.toLowerCase() === 'video' || tag.toLowerCase() === 'audio') {
           return new MediaTestNode(tag);
@@ -327,7 +366,16 @@ describe('custom media player and comment timeline', () => {
       contains: (_node: unknown) => true,
       querySelector: (s: string) => docNode.querySelector(s),
       querySelectorAll: (s: string) => docNode.querySelectorAll(s),
+      fullscreenElement: null as TestNode | null,
+      fullscreenExits: 0,
+      exitFullscreen: (): Promise<void> => {
+        fakeDocument.fullscreenExits += 1;
+        fakeDocument.fullscreenElement = null;
+        docNode.dispatchEvent({ type: 'fullscreenchange' });
+        return Promise.resolve();
+      },
     };
+    (globalThis as { document?: unknown }).document = fakeDocument;
 
     const winListeners = new Map<string, Array<(e: unknown) => void>>();
     (globalThis as { window?: unknown }).window = {
@@ -880,12 +928,11 @@ describe('custom media player and comment timeline', () => {
     const host = new TestNode('div');
     const video = new MediaTestNode('video');
     video.duration = 100;
-    host.appendChild(video);
 
     const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
       isAudio: false,
     });
-    host.appendChild(player.chrome as unknown as TestNode);
+    host.appendChild(player.stage as unknown as TestNode);
 
     const surface: AnchorSurface = {
       host: host as unknown as HTMLElement,
@@ -935,12 +982,11 @@ describe('custom media player and comment timeline', () => {
     const host = new TestNode('div');
     const video = new MediaTestNode('video');
     video.duration = 100;
-    host.appendChild(video);
 
     const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
       isAudio: false,
     });
-    host.appendChild(player.chrome as unknown as TestNode);
+    host.appendChild(player.stage as unknown as TestNode);
 
     const surface: AnchorSurface = {
       host: host as unknown as HTMLElement,
@@ -979,12 +1025,11 @@ describe('custom media player and comment timeline', () => {
     const host = new TestNode('div');
     const video = new MediaTestNode('video');
     video.duration = 60;
-    host.appendChild(video);
 
     const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
       isAudio: false,
     });
-    host.appendChild(player.chrome as unknown as TestNode);
+    host.appendChild(player.stage as unknown as TestNode);
 
     const surface: AnchorSurface = {
       host: host as unknown as HTMLElement,
@@ -1018,5 +1063,139 @@ describe('custom media player and comment timeline', () => {
     revealTimeMark(surface, { kind: 'time', t: 12 });
     expect(video.currentTime).toBe(12);
     expect(video.paused).toBe(true);
+  });
+
+  test('fullscreen playback goes idle after the delay and wakes on pointer activity', () => {
+    vi.useFakeTimers();
+    try {
+      const { video, stage, chrome } = fullscreenVideoPlayer();
+      void video.play();
+
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS - 1);
+      expect(stage.classes()).not.toContain('is-idle');
+      vi.advanceTimersByTime(1);
+      expect(stage.classes()).toContain('is-idle');
+
+      // A pointer moving over the picture brings the controls back and starts
+      // the wait again from the beginning.
+      video.dispatchEvent({ type: 'pointermove', bubbles: true, clientX: 10 });
+      expect(stage.classes()).not.toContain('is-idle');
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS - 1);
+      expect(stage.classes()).not.toContain('is-idle');
+      vi.advanceTimersByTime(1);
+      expect(stage.classes()).toContain('is-idle');
+
+      // Leaving fullscreen shows the controls and the wait does not come back.
+      requireNode(
+        chrome.querySelector('.media-fullscreen-btn'),
+        'fsBtn'
+      ).click();
+      expect(fullscreenDocument().fullscreenElement).toBeNull();
+      expect(stage.classes()).not.toContain('is-idle');
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS * 4);
+      expect(stage.classes()).not.toContain('is-idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('paused fullscreen playback never goes idle', () => {
+    vi.useFakeTimers();
+    try {
+      const { video, stage } = fullscreenVideoPlayer();
+
+      // Paused from the start.
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS * 4);
+      expect(stage.classes()).not.toContain('is-idle');
+
+      // Paused partway through the wait.
+      void video.play();
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS - 500);
+      video.pause();
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS * 4);
+      expect(stage.classes()).not.toContain('is-idle');
+
+      // Activity while paused does not start a wait either.
+      video.dispatchEvent({ type: 'pointermove', bubbles: true, clientX: 10 });
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS * 4);
+      expect(stage.classes()).not.toContain('is-idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('fullscreen playback stays awake while the pointer rests on the controls', () => {
+    vi.useFakeTimers();
+    try {
+      const { video, stage, chrome } = fullscreenVideoPlayer();
+      void video.play();
+
+      chrome.dispatchEvent({ type: 'pointerenter', bubbles: false });
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS * 4);
+      expect(stage.classes()).not.toContain('is-idle');
+
+      chrome.dispatchEvent({ type: 'pointerleave', bubbles: false });
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS);
+      expect(stage.classes()).toContain('is-idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a comment action in fullscreen leaves fullscreen before the composer opens, and a drag stays', async () => {
+    const { stage, chrome } = fullscreenVideoPlayer();
+    const scrubber = requireNode(
+      chrome.querySelector('.media-scrubber'),
+      'scrubber'
+    );
+    const hoverBtn = requireNode(
+      chrome.querySelector('.timeline-hover-comment-btn'),
+      'hoverBtn'
+    );
+
+    const aims: Array<{ focus: boolean; inFullscreen: boolean }> = [];
+    const composerAim = Promise.withResolvers<void>();
+    chrome.addEventListener('relic:time-aim', (event: unknown) => {
+      const detail = (event as { detail: { focus: boolean } }).detail;
+      aims.push({
+        focus: detail.focus,
+        inFullscreen: fullscreenDocument().fullscreenElement === stage,
+      });
+      if (detail.focus) composerAim.resolve();
+    });
+
+    // A drag only paints the selection on the scrubber, so it stays in the
+    // frame.
+    scrubber.dispatchEvent({
+      type: 'pointerdown',
+      clientX: 64,
+      bubbles: true,
+      preventDefault: () => {},
+    });
+    const win = window as unknown as {
+      dispatchEvent: (e: unknown) => void;
+    };
+    win.dispatchEvent({ type: 'pointermove', clientX: 256, bubbles: true });
+    win.dispatchEvent({ type: 'pointerup', clientX: 256, bubbles: true });
+    expect(aims).toEqual([{ focus: false, inFullscreen: true }]);
+    expect(fullscreenDocument().fullscreenElement).toBe(stage);
+    expect(fullscreenDocument().fullscreenExits).toBe(0);
+
+    // The comment button opens the composer, which is outside the fullscreen
+    // element: fullscreen ends first, then the aim goes out.
+    scrubber.dispatchEvent({
+      type: 'pointermove',
+      clientX: 192,
+      bubbles: true,
+    });
+    hoverBtn.click();
+    await composerAim.promise;
+
+    expect(fullscreenDocument().fullscreenExits).toBe(1);
+    expect(fullscreenDocument().fullscreenElement).toBeNull();
+    expect(aims).toEqual([
+      { focus: false, inFullscreen: true },
+      { focus: true, inFullscreen: false },
+    ]);
   });
 });
