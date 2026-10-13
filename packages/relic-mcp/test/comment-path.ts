@@ -104,6 +104,7 @@ async function callFresh(
     cwd: packageRoot,
     env: {
       ...process.env,
+      RELIC_CHROME_PATH: 'none',
       RELIC_SERVICE_ORIGIN: origin(),
       RELIC_PUBLISH_STATE: publishStatePath(),
     },
@@ -138,6 +139,11 @@ try {
     files: nodeFiles,
     fetch: globalThis.fetch,
     clientName: 'relic-mcp/comment-path',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'comment-path test runner',
+    }),
   };
 
   const path = join(scratch, 'report.md');

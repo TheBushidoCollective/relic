@@ -116,6 +116,11 @@ const deps: PublishDeps = {
   files: nodeFiles,
   fetch: routedFetch(),
   clientName: 'relic-mcp/unfurl-card-path',
+  renderCover: async () => ({
+    status: 'skipped',
+    reason: 'browser_disabled',
+    detail: 'unfurl-card-path tests card fallback',
+  }),
 };
 
 /**

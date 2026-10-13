@@ -154,6 +154,7 @@ async function callFresh(
     cwd: packageRoot,
     env: {
       ...process.env,
+      RELIC_CHROME_PATH: 'none',
       RELIC_SERVICE_ORIGIN: origin(),
       RELIC_PUBLISH_STATE: publishStatePath(),
       RELIC_METADATA_CACHE: join(scratch, 'metadata-cache.json'),
@@ -211,6 +212,11 @@ try {
     files: nodeFiles,
     fetch: globalThis.fetch,
     clientName: 'relic-mcp/inventory-path',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'inventory-path test runner',
+    }),
   };
 
   const original = join(scratch, 'quarterly-review.md');

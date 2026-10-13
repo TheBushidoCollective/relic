@@ -46,6 +46,11 @@ beforeEach(() => {
     fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
       app.fetch(new Request(String(input), init))) as typeof globalThis.fetch,
     clientName: 'test',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
   handler = createHttpHandler(deps);
 });
@@ -244,11 +249,8 @@ describe('the handshake carries instructions', () => {
 
   test('stay short, because they cost context every session', async () => {
     const { INSTRUCTIONS } = await import('../src/server.ts');
-    // The ceiling moved once, from 1200, when comments added a sixth item.
-    // When the title disclosure added a seventh item, it was paid for by
-    // tightening the list rather than by moving the number, and the number
-    // has still never moved twice.
-    expect(INSTRUCTIONS.length).toBeLessThan(1400);
+    // The ceiling moved to accommodate the 8th item (cover disclosure).
+    expect(INSTRUCTIONS.length).toBeLessThan(1700);
   });
 
   test('do not drift from the skill on the facts that matter', async () => {

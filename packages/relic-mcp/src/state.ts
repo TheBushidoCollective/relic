@@ -113,6 +113,15 @@ export interface PublishState {
    * first grant and never moves, so a recorded value stays true.
    */
   readonly expires_at?: string | null | undefined;
+  /**
+   * Whether a cover image was successfully uploaded for this version.
+   *
+   * Absent on every entry written before per-relic covers shipped. Absence
+   * is legacy state and means this entry has no cover recorded. A republish
+   * that changes content or removes the cover writes it as false; a successful
+   * cover upload writes it as true.
+   */
+  readonly cover_uploaded?: boolean | undefined;
 }
 
 interface StateFile {
@@ -352,7 +361,9 @@ function validatePublishStateEntry(
     // word about it anywhere.
     (candidate['content_sha256'] !== undefined &&
       (typeof candidate['content_sha256'] !== 'string' ||
-        !/^[0-9a-f]{64}$/.test(candidate['content_sha256'])))
+        !/^[0-9a-f]{64}$/.test(candidate['content_sha256']))) ||
+    (candidate['cover_uploaded'] !== undefined &&
+      typeof candidate['cover_uploaded'] !== 'boolean')
   ) {
     throw new Error(
       `publish state at ${publishStatePath()} holds a malformed entry for ` +
