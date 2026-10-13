@@ -281,8 +281,19 @@ The fragment never reaches a server, so no unfurler can describe the content, an
 `/{id}` serves deliberate Open Graph and Twitter Card metadata describing what Relic is and revealing what kind of thing the link holds, without pretending to describe the encrypted payload. Open Graph's required properties are `og:title`, `og:type`, `og:image`, and `og:url`, with `og:description` and `og:site_name` optional ([Open Graph](https://ogp.me/)).
 
 **What stays constant and what becomes per-relic.**
-- **Per-relic tags:** `og:title`, `og:description`, `twitter:title`, `twitter:description`, and `og:url`. `og:url` is `{serviceOrigin}/{id}` when the path segment is a valid relic id, or the service origin root otherwise.
-- **Constant tags:** `og:image` (and its dimension and alt tags: `og:image:type` of `image/png`, `og:image:width` of `1200`, `og:image:height` of `630`, and `og:image:alt` of "Relic's accession label with an empty field stack: a relic's catalog number, an unrevealed key line, and a prompt to open with the full link."), `og:type` (`website`), `og:site_name` (`Relic`), and `twitter:card` (`summary_large_image`). `og:image` is served from the constant path `{serviceOrigin}/assets/card.v1.png` (a 1200x630 PNG).
+
+- **Per-relic tags:** `og:title`, `og:description`, `twitter:title`, `twitter:description`, `og:url`, and (when a cover image is uploaded) `og:image`, `twitter:image`, `og:image:type`, and `og:image:alt`. `og:url` is `{serviceOrigin}/{id}` when the path segment is a valid relic id, or the service origin root otherwise.
+- **Constant tags:** `og:type` (`website`), `og:site_name` (`Relic`), `twitter:card` (`summary_large_image`), and the fallback `og:image` path `{serviceOrigin}/assets/card.v1.png` (a 1200x630 PNG with `og:image:type` of `image/png`, `og:image:width` of `1200`, `og:image:height` of `630`, and `og:image:alt` of "Relic's accession label with an empty field stack: a relic's catalog number, an unrevealed key line, and a prompt to open with the full link.").
+
+**Cover image tags on the unfurl card.** On 2026-10-13, per-relic cover images were introduced, reversing the one-constant-raster invariant. When a relic has an active cover image matching the current version (`row.cover?.version === row.version`):
+
+- `og:image` and `twitter:image`: `${serviceOrigin}/${canonicalId}/cover/${cover.sha256}.${coverExtension(cover.type)}`
+- `og:image:type`: `cover.type` (`image/png` or `image/jpeg`)
+- `og:image:width`: `1200`
+- `og:image:height`: `630`
+- `og:image:alt`: `COVER_ALT[cover.kind]` (e.g. "The opening of this Markdown document, as it renders.")
+
+When a relic has no cover, when `cover: false` was passed, or when the relic is expired, tombstoned, unknown, or a store read throws, `og:image` falls back to `{serviceOrigin}/assets/card.v1.png` with the constant fallback tags.
 
 **`og:description` and `twitter:description` reveal the coarse renderer class.** The description combines a phrase naming the kind of thing with a tail selected by what the viewer actually does (`CLASS_BEHAVIOUR` from `@relic/format`), not by `isRenderable`. `isRenderable` is the success metric's wedge boundary and excludes `media` because the telemetry counts only the document and markup wedge. Using `isRenderable` previously produced a false recipient-facing statement claiming that media files download to the device, whereas the viewer routes `media` to an in-browser player. The three tails map to the viewer's three actual outcomes:
 

@@ -236,7 +236,7 @@ Nine standing checks. Each names what it catches and what its absence loses, bec
 
 ### 5.1 Cross-relic correlation, and where it is disclosed
 
-`format.md` 3.8 concedes per-relic length leakage paired with the stored class. The aggregate is not stated anywhere. The mint log retains the requesting IP on every publish and every mint (`service.md` 1.2), and the relic row holds the renderer class, the publishing client name, the object's length, and an optional publisher-declared plaintext title. Across many relics from one publishing address that is not a set of independent disclosures. It is a cadence and a size profile, and it fingerprints a pipeline or a person.
+`format.md` 3.8 concedes per-relic length leakage paired with the stored class. The aggregate is not stated anywhere. The mint log retains the requesting IP on every publish and every mint (`service.md` 1.2), and the relic row holds the renderer class, the publishing client name, the object's length, an optional publisher-declared plaintext title, and optional cover image metadata. Across many relics from one publishing address that is not a set of independent disclosures. It is a cadence and a size profile, and it fingerprints a pipeline or a person.
 
 **Decision on location: it is disclosed in the published disclosure statement that `service.md` section 5 specifies, as an addition to that section's first required content, the telemetry trade.** `frame.md` requires publishers to see all of it before publishing, and `service.md` section 5 assigns this document nothing but the length leak; the aggregate belongs in the same place for the same reason, which is that a publisher deciding whether to publish needs the whole picture in one document rather than the per-relic half. `design-product-surface` writes the sentence at the publishing moment in the MCP tool result, which is a different surface and not this document's.
 
@@ -245,6 +245,14 @@ Nine standing checks. Each names what it catches and what its absence loses, bec
 > These records add up. Every publish and every open is logged with the requesting network address, and every relic keeps its coarse type, the name of the client that published it, and its size. One relic tells the operator very little. Many relics published from one address tell the operator what kinds of files that address publishes, roughly how big they are, and how often, for as long as those records are retained. Relic does not build that profile and does not use it, and the records that would let somebody with operator access build it exist for 90 days. If you publish from a fixed address on a regular schedule, assume the operator can see the schedule and the shape of what you send. The operator still cannot see the contents of any of it.
 
 (Note on title disclosure: storing the publisher-declared plaintext title on the relic row expands what the operator learns server-side. The obligation that any such expansion appear in the published disclosure statement is met: the server slice adds the plaintext title and its trade-off to `/policy` in `packages/relic-server/src/app.ts` under the telemetry section in the same change.)
+
+(Note on cover image disclosure and abuse surface: On 2026-10-13, per-relic cover images were introduced, storing a 1200x630 plaintext raster (PNG or JPEG, up to 512 KB) at `m/cover/{id}/{sha256}` in Cloud Storage. Storing user-derived raster images on the server expands the abuse surface (for example, the potential upload of illicit imagery as link preview cards). This risk is bounded by five controls:
+
+1. Strict server-side raster validation via `validateCoverRaster` in `@relic/format/cover`, rejecting polyglots, non-standard chunks, trailing bytes, and invalid dimensions before any write to storage.
+2. Takedown primitive: `operatorDelete` immediately deletes all stored covers for the relic ID (`store.deleteCovers(relicId)`), clears `row.cover`, and returns `covers_deleted`.
+3. Tombstone and expiry: immediately stop serving the cover (returning 404), reverting any link unfurl to `/assets/card.v1.png`.
+4. Cache bounding: cover responses carry `cache-control: public, max-age=86400`, ensuring any caching in external proxies or unfurlers expires within 24 hours after takedown.
+5. Plain disclosure: `/policy` explicitly discloses that cover pixels are stored server-side and visible without the key, with `cover: false` available to decline.)
 
 ### 5.2 Cap exhaustion and takedown are the same experience for a recipient
 

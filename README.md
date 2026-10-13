@@ -37,10 +37,7 @@ runs in your browser, can use your CPU, and can render whatever it wants.
 The viewer says so on the page before the content renders, and so does
 `/policy`.
 
-`/policy` states the whole trade: the telemetry, the optional plaintext title
-stored in the clear for unfurl cards, and what the operator learns. The frame
-conditions the telemetry on that statement being readable before anybody
-publishes.
+/policy states the whole trade: the telemetry, the optional plaintext title, the optional per-relic cover image raster stored in the clear for unfurl cards, and what the operator learns. The frame conditions the telemetry on that statement being readable before anybody publishes.
 
 ## The packages
 
@@ -77,17 +74,9 @@ restart.
 
 ## Connecting the MCP server
 
-Relic exposes `relic_publish`, which takes a filesystem path (and optional
-`title` for link unfurls) and never inline content, and `relic_describe_client`,
-which explains what the client does with your file without reading it or
-contacting anything.
+Relic exposes `relic_publish`, which takes a filesystem path (and optional `title` and `cover` for link unfurls) and never inline content, and `relic_describe_client`, which explains what the client does with your file without reading it or contacting anything.
 
-It also exposes `relic_republish`, which posts a new version of a file to an
-existing relic's URL. It takes the relic id and a path (with an optional `title`
-to replace or clear the card title); the publish token is never an argument and
-never printed, because the client stored it beside the relic's key at first
-publish and reads it back from there. The server issued that token once and keeps
-only its hash, so the machine that published is the
+It also exposes `relic_republish`, which posts a new version of a file to an existing relic's URL. It takes the relic id and a path (with an optional `title` to replace or clear the card title, and optional `cover` to replace or clear the cover image); the publish token is never an argument and never printed, because the client stored it beside the relic's key at first publish and reads it back from there. The server issued that token once and keeps only its hash, so the machine that published is the
 only machine that can republish: lose that state and nobody, the operator
 included, can authorize another version. Opening the link always serves the
 current version, and the download cap is shared across all versions. A relic
@@ -291,17 +280,9 @@ with security consequences, not a cosmetic inconsistency.
 Something has to run on your machine, because encryption has to happen where
 the plaintext is. That is forced by the product, not chosen.
 
-What is chosen is that it arrives as **readable source rather than a compiled
-binary**. `dist/relic-mcp.js` is a single unminified file of about 1,100
-lines, and it is exactly what executes. The TypeScript it was built from ships
-in the same package. Releases carry [npm provenance][provenance], which is a
-cryptographic attestation binding the published tarball to a specific commit
-and workflow in this repository.
+What is chosen is that it arrives as **readable source rather than a compiled binary**. `dist/relic-mcp.js` is a single unminified file of about 1,100 lines, and it is exactly what executes. The cover rendering page assets in `dist/cover/` contain the unminified cover bundle built from `@relic/viewer`, with vendored React, pdfjs, and sucrase for local document rendering in headless Chrome. The TypeScript it was built from ships in the same package. Releases carry [npm provenance][provenance], which is a cryptographic attestation binding the published tarball to a specific commit and workflow in this repository.
 
-There is also a `relic_describe_client` tool. Call it and the client tells you
-what it does with your file, what leaves the machine, and what the service can
-see, without reading a byte or sending a request. Inspection decoupled from
-execution, which is strictly better than inspecting code that is about to run.
+There is also a `relic_describe_client` tool. Call it and the client tells you what it does with your file, what leaves the machine, and what the service can see, without reading a byte or sending a request. Inspection decoupled from execution, which is strictly better than inspecting code that is about to run. The cover is plaintext pixels of the first screen, stored server-side and served to anyone holding the link without its fragment, including unfurl services and their caches; `cover: false` declines; republishing with it clears; takedown deletes it.
 
 [provenance]: https://docs.npmjs.com/generating-provenance-statements
 

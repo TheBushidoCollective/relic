@@ -257,16 +257,18 @@ The pre-render statement in the viewer (previously a banner above the content) w
 **The repo owner authorised an explicit reversal of that rule.** The blank preview card produced on link unfurls on unfamiliar domains presented the visual shape of a phishing link, creating recipient distrust before the relic could ever be opened. To solve this, a per-relic plaintext title is now permitted.
 
 **What stays constant and what becomes per-relic.**
-- `og:image`, `og:description`, `og:type`, and `og:site_name` remain constant across all relics. `og:type` is `website`, `og:site_name` is `Relic`, and `og:description` is the constant text: "An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
+
+- `og:image`, `og:description`, `og:type`, and `og:site_name` remain constant across all relics. [Amended 2026-10-13: `og:image` is no longer constant across all relics; see the 2026-10-13 decision below for per-relic cover images.] `og:type` is `website`, `og:site_name` is `Relic`, and `og:description` is the constant text: "An encrypted file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
 - `og:title` and the viewer document `<title>` carry the publisher-declared plaintext title (defaulting to the source filename). When titled, `<title>` renders as `{title} · Relic` (using a U+00B7 middle dot, never a dash). When untitled, the fallback title is `A relic` for `og:title` and `twitter:title`, and `Relic` for `<title>`.
 - `og:url` carries `{serviceOrigin}/{id}` when the path segment is a valid relic id, or the service origin root otherwise.
 - Twitter Card tags mirror their Open Graph equivalents: `twitter:card` is `summary_large_image`, with `twitter:title`, `twitter:description`, and `twitter:image`.
 
 **Image asset path and cache policy.**
-The preview card image is served from `/assets/card.v1.png` (a 1200x630 PNG, located in `packages/relic-viewer/public/card.v1.png`). Cache policy is the single exception to the server's blanket `no-store`: `cache-control: public, max-age=31536000, immutable`, alongside `referrer-policy: no-referrer` and `x-content-type-options: nosniff`. Versioning lives in the filename so future asset designs can ship as `card.v2.png` without cache collisions. The image is never gzipped.
+The preview card image is served from `/assets/card.v1.png` (a 1200x630 PNG, located in `packages/relic-viewer/public/card.v1.png`). [Amended 2026-10-13: `card.v1.png` remains the fallback card image when a cover is declined or unavailable; see the 2026-10-13 decision below.] Cache policy is the single exception to the server's blanket `no-store`: `cache-control: public, max-age=31536000, immutable`, alongside `referrer-policy: no-referrer` and `x-content-type-options: nosniff`. Versioning lives in the filename so future asset designs can ship as `card.v2.png` without cache collisions. The image is never gzipped.
 
 **Disclosure obligations and security invariants.**
-- Storing the title in plaintext on the relic row is an acknowledged metadata leak. The published disclosure statement (`/policy` per `docs/spec/service.md` §5) must explicitly state that the publisher-declared title is stored server-side in the clear and served on link unfurls and the viewer document `<title>`.
+
+- Storing the title in plaintext on the relic row is an acknowledged metadata leak. [Amended 2026-10-13: Storing per-relic cover image rasters is an additional acknowledged leak; see the 2026-10-13 decision below.] The published disclosure statement (`/policy` per `docs/spec/service.md` §5) must explicitly state that the publisher-declared title is stored server-side in the clear and served on link unfurls and the viewer document `<title>`.
 - Declining the title is the publisher's choice, not the operator's: a publisher can pass an empty title or clear it on republish, reverting to the constant fallback metadata.
 - Tombstoned, expired, unknown, or malformed relics stop serving the stored title immediately, serving the constant fallback metadata (`A relic`).
 - Serving metadata on `/{id}` continues to mint nothing, increment no open counters, and consume no download cap.
@@ -279,7 +281,8 @@ The unfurl card introduced yesterday (PR #69) revealed a relic's title but said 
 **The coarse renderer class on the card.** The service already holds the coarse renderer class on the relic row (`markdown`, `code`, `html`, `jsx`, `image`, `media`, `archive`, `binary`), declared at publish time and previously used only for server-side telemetry. The card now reveals this class in its description and fallback title.
 
 **What stays constant and what becomes per-class.**
-- `og:image` remains the single constant raster at `/assets/card.v1.png` (with its constant dimension and alt tags). `og:type` (`website`), `og:site_name` (`Relic`), and `twitter:card` (`summary_large_image`) remain constant. The one-raster budget on the service origin and the immutable cache policy (`public, max-age=31536000, immutable`) stay intact.
+
+- `og:image` remains the single constant raster at `/assets/card.v1.png` (with its constant dimension and alt tags). [Amended 2026-10-13: Replaced by per-relic cover rasters with `card.v1.png` retained as fallback; see the 2026-10-13 decision below.] `og:type` (`website`), `og:site_name` (`Relic`), and `twitter:card` (`summary_large_image`) remain constant. The one-raster budget on the service origin and the immutable cache policy (`public, max-age=31536000, immutable`) stay intact for the fallback card.
 - `og:description` and `twitter:description` now reveal the coarse renderer class. [Amended below: copy selects via `CLASS_BEHAVIOUR`, not `isRenderable`; media plays in browser.] The copy combines a phrase naming the kind of thing, one space, and a tail split by `CLASS_BEHAVIOUR` from `@relic/format`:
   - `markdown`: "A Markdown document. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
   - `code`: "A source code file. It opens in your browser, and only someone holding the whole link, including the part after the #, can read it."
@@ -478,3 +481,69 @@ them; trusting a malformed digest fails the fifth.
 
 **The disclosed cost and risk:**
 Running script on `/` puts first-party code onto the origin where local storage holds decryption keys. The original objection in §6.7 remains true: a static page with nothing to execute is the easiest to keep honest. What keeps the list in the browser is the script we serve, which is the same trust a reader already extends to the viewer that holds the key. The CSP's missing `connect-src` refuses request APIs, but CSP does not govern top-level navigation, and `img-src 'self'` still permits a same-origin image request whose URL could carry data to our own server. The script makes no requests, and tests pin that behaviour; the rest is operator intent in the code we author.
+
+## 2026-10-13: Per-relic cover images on the unfurl card
+
+The rule that `og:image` is one constant raster across all relics and that the operator learns only title, class, and coarse metadata was reversed by Jason Waldrip on 2026-10-13.
+
+**What changed.**
+The publisher's MCP client (`relic-mcp`) now renders a 1200x630 cover image of the document's first screen in local headless Chrome at publish and republish time, and uploads it via `POST /api/relics/{id}/cover`. For relics with an active cover image, the unfurl card serves `og:image` from `/{id}/cover/{sha256}.{png|jpg}`, displaying a full-bleed picture of the opening of the content as a recipient sees it.
+
+**What stays unchanged.**
+
+- The encryption key remains in the URL fragment and never reaches the server.
+- The file's ciphertext continues to upload directly from the client to Google Cloud Storage under signed upload grants, never transiting the application server.
+- Client-side decryption and execution within the isolated viewer sandbox remain intact.
+- When a relic has no cover, when `cover: false` was passed, or when the relic is expired, tombstoned, unknown, or a store read throws, `og:image` falls back to `{serviceOrigin}/assets/card.v1.png` with the constant fallback metadata tags and immutable caching (`max-age=31536000, immutable`).
+
+**What it buys.**
+High-fidelity, legible link previews on chat and social platforms (Slack, Discord, iMessage, Twitter, etc.) displaying an authentic, full-bleed 1200x630 rendering of the top of the content as the recipient sees it, replacing the generic blank-accession-card preview. Body text reaches about 14 px at a 500 px unfurl width, making text legible before clicking.
+
+**What it costs.**
+The cover is plaintext pixels of the first screen, stored server-side and served to anyone holding the link without its fragment, including unfurl services and their caches. This is an acknowledged plaintext leak of visual content. `cover: false` declines; republishing with `cover: false` clears; takedown deletes it.
+
+**The renderer choice and why server-served render pages were rejected.**
+Cover rendering happens entirely on the publisher's machine (`relic-mcp`) using a local headless browser (system Chrome, Chromium, or Edge). Option (c) from the architecture evaluation was chosen: `relic-viewer` builds a dedicated cover renderer (`buildCover` in `packages/relic-viewer/build.ts`) that outputs to `packages/relic-mcp/dist/cover/`. It is never written into `packages/relic-viewer/dist/`, which ensures the public service origin can never serve the cover rendering page. Plaintext reaches Chrome via CDP Fetch interception on `https://cover.relic.invalid`, so no content leaves the machine during rendering.
+
+Server-served render pages were rejected because `docs/frame.md` locked constraint 1 specifies that untrusted content must render on a separate usercontent origin, and serving plaintext render pages from the service origin or placing the server in the data path would violate zero-knowledge architecture. The server cannot render content without receiving plaintext bytes, which would destroy the core zero-knowledge property.
+
+**The Chrome egress flags with the planner's measurements.**
+Chrome is launched with strict network containment flags: `--host-resolver-rules=MAP * ~NOTFOUND`, `--proxy-server=http://proxy.relic.invalid:1`, `--proxy-bypass-list=<-loopback>`, `--webrtc-ip-handling-policy=disable_non_proxied_udp`, and `--disable-quic`.
+
+Measurements by the planner confirmed that CDP request interception does not observe network traffic originating from an isolated sandboxed iframe (`<iframe sandbox="allow-scripts">`). Therefore, containment cannot rely on CDP interception alone and requires browser-level network denial flags. Omitting `--webrtc-ip-handling-policy` allowed UDP packets to escape even when an invalid proxy was configured (measured). These flags ensure all TCP, UDP, and DNS egress is blocked.
+
+**Validation.**
+Cover rasters are validated by `validateCoverRaster` in `@relic/format/cover`, run by the client prior to upload and enforced by the server on `POST /api/relics/{id}/cover`. Rasters must be valid PNG or JPEG images under 524,288 bytes (512 KB), with dimensions exactly 1200x630. For PNG: valid 8-byte signature, 13-byte IHDR (8-bit RGB or RGBA, non-interlaced), contiguous IDAT chunks, empty IEND, and zero trailing bytes after IEND (rejecting polyglots and appended payloads). Ancillary chunks (tEXt, iTXt, zTXt) are stripped. For JPEG: valid SOI, JFIF APP0, single SOF0/SOF2 baseline or progressive marker, and zero trailing bytes after EOI. Non-standard application markers and comments (APP1-APP15, COM) are stripped.
+
+**Serving and cache policy.**
+Cover images are served at `GET|HEAD /{id}/cover/{sha256}.{png|jpg}`, content-addressed by the SHA-256 of the validated raster bytes. Response headers:
+
+- `content-type: <cover.type>`
+- `content-length: <n>`
+- `cache-control: public, max-age=86400`
+- `x-content-type-options: nosniff`
+- `referrer-policy: no-referrer`
+- `x-robots-tag: noindex`
+
+Caching uses a 1-day max-age (`max-age=86400`) instead of immutable, so that takedown tails in honoring caches are bounded to 24 hours. Because the URL is content-addressed, a new version uploaded on republish produces a distinct URL and refreshes unfurl caches immediately. The route mints no download URLs, touches no counters, and does not consume the relic download cap.
+
+**Fallback.**
+When a relic has no cover, when `cover: false` was selected, or when the relic is expired, tombstoned, unknown, or a store read throws, `og:image` and `twitter:image` point to `{serviceOrigin}/assets/card.v1.png` with the constant fallback metadata tags and immutable caching (`max-age=31536000, immutable`).
+
+**Release order.**
+
+1. Server deployment (`deploy.yml`): deploys the upload route, cover route, and updated `/policy` disclosure statement to production. No released client uploads covers yet, so disclosure strictly precedes capability.
+2. Post-deploy verification: test the upload and serving endpoints against `https://relik.link` using the local client built from source.
+3. Client release (`publish-mcp.yml`): release the updated `relic-mcp` package to npm with a version bump, shipping tool schemas, descriptions, INSTRUCTIONS item 8, SKILL.md, and `dist/cover/`.
+4. Post-release verification: verify end-to-end publish using `npx relic-mcp@<version>`.
+5. Live unfurl check: Jason pastes a live link into Slack or iMessage to confirm real unfurl behavior in production.
+
+**The guards that replace the lost guarantee.**
+The lost guarantee was that the service origin serves exactly one constant raster. The replacement guarantee is: The service serves exactly two kinds of raster: `/assets/card.v1.png`, and a cover that a live row references for its current version and that passed `validateCoverRaster`. A declined cover leaves nothing in the row, the store, or any URL.
+Guards:
+
+- G1 (server state table): `app.test.ts` tests that missing cover, declined cover, stale version, tombstone, expiry, unknown ID, store failure, hash mismatch, or extension mismatch causes shell `og:image` to fall back to `card.v1.png` and cover route to return 404.
+- G2 (raster validator): `cover.test.ts` rejects PNG+ZIP polyglots, tEXt chunks, bad dimensions, interlacing, 16-bit, bad CRC, oversized IDAT, JPEG COM/APP1 markers, and trailing data.
+- G3 (declined leaves nothing): Republish with `cover: false` clears `row.cover`, deletes stored cover objects in GCS (`m/cover/{id}/*`), and old cover URLs return 404. Client makes zero render calls and zero cover requests.
+- G4 (renderer containment): Chrome launch arguments are pinned by exact-list tests, and egress tests assert zero packets escape.
+- G5 (service separation): `relic-viewer/dist/` contains none of the cover files, ensuring the public web service never serves the cover renderer page.
