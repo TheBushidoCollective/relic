@@ -236,13 +236,21 @@ This materially changes what section 2.3's leaves cost. **Leaf 3 and leaf 4 sacr
 
 **No custom object metadata is set at upload. The grant signs no `x-goog-meta-*` header, and none is required.**
 
-Nothing needs it. The renderer class, the optional publisher-declared plaintext title, the publishing client name and version, the publishing IP, and the timestamp all live on the relic row the app server writes at grant time, which is where `frame.md` puts the telemetry and where `service.md` 1.2 and §4 read it from. (Note: the plaintext title is the one publisher-declared field stored in the clear, per `docs/decisions.md`.) `object_length` and `object_crc32c` for the mint response come from the object's non-editable metadata rather than from anything a client sets. `format.md` 3.2 bars anything content-descriptive, which removes the only fields anyone would be tempted to add. A field with no consumer should not exist.
+Nothing needs it. The renderer class, the optional publisher-declared plaintext title, the publishing client name and version, the publishing IP, and the timestamp all live on the relic row the app server writes at grant time, which is where `frame.md` puts the telemetry and where `service.md` 1.2 and §4 read it from. (Note: the plaintext title is stored in the clear, joined on 2026-10-13 by per-relic cover image rasters stored at `m/cover/{id}/{sha256}` in the storage bucket, per `docs/decisions.md`.) `object_length` and `object_crc32c` for the mint response come from the object's non-editable metadata rather than from anything a client sets. `format.md` 3.2 bars anything content-descriptive, which removes the only fields anyone would be tempted to add. A field with no consumer should not exist.
 
 **The two consequences both locked documents name.**
 
 *Whether the grant must sign metadata constraints:* no, and on two of three branches that is also enforceable, because a POST policy and a signed PUT both fix the header set the signature covers. **On the resumable branch it is not enforceable, and this is where section 2's evidence bears.** The data leg carries no signed URL and accepts `X-Goog-Meta-` prefixed headers on the final request, so an uploader can attach arbitrary custom metadata to the object and the grant cannot stop it. **If leaf 1 or leaf 2 is taken, the app server strips custom metadata at first mint**, which it can do with credentials it already holds, since after a custom metadata pair exists "you can delete the key or change the value" ([metadata](https://cloud.google.com/storage/docs/metadata)). Probe C decides whether that step is needed at all.
 
 *Whether the blocklist scanner reads metadata or only object bytes:* **only object bytes.** No metadata is set by design, so there is nothing legitimate to read, and on the resumable branch anything present is attacker-supplied. Feeding attacker-controlled strings into the abuse pipeline to save a hash computation is a bad trade in both directions.
+
+### 5.4 Cover image storage (`m/cover/`)
+
+Per-relic cover image rasters (1200x630 pixels, up to 512 KB, PNG or JPEG) are stored in Google Cloud Storage at the content-addressed prefix `m/cover/{id}/{sha256}`. They are written by the app server upon receiving a validated `POST /api/relics/{id}/cover` request from the publishing client, using credentials held by the app server.
+
+- **Content-addressing:** The object path includes the lowercase hex SHA-256 of the validated raster bytes. This allows content-addressed caching: a new version with a changed cover gets a new URL, cache-busting unfurlers automatically.
+- **Content-type:** Set to `image/png` or `image/jpeg` matching the raster format.
+- **Lifecycle and deletion:** Cover objects have no bucket lifecycle rule. When a new version is published or republishing with `cover: false` occurs, `deleteCovers(relicId)` deletes all existing cover objects under `m/cover/{id}/` and clears `row.cover`. When a relic is tombstoned, `operatorDelete` deletes all cover objects. Deleted cover objects sit in Cloud Storage soft delete per the bucket's 7-day retention policy, exactly like ciphertext objects.
 
 ## 6. The GCP project topology
 

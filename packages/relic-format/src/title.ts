@@ -1,13 +1,15 @@
 /**
  * The relic's plaintext title (`spec/viewer.md` 6.2).
  *
- * Every other field this package defines lives inside the ciphertext. This
- * one does not. The title is the one thing about a relic that the service
- * stores in the clear, so that a pasted link previews as something legible
- * rather than as a blank card on an unfamiliar domain, which is the visual
- * shape of a phishing link. The cost is stated where it is paid: the title is
- * readable by the operator, by every chat client that generates a preview,
- * and by anyone who fetches the URL without holding the key.
+ * Every other field this package defines lives inside the ciphertext,
+ * with one exception added on 2026-10-13: the per-relic cover image
+ * raster (`cover.ts`), rendered by default and declined with `cover: false`.
+ * Along with the cover image, the title is stored by the service in the
+ * clear, so that a pasted link previews as something legible rather than as
+ * a blank card on an unfamiliar domain, which is the visual shape of a
+ * phishing link. The cost is stated where it is paid: the title is readable
+ * by the operator, by every chat client that generates a preview, and by
+ * anyone who fetches the URL without holding the key.
  *
  * It lives in this package rather than at either end because both ends have
  * to agree on it and neither owns it. The client normalizes what a publisher
