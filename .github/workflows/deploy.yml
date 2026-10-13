@@ -221,7 +221,7 @@ jobs:
           echo "the published disclosure is readable before anybody publishes"
           curl -fsS -o/tmp/policy "$SERVICE/policy"
           grep -q 'Your browser never sends the' /tmp/policy
-
+          grep -q 'A cover image, unencrypted' /tmp/policy
           echo "the abuse intake answers, because it is a go/no-go obligation"
           curl -fsS -o/tmp/abuse "$SERVICE/abuse"
           grep -q '<form method="post"' /tmp/abuse
@@ -231,6 +231,17 @@ jobs:
             "$SERVICE/api/relics/aaaaaaaaaaaaaaaaaaaaaaaaaa/mint" -X POST)
           test "$CODE" = 404
           grep -q 'relic_not_found' /tmp/b
+
+          echo "a never-issued id on cover upload is a problem document, not a stack trace"
+          CODE=$(curl -sS -o/tmp/b -w '%{http_code}' \
+            "$SERVICE/api/relics/aaaaaaaaaaaaaaaaaaaaaaaaaa/cover" -X POST -H 'content-type: application/json' -d '{}')
+          test "$CODE" = 404
+          grep -q 'relic_not_found' /tmp/b
+
+          echo "a never-issued id on cover fetch returns 404"
+          CODE=$(curl -sS -o/dev/null -w '%{http_code}' \
+            "$SERVICE/aaaaaaaaaaaaaaaaaaaaaaaaaa/cover/0000000000000000000000000000000000000000000000000000000000000000.png")
+          test "$CODE" = 404
 
           echo "the shell does not carry the pdf renderer"
           # The lazy split is the reason a markdown reader does not download a

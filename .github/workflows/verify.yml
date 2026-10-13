@@ -66,3 +66,8 @@ jobs:
       # of its dist.
       - name: Test
         run: bun run test
+
+      - name: Cover path
+        run: |
+          bun run --cwd packages/relic-mcp build
+          RELIC_CHROME_PATH="$(command -v google-chrome)" bun packages/relic-mcp/test/cover-path.ts
