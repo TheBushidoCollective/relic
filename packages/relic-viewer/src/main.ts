@@ -1228,8 +1228,7 @@ export function renderMediaView(view: ReadyView): HTMLElement {
   if (customPlayer.audioCard) {
     wrapper.appendChild(customPlayer.audioCard);
   }
-  wrapper.appendChild(player);
-  wrapper.appendChild(customPlayer.chrome);
+  wrapper.appendChild(customPlayer.stage);
   wrapper.addEventListener('cleanup', () => customPlayer.destroy());
   const strip = document.createElement('div');
   strip.className = 'media-meta-strip';

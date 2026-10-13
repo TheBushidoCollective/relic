@@ -12,6 +12,11 @@
  * 4. Comment markers (moments, spans, clusters)
  * 5. Pending selection (with draggable, keyboard-steppable span end handle)
  * 6. Hover indicator (vertical rule, timecode tag, comment action button)
+ *
+ * The picture and its controls sit together in a stage, and the stage is what
+ * goes fullscreen. There the picture fills the screen on black, the controls
+ * lie over the bottom of the frame, and after a spell of idle playback they
+ * fade out with the cursor so the frame is all that is left.
  */
 
 import type { CommentAnchor } from '@relic/format';
@@ -58,9 +63,19 @@ export interface MediaPlayerOptions {
   readonly filename?: string;
 }
 
+/**
+ * How long fullscreen playback runs with no pointer or key activity before the
+ * controls fade and the cursor hides, leaving the bare frame.
+ */
+export const FULLSCREEN_IDLE_MS = 2500;
+
 export interface MediaPlayerHandle {
+  /**
+   * The media element and its controls, and nothing else. This is what goes
+   * fullscreen, so the filename strip and the page card stay on the page.
+   */
+  readonly stage: HTMLElement;
   readonly chrome: HTMLElement;
-  readonly container: HTMLElement;
   readonly audioCard?: HTMLElement | undefined;
   readonly track: HTMLElement;
   readonly destroy: () => void;
@@ -278,6 +293,16 @@ export function createMediaPlayer(
   controlsBar.append(leftControls, rightControls);
   chrome.appendChild(controlsBar);
 
+  // The stage is the picture and its controls, and it is what fullscreen
+  // takes. Fullscreening anything wider brings the page card with it: the
+  // reading width, the filename strip, and controls stacked under a picture
+  // capped at the inline height instead of laid over a frame that fills the
+  // screen.
+  const stage = document.createElement('div');
+  stage.className = 'media-stage';
+  stage.append(media, chrome);
+  const doc = chrome.ownerDocument ?? document;
+
   // --------------------------------------------------------------------------
   // State and Helpers
   // --------------------------------------------------------------------------
@@ -288,15 +313,31 @@ export function createMediaPlayer(
     currentSeconds: number;
     hasMoved: boolean;
   } | null = null;
+  let handleDragging = false;
+  let pointerOverChrome = false;
+  let cancelIdle: (() => void) | undefined;
 
   const getDuration = (): number => {
     const d = media.duration;
     return Number.isFinite(d) && d > 0 ? d : 0;
   };
 
+  const isStageFullscreen = (): boolean => doc.fullscreenElement === stage;
+
+  const leaveFullscreen = (): Promise<void> => {
+    if (typeof doc.exitFullscreen !== 'function') return Promise.resolve();
+    return Promise.resolve(doc.exitFullscreen()).then(() => undefined);
+  };
+
+  /**
+   * Sends an aim to the composer. `afterAim` runs once the aim has gone out,
+   * so whatever a caller does next (focusing the span handle) still lands
+   * after the composer has taken its turn, on either path below.
+   */
   const dispatchTimeAim = (
     anchor: Extract<CommentAnchor, { kind: 'time' }>,
-    focus = true
+    focus = true,
+    afterAim?: () => void
   ): void => {
     const roundedAnchor: Extract<CommentAnchor, { kind: 'time' }> = {
       kind: 'time',
@@ -306,14 +347,26 @@ export function createMediaPlayer(
         : {}),
       ...(anchor.rect !== undefined ? { rect: anchor.rect } : {}),
     };
-    if (typeof chrome.dispatchEvent === 'function') {
-      chrome.dispatchEvent(
-        createCustomEvent('relic:time-aim', {
-          anchor: roundedAnchor,
-          focus,
-        })
-      );
+    const send = (): void => {
+      if (typeof chrome.dispatchEvent === 'function') {
+        chrome.dispatchEvent(
+          createCustomEvent('relic:time-aim', {
+            anchor: roundedAnchor,
+            focus,
+          })
+        );
+      }
+      afterAim?.();
+    };
+    // An aim that focuses opens the composer, which lives in the sidebar,
+    // outside the fullscreen element and so invisible from inside it. Leave
+    // fullscreen first and open the composer on the page that comes back. A
+    // drag aim only paints the selection on the scrubber, so it stays put.
+    if (focus && isStageFullscreen()) {
+      leaveFullscreen().then(send, send);
+      return;
     }
+    send();
   };
 
   const updateTimeDisplay = (): void => {
@@ -407,20 +460,89 @@ export function createMediaPlayer(
     media.muted = !media.muted;
   };
 
+  // --------------------------------------------------------------------------
+  // Fullscreen and the idle frame
+  // --------------------------------------------------------------------------
   const toggleFullscreen = (): void => {
-    const doc = chrome.ownerDocument ?? document;
-    const target = media.parentElement ?? media;
-    if (doc.fullscreenElement) {
-      if (typeof doc.exitFullscreen === 'function') {
-        doc.exitFullscreen().catch(() => {});
-      }
-    } else {
-      if (typeof target.requestFullscreen === 'function') {
-        target.requestFullscreen().catch(() => {});
-      } else if (typeof media.requestFullscreen === 'function') {
-        media.requestFullscreen().catch(() => {});
-      }
+    if (isStageFullscreen()) {
+      leaveFullscreen().catch(() => {});
+      return;
     }
+    if (typeof stage.requestFullscreen === 'function') {
+      Promise.resolve(stage.requestFullscreen({ navigationUI: 'hide' })).catch(
+        () => {}
+      );
+    }
+  };
+
+  // Keyboard focus, not any focus. A press on the picture focuses the
+  // scrubber, and Chrome focuses a button it clicks, so plain focus would pin
+  // the controls on screen after the first click. A reader stepping through
+  // the controls by keyboard matches `:focus-visible` and keeps them.
+  const keyboardFocusInChrome = (): boolean => {
+    const active = doc.activeElement;
+    if (!active || !chrome.contains(active)) return false;
+    try {
+      return active.matches(':focus-visible');
+    } catch {
+      return false;
+    }
+  };
+
+  const clearIdleTimer = (): void => {
+    cancelIdle?.();
+    cancelIdle = undefined;
+  };
+
+  const goIdle = (): void => {
+    cancelIdle = undefined;
+    if (
+      !isStageFullscreen() ||
+      media.paused ||
+      pointerOverChrome ||
+      dragState !== null ||
+      handleDragging ||
+      keyboardFocusInChrome()
+    ) {
+      return;
+    }
+    stage.classList.add('is-idle');
+  };
+
+  // Any activity brings the controls back and restarts the wait. The wait only
+  // runs while the stage is fullscreen and playing, so pausing or leaving
+  // fullscreen shows the controls and keeps them. A wait that ends while one
+  // of the guards in `goIdle` holds simply lapses: every way out of a guard
+  // (pointer leaving the controls, focus leaving them, a drag releasing,
+  // playback resuming) is itself activity and starts a fresh one.
+  const wake = (): void => {
+    clearIdleTimer();
+    stage.classList.remove('is-idle');
+    if (!isStageFullscreen() || media.paused) return;
+    const timer = setTimeout(goIdle, FULLSCREEN_IDLE_MS);
+    cancelIdle = () => clearTimeout(timer);
+  };
+
+  const onFullscreenChange = (): void => {
+    const isFs = isStageFullscreen();
+    fullscreenBtn?.replaceChildren(
+      createSvgIcon(isFs ? ICONS.fullscreenExit : ICONS.fullscreen)
+    );
+    fullscreenBtn?.setAttribute(
+      'aria-label',
+      isFs ? 'Exit fullscreen' : 'Fullscreen'
+    );
+    wake();
+  };
+
+  const onPointerEnterChrome = (): void => {
+    pointerOverChrome = true;
+    wake();
+  };
+
+  const onPointerLeaveChrome = (): void => {
+    pointerOverChrome = false;
+    wake();
   };
 
   const seekRelative = (
@@ -464,17 +586,17 @@ export function createMediaPlayer(
   muteBtn.addEventListener('click', toggleMute);
   if (fullscreenBtn) {
     fullscreenBtn.addEventListener('click', toggleFullscreen);
-    const doc = chrome.ownerDocument ?? document;
-    doc.addEventListener('fullscreenchange', () => {
-      const isFs = Boolean(doc.fullscreenElement);
-      fullscreenBtn?.replaceChildren(
-        createSvgIcon(isFs ? ICONS.fullscreenExit : ICONS.fullscreen)
-      );
-      fullscreenBtn?.setAttribute(
-        'aria-label',
-        isFs ? 'Exit fullscreen' : 'Fullscreen'
-      );
-    });
+    doc.addEventListener('fullscreenchange', onFullscreenChange);
+    stage.addEventListener('pointermove', wake);
+    stage.addEventListener('pointerdown', wake);
+    stage.addEventListener('pointerup', wake);
+    stage.addEventListener('keydown', wake);
+    chrome.addEventListener('pointerenter', onPointerEnterChrome);
+    chrome.addEventListener('pointerleave', onPointerLeaveChrome);
+    chrome.addEventListener('focusin', wake);
+    chrome.addEventListener('focusout', wake);
+    media.addEventListener('play', wake);
+    media.addEventListener('pause', wake);
   }
 
   // Click on media picture focuses the player and toggles play/pause
@@ -635,8 +757,7 @@ export function createMediaPlayer(
       t: boundedTime,
     };
     setPendingAnchor({ t: boundedTime });
-    dispatchTimeAim(anchor, true);
-    spanHandle.focus();
+    dispatchTimeAim(anchor, true, () => spanHandle.focus());
   });
 
   // --------------------------------------------------------------------------
@@ -646,10 +767,10 @@ export function createMediaPlayer(
     if (typeof event.stopPropagation === 'function') event.stopPropagation();
     if (typeof event.preventDefault === 'function') event.preventDefault();
     spanHandle.focus();
-    let handleActive = true;
+    handleDragging = true;
 
     const onHandleMove = (e: PointerEvent): void => {
-      if (!handleActive || pendingSpan === null) return;
+      if (!handleDragging || pendingSpan === null) return;
       const duration = getDuration();
       if (duration <= 0) return;
 
@@ -678,7 +799,7 @@ export function createMediaPlayer(
     };
 
     const onHandleUp = (): void => {
-      handleActive = false;
+      handleDragging = false;
       if (typeof window !== 'undefined') {
         window.removeEventListener('pointermove', onHandleMove);
         window.removeEventListener('pointerup', onHandleUp);
@@ -874,17 +995,23 @@ export function createMediaPlayer(
   updateMuteState();
 
   return {
+    stage,
     chrome,
-    container: chrome,
     audioCard,
     track,
     destroy: () => {
+      clearIdleTimer();
       if (typeof media.removeEventListener === 'function') {
         media.removeEventListener('play', updatePlayState);
         media.removeEventListener('pause', updatePlayState);
+        media.removeEventListener('play', wake);
+        media.removeEventListener('pause', wake);
         media.removeEventListener('timeupdate', updateTimeDisplay);
         media.removeEventListener('progress', updateBufferedDisplay);
         media.removeEventListener('volumechange', updateMuteState);
+      }
+      if (typeof doc.removeEventListener === 'function') {
+        doc.removeEventListener('fullscreenchange', onFullscreenChange);
       }
       if (typeof chrome.removeEventListener === 'function') {
         chrome.removeEventListener('relic:time-selection', onTimeSelection);
