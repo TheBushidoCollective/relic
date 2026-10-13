@@ -79,10 +79,12 @@ export function toDatestamp(epochMillis: number): string {
   return toTimestamp(epochMillis).slice(0, 8);
 }
 
-export async function sha256Hex(value: string): Promise<string> {
+export async function sha256Hex(value: string | Uint8Array): Promise<string> {
+  const bytes =
+    typeof value === 'string' ? new TextEncoder().encode(value) : value;
   const digest = await crypto.subtle.digest(
     'SHA-256',
-    new TextEncoder().encode(value)
+    bytes as unknown as BufferSource
   );
   return hex(new Uint8Array(digest));
 }

@@ -6,6 +6,7 @@
  */
 
 import { ciphertextCapBytes, PLAINTEXT_CAP_BYTES } from '@relic/format';
+import { COVER_CAP_BYTES } from '@relic/format/cover';
 
 export interface RelicConfig {
   /** The service origin: the API and the PWA shell. */
@@ -22,6 +23,7 @@ export interface RelicConfig {
   /** The signed grant's ciphertext constraint, derived from the above. */
   readonly ciphertextCapBytes: number;
 
+  readonly coverCapBytes: number;
   /**
    * The largest publisher-supplied lifetime, in days, that a grant will
    * record. Bounds the opt-in so a lifetime stays a commitment inside the
@@ -94,6 +96,7 @@ export const DEFAULT_CONFIG: RelicConfig = {
   plaintextCapBytes: PLAINTEXT_CAP_BYTES,
   ciphertextCapBytes: ciphertextCapBytes(),
 
+  coverCapBytes: COVER_CAP_BYTES,
   maxTtlDays: 3650,
   urlValiditySeconds: 15 * 60,
   minViableValiditySeconds: 60,

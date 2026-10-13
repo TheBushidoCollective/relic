@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import { CLASS_BEHAVIOUR, RENDERER_CLASSES } from '@relic/format';
+import { COVER_KINDS } from '@relic/format/cover';
 import {
   BEHAVIOUR_TAILS,
   CARD_DESCRIPTION,
   CLASS_PHRASES,
   CLASS_TITLES,
+  COVER_ALT,
   cardCopy,
   FALLBACK_TITLE,
 } from '../src/card.ts';
@@ -59,5 +61,38 @@ describe('cardCopy', () => {
     expect(copy.title).toBe('A PDF relic');
     expect(copy.description).toContain('It opens in your browser');
     expect(copy.description).not.toContain('downloads to your device');
+  });
+});
+
+describe('COVER_ALT', () => {
+  test('accounts for every CoverKind', () => {
+    for (const kind of COVER_KINDS) {
+      expect(COVER_ALT[kind]).toBeDefined();
+      expect(typeof COVER_ALT[kind]).toBe('string');
+      expect(COVER_ALT[kind].length).toBeGreaterThan(0);
+    }
+  });
+
+  test('matches the exact phrases required by the contract', () => {
+    expect(COVER_ALT.markdown).toBe(
+      'The opening of this Markdown document, as it renders.'
+    );
+    expect(COVER_ALT.code).toBe(
+      'The first lines of this code file, as they render.'
+    );
+    expect(COVER_ALT.html).toBe('The top of this HTML page, as it renders.');
+    expect(COVER_ALT.jsx).toBe('The top of this JSX component, as it renders.');
+    expect(COVER_ALT.image).toBe('This image, cropped to the card.');
+    expect(COVER_ALT.pdf).toBe("The top of this PDF's first page.");
+    expect(COVER_ALT.video).toBe(
+      'A frame from the opening seconds of this video.'
+    );
+    expect(COVER_ALT['audio-artwork']).toBe(
+      'The artwork embedded in this audio file.'
+    );
+    expect(COVER_ALT['audio-waveform']).toBe(
+      'The waveform of this audio file.'
+    );
+    expect(COVER_ALT.archive).toBe('The list of files inside this archive.');
   });
 });

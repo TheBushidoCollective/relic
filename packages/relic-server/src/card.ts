@@ -37,6 +37,7 @@ import {
   type ClassBehaviour,
   type RendererClass,
 } from '@relic/format';
+import type { CoverKind } from '@relic/format/cover';
 export const CLASS_PHRASES: Record<RendererClass, string> = {
   markdown: 'A Markdown document.',
   code: 'A source code file.',
@@ -101,3 +102,16 @@ export function cardCopy(rendererClass: RendererClass | undefined): CardCopy {
     description: `${phrase} ${tail}`,
   };
 }
+
+export const COVER_ALT: Readonly<Record<CoverKind, string>> = {
+  markdown: 'The opening of this Markdown document, as it renders.',
+  code: 'The first lines of this code file, as they render.',
+  html: 'The top of this HTML page, as it renders.',
+  jsx: 'The top of this JSX component, as it renders.',
+  image: 'This image, cropped to the card.',
+  pdf: "The top of this PDF's first page.",
+  video: 'A frame from the opening seconds of this video.',
+  'audio-artwork': 'The artwork embedded in this audio file.',
+  'audio-waveform': 'The waveform of this audio file.',
+  archive: 'The list of files inside this archive.',
+};

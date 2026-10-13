@@ -12,6 +12,7 @@ import type { RelicRow } from '../src/store.ts';
  */
 function fakeGcs() {
   const objects = new Map<string, { body: string; generation: number }>();
+  const media = new Map<string, Uint8Array>();
   let nextGeneration = 1;
   /**
    * Names to advance one generation just before the next write to them, which
@@ -60,10 +61,18 @@ function fakeGcs() {
         }
       }
 
-      objects.set(name, {
-        body: String(init?.body ?? ''),
-        generation: nextGeneration++,
-      });
+      if (init?.body instanceof Uint8Array) {
+        media.set(name, init.body);
+        objects.set(name, {
+          body: '',
+          generation: nextGeneration++,
+        });
+      } else {
+        objects.set(name, {
+          body: String(init?.body ?? ''),
+          generation: nextGeneration++,
+        });
+      }
       return new Response('{}', { status: 200 });
     }
 
@@ -84,7 +93,15 @@ function fakeGcs() {
 
       if (method === 'DELETE') {
         objects.delete(name);
+        media.delete(name);
         return new Response('', { status: 204 });
+      }
+
+      if (media.has(name)) {
+        return new Response(media.get(name) as BodyInit, {
+          status: 200,
+          headers: { 'x-goog-generation': '1' },
+        });
       }
 
       const found = objects.get(name);
@@ -760,5 +777,156 @@ describe('gcsStore', () => {
     expect(
       await store.updateComment('relic', 'ghost', { resolved: null })
     ).toBeUndefined();
+  });
+
+  describe('cover operations', () => {
+    test('putCover stores object, updates row.cover via CAS, and deletes older objects under prefix', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      const r = row({ id: 'r1', version: 1 });
+      await store.putRelic(r);
+
+      const bytesA = new Uint8Array([1, 2, 3, 4]);
+      const coverA = {
+        version: 1,
+        sha256:
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        type: 'image/png' as const,
+        kind: 'markdown' as const,
+        bytes: 4,
+        uploadedAt: 1000,
+      };
+
+      const resultA = await store.putCover('r1', coverA, bytesA);
+      expect(resultA).toBe('stored');
+      expect(gcs.objects.has(`m/cover/r1/${coverA.sha256}`)).toBe(true);
+
+      const updatedRow = await store.getRelic('r1');
+      expect(updatedRow?.cover).toEqual(coverA);
+
+      const fetchedBytesA = await store.getCoverBytes('r1', coverA.sha256);
+      expect(fetchedBytesA).toEqual(bytesA);
+
+      const bytesB = new Uint8Array([5, 6, 7, 8]);
+      const coverB = {
+        version: 1,
+        sha256:
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        type: 'image/png' as const,
+        kind: 'code' as const,
+        bytes: 4,
+        uploadedAt: 2000,
+      };
+
+      const resultB = await store.putCover('r1', coverB, bytesB);
+      expect(resultB).toBe('stored');
+      expect(gcs.objects.has(`m/cover/r1/${coverB.sha256}`)).toBe(true);
+      // Old cover object deleted
+      expect(gcs.objects.has(`m/cover/r1/${coverA.sha256}`)).toBe(false);
+
+      const coversList = await store.listCovers('r1');
+      expect(coversList).toEqual([coverB.sha256]);
+    });
+
+    test('putCover deletes just-written object and returns stale_version when version mismatches', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      const r = row({ id: 'r2', version: 2 });
+      await store.putRelic(r);
+
+      const bytes = new Uint8Array([1, 2, 3]);
+      const cover = {
+        version: 1,
+        sha256:
+          'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        type: 'image/png' as const,
+        kind: 'html' as const,
+        bytes: 3,
+        uploadedAt: 1000,
+      };
+
+      const res = await store.putCover('r2', cover, bytes);
+      expect(res).toBe('stale_version');
+      expect(gcs.objects.has(`m/cover/r2/${cover.sha256}`)).toBe(false);
+
+      const rAfter = await store.getRelic('r2');
+      expect(rAfter?.cover).toBeUndefined();
+    });
+
+    test('putCover deletes just-written object and returns not_found when row does not exist', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+
+      const bytes = new Uint8Array([1, 2, 3]);
+      const cover = {
+        version: 1,
+        sha256:
+          'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+        type: 'image/png' as const,
+        kind: 'image' as const,
+        bytes: 3,
+        uploadedAt: 1000,
+      };
+
+      const res = await store.putCover('ghost', cover, bytes);
+      expect(res).toBe('not_found');
+      expect(gcs.objects.has(`m/cover/ghost/${cover.sha256}`)).toBe(false);
+    });
+
+    test('deleteCovers lists m/cover/{id}/, issues a DELETE per object, and clears row.cover by CAS', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      const r = row({ id: 'r3', version: 1 });
+      await store.putRelic(r);
+
+      const coverA = {
+        version: 1,
+        sha256:
+          '1111111111111111111111111111111111111111111111111111111111111111',
+        type: 'image/png' as const,
+        kind: 'pdf' as const,
+        bytes: 4,
+        uploadedAt: 1000,
+      };
+      await store.putCover('r3', coverA, new Uint8Array([1, 2, 3, 4]));
+
+      // Add an extra object under the prefix to verify all are deleted
+      gcs.objects.set('m/cover/r3/orphan', { body: 'orphan', generation: 99 });
+
+      expect(gcs.objects.has(`m/cover/r3/${coverA.sha256}`)).toBe(true);
+      expect(gcs.objects.has('m/cover/r3/orphan')).toBe(true);
+
+      const deletedCount = await store.deleteCovers('r3');
+      expect(deletedCount).toBe(2);
+      expect(gcs.objects.has(`m/cover/r3/${coverA.sha256}`)).toBe(false);
+      expect(gcs.objects.has('m/cover/r3/orphan')).toBe(false);
+
+      const rAfter = await store.getRelic('r3');
+      expect(rAfter?.cover).toBeUndefined();
+    });
+
+    test('beginVersion clears row.cover', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      const r = row({ id: 'r4', version: 1 });
+      await store.putRelic(r);
+
+      const cover = {
+        version: 1,
+        sha256:
+          '2222222222222222222222222222222222222222222222222222222222222222',
+        type: 'image/png' as const,
+        kind: 'video' as const,
+        bytes: 4,
+        uploadedAt: 1000,
+      };
+      await store.putCover('r4', cover, new Uint8Array([1, 2, 3, 4]));
+      expect((await store.getRelic('r4'))?.cover).toBeDefined();
+
+      const v2 = await store.beginVersion('r4', 'media', 100);
+      expect(v2?.version).toBe(2);
+      expect(v2?.cover).toBeUndefined();
+      expect((await store.getRelic('r4'))?.cover).toBeUndefined();
+    });
   });
 });
