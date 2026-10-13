@@ -31,8 +31,8 @@ For any client that takes a JSON config:
 4. Uploads **only ciphertext**, straight to object storage under a signed URL.
    It does not pass through the Relic service.
 5. Tells the service four things: a coarse renderer class from an eight-value
-   list, this client's name, the ciphertext's byte length, and the title,
-   which defaults to the filename and is stored in the clear. By default, it also
+   list, this client's name, the ciphertext's byte length, and the title, which
+   defaults to the filename and is stored in the clear. By default, it also
    renders a 1200x630 cover image of the file's first screen in local headless
    Chrome and uploads it unencrypted via `POST /api/relics/{id}/cover` for link
    preview cards (pass `cover: false` to decline). Not the mimetype, not the
@@ -166,7 +166,8 @@ Relic's generic preview card.
 
 The cover renderer bundle lives in `dist/cover/`, served to Chrome over a
 virtual origin (`https://cover.relic.invalid`) with strict network containment
-flags (`--host-resolver-rules=MAP * ~NOTFOUND`, `--proxy-server=http://proxy.relic.invalid:1`,
+flags (`--host-resolver-rules=MAP * ~NOTFOUND`,
+`--proxy-server=http://proxy.relic.invalid:1`,
 `--webrtc-ip-handling-policy=disable_non_proxied_udp`, `--disable-quic`) so no
 relic plaintext leaves the machine during rendering.
 
