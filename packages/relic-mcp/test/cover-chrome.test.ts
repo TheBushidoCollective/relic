@@ -452,11 +452,14 @@ process.exit(1);
       tmpdir(),
       `fake-slow-chrome-${Date.now()}.mjs`
     );
+    // A browser that starts and then never answers. It must stay alive for
+    // the whole startup window, held open by the CDP pipe the way Chrome is.
+    // A file stream on fd 3 can error on a pipe and exit the child first,
+    // and then the launcher reports a closed connection instead of the
+    // timeout this test is about.
     const script = `#!/usr/bin/env node
-import fs from 'node:fs';
-const input = fs.createReadStream(null, { fd: 3 });
-const output = fs.createWriteStream(null, { fd: 4 });
-input.resume();
+import net from 'node:net';
+new net.Socket({ fd: 3, readable: true, writable: false }).resume();
 `;
     await writeFile(fakeBinPath, script, { mode: 0o755 });
 

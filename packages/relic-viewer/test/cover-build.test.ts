@@ -1,13 +1,20 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  buildCover,
-  buildViewer,
-  FRAME_CSP,
-  FRAME_CSP_META,
-} from '../build.ts';
+import { FRAME_CSP, FRAME_CSP_META } from '../build.ts';
+
+/**
+ * The cover page ships inside relic-mcp and must never be served by the
+ * service origin, so these checks read what the builds actually emit.
+ *
+ * Both builds run in a child process, the same way every other build check in
+ * this directory does. Calling Bun.build in-process from a test here fails to
+ * resolve sibling modules on the pinned bun, while the same build run as a
+ * script succeeds, so the child process is what CI and publishers exercise.
+ */
+
+const pkgDir = new URL('..', import.meta.url).pathname;
 
 const EXPECTED_COVER_FILES = [
   'cover.css',
@@ -18,81 +25,70 @@ const EXPECTED_COVER_FILES = [
   'styles.css',
 ].sort();
 
-const pkgDir = new URL('..', import.meta.url).pathname;
+let coverDir = '';
+
+beforeAll(async () => {
+  coverDir = await mkdtemp(join(tmpdir(), 'cover-build-test-'));
+  const built = Bun.spawnSync(
+    [
+      process.execPath,
+      '-e',
+      "import { buildCover } from './build.ts'; await buildCover({ outdir: process.env.COVER_OUT });",
+    ],
+    { cwd: pkgDir, env: { ...process.env, COVER_OUT: `${coverDir}/` } }
+  );
+  expect(built.exitCode).toBe(0);
+});
+
+afterAll(async () => {
+  await rm(coverDir, { recursive: true, force: true });
+});
 
 describe('cover asset build', () => {
   test('emits the exact expected file set', async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), 'cover-build-test-'));
-    try {
-      await buildCover({ outdir: `${tempDir}/` });
-      const files = (await readdir(tempDir)).sort();
-      expect(files).toEqual(EXPECTED_COVER_FILES);
-    } finally {
-      await rm(tempDir, { recursive: true, force: true });
-    }
+    const files = (await readdir(coverDir)).sort();
+    expect(files).toEqual(EXPECTED_COVER_FILES);
   });
 
-  test('frame.html contains the frame CSP verbatim as the first head element', async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), 'cover-csp-test-'));
-    try {
-      await buildCover({ outdir: `${tempDir}/` });
-      const html = await Bun.file(join(tempDir, 'frame.html')).text();
+  test('frame.html carries the frame CSP immediately after the doctype', async () => {
+    const html = await Bun.file(join(coverDir, 'frame.html')).text();
 
-      expect(html).toContain(FRAME_CSP);
-      expect(html).toContain(FRAME_CSP_META);
+    expect(html).toContain(FRAME_CSP);
+    const doctypeIndex = html.indexOf('<!doctype html>');
+    expect(doctypeIndex).toBeGreaterThanOrEqual(0);
+    const metaIndex = html.indexOf(FRAME_CSP_META);
+    expect(metaIndex).toBeGreaterThan(doctypeIndex);
 
-      // Verify the CSP meta is placed immediately after the doctype as the first element in head
-      const doctypeIndex = html.indexOf('<!doctype html>');
-      expect(doctypeIndex).toBeGreaterThanOrEqual(0);
-      const metaIndex = html.indexOf(FRAME_CSP_META);
-      expect(metaIndex).toBeGreaterThan(doctypeIndex);
-
-      const beforeMeta = html.slice(
-        doctypeIndex + '<!doctype html>'.length,
-        metaIndex
-      );
-      expect(beforeMeta.trim()).toBe('');
-    } finally {
-      await rm(tempDir, { recursive: true, force: true });
-    }
+    const beforeMeta = html.slice(
+      doctypeIndex + '<!doctype html>'.length,
+      metaIndex
+    );
+    expect(beforeMeta.trim()).toBe('');
   });
 
   test('index.html references only same-origin paths', async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), 'cover-index-test-'));
-    try {
-      await buildCover({ outdir: `${tempDir}/` });
-      const html = await Bun.file(join(tempDir, 'index.html')).text();
+    const html = await Bun.file(join(coverDir, 'index.html')).text();
+    const paths = [...html.matchAll(/(?:href|src)=["']([^"']+)["']/g)].map(
+      (m) => m[1] ?? ''
+    );
 
-      const pathMatches = [
-        ...html.matchAll(/(?:href|src)=["']([^"']+)["']/g),
-      ].map((m) => m[1] ?? '');
-
-      expect(pathMatches.length).toBeGreaterThan(0);
-      for (const path of pathMatches) {
-        expect(path.startsWith('/')).toBe(true);
-        expect(path.startsWith('//')).toBe(false);
-        expect(path.includes('://')).toBe(false);
-      }
-    } finally {
-      await rm(tempDir, { recursive: true, force: true });
+    expect(paths.length).toBeGreaterThan(0);
+    for (const path of paths) {
+      expect(path.startsWith('/')).toBe(true);
+      expect(path.startsWith('//')).toBe(false);
+      expect(path.includes('://')).toBe(false);
     }
   });
 
-  test('relic-viewer dist/ contains none of cover.js, cover.css, frame.html, index.html', async () => {
-    // Build standard viewer distribution
-    await buildViewer({ outdir: `${pkgDir}dist/` });
+  test('the viewer build served as /assets carries none of the cover page', async () => {
+    const built = Bun.spawnSync([process.execPath, 'build.ts'], {
+      cwd: pkgDir,
+    });
+    expect(built.exitCode).toBe(0);
+
     const distFiles = await readdir(`${pkgDir}dist/`);
-
-    const forbidden = ['cover.js', 'cover.css', 'frame.html', 'index.html'];
-    for (const name of forbidden) {
-      expect(distFiles.includes(name)).toBe(false);
+    for (const name of ['cover.js', 'cover.css', 'frame.html', 'index.html']) {
+      expect(distFiles).not.toContain(name);
     }
-  });
-
-  test('guard fails if cover.js is emitted into viewer dist', () => {
-    const sampleFiles = ['viewer.js', 'styles.css', 'cover.js'];
-    const forbidden = ['cover.js', 'cover.css', 'frame.html', 'index.html'];
-    const hasForbidden = sampleFiles.some((f) => forbidden.includes(f));
-    expect(hasForbidden).toBe(true);
   });
 });
