@@ -776,6 +776,16 @@ body {
   margin: 0 auto;
 }
 
+/* A markdown relic is a document, so it gets the width of a document: a
+   letter page, the 8.5in sheet Google Docs lays out and a printer feeds. The
+   46rem column above is narrower than that page, and it read as a strip down
+   the middle of the window. The notice is widened with it so the explanation
+   above the document lines up with the document it explains. */
+.stage-markdown .doc,
+.stage-markdown .notice {
+  max-width: 8.5in;
+}
+
 .toggle-row {
   display: flex;
   justify-content: flex-end;
