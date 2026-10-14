@@ -221,14 +221,39 @@ export async function runFfmpeg(
   inputBytes: Uint8Array,
   timeoutMs?: number
 ): Promise<Uint8Array> {
-  try {
-    return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
-  } catch (pipeError) {
-    if (!args.includes('pipe:0')) {
-      throw pipeError;
+  const maxAttempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
+    } catch (pipeError) {
+      lastError = pipeError;
+      const isSignalDeath =
+        pipeError instanceof Error &&
+        pipeError.message.includes('code null') &&
+        !pipeError.message.includes('timed out');
+      if (isSignalDeath && attempt < maxAttempts) {
+        continue;
+      }
+      if (!args.includes('pipe:0')) {
+        throw pipeError;
+      }
+      try {
+        return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
+      } catch (tempError) {
+        lastError = tempError;
+        const isTempSignalDeath =
+          tempError instanceof Error &&
+          tempError.message.includes('code null') &&
+          !tempError.message.includes('timed out');
+        if (isTempSignalDeath && attempt < maxAttempts) {
+          continue;
+        }
+        throw tempError;
+      }
     }
-    return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
   }
+  throw lastError;
 }
 
 function runFfmpegPiped(
@@ -238,9 +263,11 @@ function runFfmpegPiped(
   timeoutMs?: number
 ): Promise<Uint8Array> {
   const { promise, resolve, reject } = defer<Uint8Array>();
-  const child = spawn(ffmpegPath, args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  const finalArgs = args.includes('-nostdin') ? args : ['-nostdin', ...args];
+  const usesPipe0 = finalArgs.includes('pipe:0');
+  const child = usesPipe0
+    ? spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
+    : spawn(ffmpegPath, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   let timedOut = false;
   let timer: NodeJS.Timeout | undefined;
@@ -249,6 +276,7 @@ function runFfmpegPiped(
       timedOut = true;
       try {
         child.kill('SIGKILL');
+        child.unref();
       } catch {
         // Child may have exited already.
       }
@@ -276,25 +304,30 @@ function runFfmpegPiped(
     }
   });
 
-  child.on('close', (code) => {
+  child.on('close', (code, signal) => {
     cleanup();
     if (timedOut) return;
     if (code !== 0) {
       const stderr = Buffer.concat(stderrChunks).toString('utf-8');
-      reject(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
+      reject(
+        new Error(`ffmpeg exited with code ${code} signal ${signal}: ${stderr}`)
+      );
     } else {
       resolve(new Uint8Array(Buffer.concat(stdoutChunks)));
     }
   });
 
-  child.stdin.on('error', (err) => {
-    if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
-      cleanup();
-      reject(err);
-    }
-  });
+  if (usesPipe0 && child.stdin) {
+    child.stdin.on('error', (err) => {
+      if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
+        cleanup();
+        reject(err);
+      }
+    });
 
-  child.stdin.end(Buffer.from(inputBytes));
+    child.stdin.end(Buffer.from(inputBytes));
+  }
+
   return promise;
 }
 
@@ -310,9 +343,12 @@ export async function runFfmpegTemp(
   try {
     await writeFile(tempPath, inputBytes, { mode: 0o600 });
     const adjustedArgs = args.map((arg) => (arg === 'pipe:0' ? tempPath : arg));
+    const finalArgs = adjustedArgs.includes('-nostdin')
+      ? adjustedArgs
+      : ['-nostdin', ...adjustedArgs];
 
     const { promise, resolve, reject } = defer<Uint8Array>();
-    const child = spawn(ffmpegPath, adjustedArgs, {
+    const child = spawn(ffmpegPath, finalArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -323,6 +359,7 @@ export async function runFfmpegTemp(
         timedOut = true;
         try {
           child.kill('SIGKILL');
+          child.unref();
         } catch {
           // Child may have exited already.
         }
@@ -347,12 +384,16 @@ export async function runFfmpegTemp(
       cleanup();
       if (!timedOut) reject(err);
     });
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       cleanup();
       if (timedOut) return;
       if (code !== 0) {
         const stderr = Buffer.concat(stderrChunks).toString('utf-8');
-        reject(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
+        reject(
+          new Error(
+            `ffmpeg exited with code ${code} signal ${signal}: ${stderr}`
+          )
+        );
       } else {
         resolve(new Uint8Array(Buffer.concat(stdoutChunks)));
       }
@@ -459,9 +500,13 @@ export async function probeMediaDimensionsWithFfmpeg(
     const { promise, resolve } = defer<
       { width: number; height: number } | undefined
     >();
-    const child = spawn(ffmpegPath, ['-i', 'pipe:0', '-f', 'null', '-'], {
-      stdio: ['pipe', 'ignore', 'pipe'],
-    });
+    const child = spawn(
+      ffmpegPath,
+      ['-nostdin', '-i', 'pipe:0', '-f', 'null', '-'],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      }
+    );
     const stderrChunks: Buffer[] = [];
     child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
     child.on('error', () => resolve(undefined));

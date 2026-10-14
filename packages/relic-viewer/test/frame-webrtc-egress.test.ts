@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import * as dgram from 'node:dgram';
 import { existsSync } from 'node:fs';
-import { createApp } from '../../relic-server/src/app.ts';
+import { rm } from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createApp, type RelicApp } from '../../relic-server/src/app.ts';
 import { diskAssets } from '../../relic-server/src/assets.ts';
 import { MemoryStore } from '../../relic-server/src/store.ts';
 import {
@@ -184,36 +187,13 @@ describe('WebRTC STUN egress headless browser regression', () => {
         packets.push(msg);
       });
 
-      const SERVICE_PORT = 9151;
-      const USERCONTENT_PORT = 9152;
-      const SERVICE_ORIGIN = `http://127.0.0.1:${SERVICE_PORT}`;
-      const USERCONTENT_ORIGIN = `http://127.0.0.1:${USERCONTENT_PORT}`;
-
       const { promise: rendered, resolve: resolveRendered } =
         Promise.withResolvers<void>();
       const vectorReports: Record<string, string> = {};
 
-      const distPath = new URL('../dist', import.meta.url).pathname;
-      const app = createApp({
-        config: {
-          serviceOrigin: SERVICE_ORIGIN,
-          usercontentOrigin: USERCONTENT_ORIGIN,
-        },
-        store: new MemoryStore(),
-        assets: diskAssets(distPath),
-      });
-
-      const usercontentServer = Bun.serve({
-        port: USERCONTENT_PORT,
-        hostname: '127.0.0.1',
-        fetch(req) {
-          return app.fetch(req);
-        },
-      });
-
       let getParentHtml: () => string = () => '';
       const serviceServer = Bun.serve({
-        port: SERVICE_PORT,
+        port: 0,
         hostname: '127.0.0.1',
         async fetch(req) {
           const url = new URL(req.url);
@@ -238,6 +218,29 @@ describe('WebRTC STUN egress headless browser regression', () => {
             headers: { 'content-type': 'text/html; charset=utf-8' },
           });
         },
+      });
+
+      const serviceOrigin = `http://127.0.0.1:${serviceServer.port}`;
+
+      let appRef: RelicApp | undefined;
+      const usercontentServer = Bun.serve({
+        port: 0,
+        hostname: '127.0.0.1',
+        fetch(req) {
+          if (!appRef) throw new Error('App not initialized');
+          return appRef.fetch(req);
+        },
+      });
+
+      const usercontentOrigin = `http://127.0.0.1:${usercontentServer.port}`;
+      const distPath = new URL('../dist', import.meta.url).pathname;
+      appRef = createApp({
+        config: {
+          serviceOrigin,
+          usercontentOrigin,
+        },
+        store: new MemoryStore(),
+        assets: diskAssets(distPath),
       });
       // 3. Multi-vector hostile payload attempting all bypasses
       const hostilePayload =
@@ -362,27 +365,44 @@ describe('WebRTC STUN egress headless browser regression', () => {
       getParentHtml = () =>
         `<!DOCTYPE html>
 <html>
-<body>
-<iframe id="frame" class="usercontent-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" src="${USERCONTENT_ORIGIN}/sandbox.html"></iframe>
+<head>
 <script>
-  const frame = document.getElementById('frame');
+  let renderedSent = false;
+  function sendRender(frame) {
+    if (!frame || !frame.contentWindow) return;
+    fetch('/get-payload').then(r => r.json()).then(data => {
+      frame.contentWindow.postMessage({
+        type: 'relic:render',
+        html: data.payload
+      }, '*');
+    });
+  }
+
   window.addEventListener('message', (event) => {
+    const frame = document.getElementById('frame');
     if (event.data && event.data.type === 'relic:sandbox-ready') {
-      fetch('/get-payload').then(r => r.json()).then(data => {
-        frame.contentWindow.postMessage({
-          type: 'relic:render',
-          html: data.payload
-        }, '*');
-      });
+      sendRender(frame);
     } else if (event.data && event.data.type === 'vector:report') {
+      renderedSent = true;
       fetch('/report', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(event.data)
       });
     } else if (event.data && (event.data.type === 'relic:tree' || event.data.type === 'test:finished')) {
+      renderedSent = true;
       fetch('/rendered', { method: 'POST' });
     }
+  });
+<` +
+        `/script>
+</head>
+<body>
+<iframe id="frame" class="usercontent-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" src="${usercontentOrigin}/sandbox.html"></iframe>
+<script>
+  const frame = document.getElementById('frame');
+  frame.addEventListener('load', () => {
+    sendRender(frame);
   });
 <` +
         `/script>
@@ -392,44 +412,57 @@ describe('WebRTC STUN egress headless browser regression', () => {
       // 4. Run headless Chrome
       const binary = chromeBinary;
       if (!binary) throw new Error('Chrome binary not found');
+      const userDataDir = path.join(
+        os.tmpdir(),
+        `chrome-test-reg-${Date.now()}`
+      );
       const chromeProcess = spawn(
         binary,
         [
           '--headless=new',
           '--no-sandbox',
           '--disable-gpu',
+          '--disable-dev-shm-usage',
           '--disable-extensions',
-          `--user-data-dir=/tmp/chrome-test-reg-${Date.now()}`,
-          SERVICE_ORIGIN,
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-background-networking',
+          '--disable-component-update',
+          '--disable-sync',
+          `--user-data-dir=${userDataDir}`,
+          serviceOrigin,
         ],
         { stdio: 'ignore' }
       );
 
-      // Await event-driven completion from rendered callback
-      await rendered;
+      try {
+        // Await event-driven completion from rendered callback
+        await rendered;
 
-      // Allow a brief turn for any asynchronous network packets that were in flight
-      // to hit the loopback UDP interface before asserting. This integration check
-      // explicitly exercises real-time OS socket transport against headless Chrome.
-      const { promise: settleTimer, resolve: resolveSettle } =
-        Promise.withResolvers<void>();
-      setTimeout(resolveSettle, 500);
-      await settleTimer;
+        // Allow a brief turn for any asynchronous network packets that were in flight
+        // to hit the loopback UDP interface before asserting. This integration check
+        // explicitly exercises real-time OS socket transport against headless Chrome.
+        const { promise: settleTimer, resolve: resolveSettle } =
+          Promise.withResolvers<void>();
+        setTimeout(resolveSettle, 500);
+        await settleTimer;
 
-      chromeProcess.kill();
-      serviceServer.stop();
-      usercontentServer.stop();
-      udpSocket.close();
-
-      // Zero packets must have arrived at the collector
-      expect(packets.length).toBe(0);
-      // Verification that the probe actually executed
-      expect(vectorReports['direct']).toBeDefined();
-      expect(vectorReports['protoChain']).toBeDefined();
-      expect(vectorReports['createElementNS']).toBeDefined();
-      expect(vectorReports['createHTMLDoc']).toBeDefined();
-      expect(vectorReports['postWrite']).toBeDefined();
+        // Zero packets must have arrived at the collector
+        expect(packets.length).toBe(0);
+        // Verification that the probe actually executed
+        expect(vectorReports['direct']).toBeDefined();
+        expect(vectorReports['protoChain']).toBeDefined();
+        expect(vectorReports['createElementNS']).toBeDefined();
+        expect(vectorReports['createHTMLDoc']).toBeDefined();
+        expect(vectorReports['postWrite']).toBeDefined();
+      } finally {
+        chromeProcess.kill();
+        serviceServer.stop(true);
+        usercontentServer.stop(true);
+        udpSocket.close();
+        await rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+      }
     },
-    30000
+    45000
   );
 });
