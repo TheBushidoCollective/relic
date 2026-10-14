@@ -153,11 +153,11 @@ try {
   assert.equal(coverRes.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(coverRes.headers.get('referrer-policy'), 'no-referrer');
   assert.equal(coverRes.headers.get('x-robots-tag'), 'noindex');
+  // One header, two directives: the sandbox directive rides in the CSP.
   assert.equal(
     coverRes.headers.get('content-security-policy'),
-    "default-src 'none'"
+    "default-src 'none'; sandbox"
   );
-  assert.ok(coverRes.headers.has('sandbox'), 'missing sandbox header');
 
   const coverBytes = new Uint8Array(await coverRes.arrayBuffer());
   const valid = validateCoverRaster(coverBytes, (data) => inflateSync(data));
