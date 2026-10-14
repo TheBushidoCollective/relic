@@ -21,8 +21,8 @@
  * - Unsupported anchors: the declared kind preserved without dropping.
  */
 
-import { spawn } from 'node:child_process';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { type ChildProcess, spawn } from 'node:child_process';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -36,6 +36,8 @@ import {
 import { boxPosition, type CommentRecord, formatTimecode } from './comments.ts';
 import type { PublishDeps } from './publish.ts';
 import { loadPublishState } from './state.ts';
+
+const activeChildren = new Set<ChildProcess>();
 
 /**
  * Maximum dimension in pixels for images returned in tool results.
@@ -224,7 +226,7 @@ export async function runFfmpeg(
   try {
     return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
   } catch (pipeError) {
-    if (!args.includes('pipe:0')) {
+    if (!args.includes('pipe:0') && !args.includes('pipe:1')) {
       throw pipeError;
     }
     return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
@@ -238,9 +240,11 @@ function runFfmpegPiped(
   timeoutMs?: number
 ): Promise<Uint8Array> {
   const { promise, resolve, reject } = defer<Uint8Array>();
-  const child = spawn(ffmpegPath, args, {
+  const finalArgs = args.includes('-nostdin') ? args : ['-nostdin', ...args];
+  const child = spawn(ffmpegPath, finalArgs, {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  activeChildren.add(child);
 
   let timedOut = false;
   let timer: NodeJS.Timeout | undefined;
@@ -249,14 +253,23 @@ function runFfmpegPiped(
       timedOut = true;
       try {
         child.kill('SIGKILL');
+        child.unref();
       } catch {
         // Child may have exited already.
       }
-      reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+      const onDone = () => {
+        reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+      };
+      if (child.exitCode !== null || child.signalCode !== null) {
+        onDone();
+      } else {
+        child.once('close', onDone);
+        setTimeout(onDone, 500);
+      }
     }, timeoutMs);
   }
-
   const cleanup = () => {
+    activeChildren.delete(child);
     if (timer) {
       clearTimeout(timer);
       timer = undefined;
@@ -268,7 +281,8 @@ function runFfmpegPiped(
 
   child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
   child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-
+  child.stdout.on('error', () => {});
+  child.stderr.on('error', () => {});
   child.on('error', (err) => {
     cleanup();
     if (!timedOut) {
@@ -276,25 +290,28 @@ function runFfmpegPiped(
     }
   });
 
-  child.on('close', (code) => {
+  child.on('close', (code, signal) => {
     cleanup();
     if (timedOut) return;
     if (code !== 0) {
       const stderr = Buffer.concat(stderrChunks).toString('utf-8');
-      reject(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
+      reject(
+        new Error(`ffmpeg exited with code ${code} signal ${signal}: ${stderr}`)
+      );
     } else {
       resolve(new Uint8Array(Buffer.concat(stdoutChunks)));
     }
   });
 
-  child.stdin.on('error', (err) => {
-    if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
-      cleanup();
-      reject(err);
-    }
-  });
-
-  child.stdin.end(Buffer.from(inputBytes));
+  if (finalArgs.includes('pipe:0')) {
+    child.stdin.on('error', (err) => {
+      if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
+        cleanup();
+        reject(err);
+      }
+    });
+    child.stdin.end(Buffer.from(inputBytes));
+  }
   return promise;
 }
 
@@ -307,14 +324,30 @@ export async function runFfmpegTemp(
   const dir = await mkdtemp(join(tmpdir(), 'relic-media-'));
   await chmod(dir, 0o700);
   const tempPath = join(dir, 'content.bin');
+  const tempOutPath = join(dir, 'output.bin');
   try {
-    await writeFile(tempPath, inputBytes, { mode: 0o600 });
-    const adjustedArgs = args.map((arg) => (arg === 'pipe:0' ? tempPath : arg));
+    if (args.includes('pipe:0')) {
+      await writeFile(tempPath, inputBytes, { mode: 0o600 });
+    }
+    const usesPipe1 = args.includes('pipe:1');
+    const adjustedArgs = args.map((arg) => {
+      if (arg === 'pipe:0') return tempPath;
+      if (arg === 'pipe:1') return tempOutPath;
+      return arg;
+    });
+    const finalArgs = adjustedArgs.includes('-nostdin')
+      ? adjustedArgs
+      : ['-nostdin', ...adjustedArgs];
 
     const { promise, resolve, reject } = defer<Uint8Array>();
-    const child = spawn(ffmpegPath, adjustedArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = usesPipe1
+      ? spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'ignore', 'pipe'] })
+      : spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+    activeChildren.add(child);
+    child.stdin.on('error', () => {});
+    if (finalArgs.includes('pipe:0')) {
+      child.stdin.end(Buffer.from(inputBytes));
+    }
 
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
@@ -323,14 +356,23 @@ export async function runFfmpegTemp(
         timedOut = true;
         try {
           child.kill('SIGKILL');
+          child.unref();
         } catch {
           // Child may have exited already.
         }
-        reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+        const onDone = () => {
+          reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+        };
+        if (child.exitCode !== null || child.signalCode !== null) {
+          onDone();
+        } else {
+          child.once('close', onDone);
+          setTimeout(onDone, 500);
+        }
       }, timeoutMs);
     }
-
     const cleanup = () => {
+      activeChildren.delete(child);
       if (timer) {
         clearTimeout(timer);
         timer = undefined;
@@ -340,21 +382,37 @@ export async function runFfmpegTemp(
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
 
-    child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+    if (!usesPipe1 && child.stdout) {
+      child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+      child.stdout.on('error', () => {});
+    }
     child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-
+    child.stderr.on('error', () => {});
     child.on('error', (err) => {
       cleanup();
       if (!timedOut) reject(err);
     });
-    child.on('close', (code) => {
+    child.on('close', async (code, signal) => {
       cleanup();
       if (timedOut) return;
       if (code !== 0) {
         const stderr = Buffer.concat(stderrChunks).toString('utf-8');
-        reject(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
+        reject(
+          new Error(
+            `ffmpeg exited with code ${code} signal ${signal}: ${stderr}`
+          )
+        );
       } else {
-        resolve(new Uint8Array(Buffer.concat(stdoutChunks)));
+        if (usesPipe1) {
+          try {
+            const outBytes = await readFile(tempOutPath);
+            resolve(new Uint8Array(outBytes));
+          } catch (readErr) {
+            reject(readErr);
+          }
+        } else {
+          resolve(new Uint8Array(Buffer.concat(stdoutChunks)));
+        }
       }
     });
     return await promise;
@@ -459,13 +517,23 @@ export async function probeMediaDimensionsWithFfmpeg(
     const { promise, resolve } = defer<
       { width: number; height: number } | undefined
     >();
-    const child = spawn(ffmpegPath, ['-i', 'pipe:0', '-f', 'null', '-'], {
-      stdio: ['pipe', 'ignore', 'pipe'],
-    });
+    const child = spawn(
+      ffmpegPath,
+      ['-nostdin', '-i', 'pipe:0', '-f', 'null', '-'],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      }
+    );
+    activeChildren.add(child);
     const stderrChunks: Buffer[] = [];
     child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-    child.on('error', () => resolve(undefined));
+    child.stderr.on('error', () => {});
+    child.on('error', () => {
+      activeChildren.delete(child);
+      resolve(undefined);
+    });
     child.on('close', () => {
+      activeChildren.delete(child);
       const stderr = Buffer.concat(stderrChunks).toString('utf-8');
       const match = stderr.match(/Video:.*?,\s*(\d{2,5})x(\d{2,5})/);
       if (match?.[1] && match[2]) {

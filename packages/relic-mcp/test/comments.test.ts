@@ -1217,7 +1217,7 @@ describe('comment anchor resolution against decrypted relic content', () => {
         '-frames:v',
         '1',
         '-f',
-        'image2',
+        'image2pipe',
         '-c:v',
         'png',
         'pipe:1',
