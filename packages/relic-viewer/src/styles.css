@@ -254,6 +254,10 @@ body {
   position: absolute;
   z-index: 8;
   background: var(--surface);
+  /* Its own ink rather than whatever it inherits. Inside a fullscreen stage
+     the surface is dark and the page around it is not, and an inherited ink
+     put the comment's own words dark on dark. */
+  color: var(--ink);
   border: 1px solid var(--rule-strong);
   box-shadow: 0 6px 18px rgb(0 0 0 / 14%);
   font-family: var(--sans);
@@ -1355,6 +1359,10 @@ body {
 .media-stage:fullscreen {
   color-scheme: dark;
   --surface: #171b1c;
+  /* Below the band rather than above it: a comment field in a panel on the
+     stage sits on the ground, and the page's light ground under the stage's
+     light ink made what was typed there unreadable. */
+  --ground: #0e1112;
   --ink: #e6e9e7;
   --ink-soft: #969e9d;
   --rule: #3b4345;

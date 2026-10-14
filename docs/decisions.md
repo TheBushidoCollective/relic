@@ -658,3 +658,40 @@ Guards:
   tests, and egress tests assert zero packets escape.
 - G5 (service separation): `relic-viewer/dist/` contains none of the cover
   files, ensuring the public web service never serves the cover renderer page.
+
+## 2026-10-13: Timeline comments stay in fullscreen, and markers open the comment card
+
+Jason Waldrip reported that comments on a video timeline were hard to make
+and asked for a popover rather than the comment sidebar. Two earlier rules
+are reversed by that decision.
+
+**Fullscreen is kept while a comment is written.** The player used to leave
+stage fullscreen before any aim that focused the composer, because the
+composer lived in the sidebar, outside the fullscreen element, and could not
+be seen from inside it. Every timeline gesture now opens the shared popover
+composer over the scrubber, and in stage fullscreen the popover layer mounts
+the panel inside the fullscreen `.media-stage` and translates its anchor
+there. Nothing in the player leaves fullscreen any more. The page leaves it
+in two cases only, both of which have to show the sidebar: a reader with no
+verified address, whose identity flow lives there, and a press on "Open in
+thread". The controls stay awake while a panel is open on the stage. iOS
+native fullscreen shows the platform player and none of this chrome, so
+nothing changes there. The test that pinned the old behaviour in
+`media-player.test.ts` was repinned to the reverse, with a comment saying so.
+
+**The marker tooltip is replaced by the comment card.** Hovering a timeline
+marker showed a bespoke `.timeline-marker-tooltip` and, after the hover
+delay, the comment card on top of it: two forms of one idea, overlapping.
+A marker press also stopped propagation and scrolled the sidebar. Markers
+now open the same card every other kind of mark opens, on hover, press and
+keyboard focus, and the press still seeks and pauses. A cluster opens a card
+listing its members, each of which opens its own card, so every comment in it
+is one press away and keeps its own reply, edit and resolve.
+
+**Found and fixed on the way.** A focus moving inside an open card rebuilt the
+card, because the card carries its comment's id, so the field a Reply put up
+was thrown away the moment it took focus. Measured in a real browser before
+the change (`field: false` after pressing Reply on a marker card) and fixed
+for every card. A hover that began before a composer opened could also replace
+it when its delay ran out; the delay now checks again before it opens
+anything, and a card never replaces a panel holding unposted text.
