@@ -923,7 +923,17 @@ describe('Network security: no key material sent in any request', () => {
       expect(call.url).not.toContain(fragment);
       expect(call.body ?? '').not.toContain(fragment);
 
+      // Single words are matched as URL tokens, not substrings: the fixed
+      // route text ('relics', 'example', 'mint') can contain a short word by
+      // chance and fail a correct client. A leaked phrase is still caught,
+      // whole or with its separators dropped or encoded.
       const urlTokens = call.url.split(/[/.:?&=#_-]+/);
+      const decodedUrl = decodeURIComponent(call.url.replace(/\+/g, ' '));
+      for (const joined of [' ', '', '-', '_'].map((sep) =>
+        mnemonicWords.join(sep)
+      )) {
+        expect(decodedUrl).not.toContain(joined);
+      }
       for (const word of mnemonicWords) {
         expect(urlTokens).not.toContain(word);
         expect(call.body ?? '').not.toContain(word);
