@@ -498,6 +498,12 @@ export async function launchChrome(
     } catch {
       // Best effort
     }
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => {
+        child.once('close', () => resolve());
+        setTimeout(resolve, 500);
+      });
+    }
     await fs.rm(profileDir, { recursive: true, force: true }).catch(() => {});
     if (err instanceof ChromeLaunchError) {
       throw err;

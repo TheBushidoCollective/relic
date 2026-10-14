@@ -257,7 +257,15 @@ function runFfmpegPiped(
       } catch {
         // Child may have exited already.
       }
-      reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+      const onDone = () => {
+        reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+      };
+      if (child.exitCode !== null || child.signalCode !== null) {
+        onDone();
+      } else {
+        child.once('close', onDone);
+        setTimeout(onDone, 500);
+      }
     }, timeoutMs);
   }
   const cleanup = () => {
@@ -345,7 +353,15 @@ export async function runFfmpegTemp(
         } catch {
           // Child may have exited already.
         }
-        reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+        const onDone = () => {
+          reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
+        };
+        if (child.exitCode !== null || child.signalCode !== null) {
+          onDone();
+        } else {
+          child.once('close', onDone);
+          setTimeout(onDone, 500);
+        }
       }, timeoutMs);
     }
     const cleanup = () => {
