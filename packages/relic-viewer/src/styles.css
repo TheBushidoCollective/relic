@@ -336,6 +336,14 @@ body {
   list-style: none;
 }
 
+/* The card lights the row it opened for, and the light runs edge to edge of
+   the row. The sidebar has margins around its rows; a card has none, so the
+   row brings its own and the author and the date stop touching the light. */
+.popover-thread .comment {
+  padding-right: 0.6rem;
+  padding-left: 0.6rem;
+}
+
 .popover-target {
   margin: 0 0 0.4rem;
   color: var(--ink-soft);
@@ -3243,6 +3251,11 @@ canvas.relic-page {
   pointer-events: none;
 }
 
+/* Markers are drawn in ink inside a ring of the surface. The played bar is
+   patina and the unplayed rail a light tint of the ink, so a patina marker
+   vanished over everything already played. Ink stands off the tinted rail,
+   the surface ring stands off the patina, and the pair holds in the dark
+   fullscreen stage, where both tokens are redefined. */
 .time-marker {
   position: absolute;
   top: 50%;
@@ -3251,20 +3264,21 @@ canvas.relic-page {
   padding: 0;
   border: none;
   border-radius: 0;
-  background: var(--patina);
+  background: var(--ink);
   transform: translate(-50%, -50%);
   pointer-events: auto;
   cursor: pointer;
   z-index: 2;
-  box-shadow: none;
+  box-shadow: 0 0 0 1px var(--surface);
 }
 
 .time-marker:hover,
 .time-marker.is-active,
 .time-marker:focus-visible {
   width: 5px;
-  background: var(--patina-ink);
+  background: var(--ink);
   outline: 1px solid var(--patina);
+  outline-offset: 1px;
   z-index: 4;
 }
 
@@ -3273,16 +3287,18 @@ canvas.relic-page {
   border-style: dashed;
 }
 
+/* A span stands above and below the 4px rail, so its ring shows against the
+   controls band as well as against the rail, played or not. */
 .time-marker-span {
-  height: 100%;
-  top: 0;
+  height: 8px;
+  top: 50%;
   border-radius: 0;
-  border-left: 2px solid var(--patina);
-  border-right: 2px solid var(--patina);
+  border-left: 2px solid var(--ink);
+  border-right: 2px solid var(--ink);
   border-top: none;
   border-bottom: none;
-  background: color-mix(in srgb, var(--patina) 40%, transparent);
-  transform: none;
+  background: var(--ink);
+  transform: translateY(-50%);
   min-width: 4px;
   z-index: 2;
 }
@@ -3290,9 +3306,10 @@ canvas.relic-page {
 .time-marker-span:hover,
 .time-marker-span.is-active,
 .time-marker-span:focus-visible {
-  transform: none;
-  background: color-mix(in srgb, var(--patina) 75%, transparent);
+  transform: translateY(-50%);
+  background: var(--ink);
   outline: 1px solid var(--patina);
+  outline-offset: 1px;
   z-index: 4;
 }
 
@@ -3308,8 +3325,8 @@ canvas.relic-page {
   padding: 0 3px;
   border: 1px solid var(--surface);
   border-radius: 0;
-  background: var(--patina);
-  color: #fff;
+  background: var(--ink);
+  color: var(--surface);
   font-family: var(--mono);
   transform: translateY(-50%);
   pointer-events: auto;
@@ -3328,8 +3345,9 @@ canvas.relic-page {
 .time-marker-cluster.is-active,
 .time-marker-cluster:has(.is-active),
 .time-marker-cluster:focus-visible {
-  background: var(--patina-ink);
+  background: var(--ink);
   outline: 1px solid var(--patina);
+  outline-offset: 1px;
   z-index: 5;
 }
 

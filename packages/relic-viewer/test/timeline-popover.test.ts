@@ -42,6 +42,30 @@ function aimAt(
 const expanded = (mounted: Mounted): string | null =>
   only(mounted.thread, 'thread-toggle').getAttribute('aria-expanded');
 
+describe('a time comment in the thread', () => {
+  beforeEach(installDom);
+  afterEach(clearDom);
+
+  test('stops saying its mark cannot be shown once the media can place it', async () => {
+    const mounted = await mount({}, 'verified', [
+      { id: 't1', body: 'Bars jump.', anchor: { kind: 'time', t: 3.5 } },
+    ]);
+    // The first paint runs before the media knows its duration, so the row
+    // says the mark cannot be shown. That is true for a moment and no longer.
+    expect(withClass(mounted.thread, 'comment-unplaceable')).toHaveLength(1);
+
+    const video = new Node('video');
+    video.className = 'media-player media-video relic-media';
+    (video as unknown as { duration: number }).duration = 20;
+    mounted.stage.appendChild(video);
+    // What the time adapter sends once the metadata lands and it has painted.
+    mounted.stage.dispatch('relic-repaint');
+
+    expect(withClass(mounted.thread, 'comment-unplaceable')).toHaveLength(0);
+    expect(withClass(mounted.stage, 'time-marker')).toHaveLength(1);
+  });
+});
+
 describe('writing on the timeline', () => {
   beforeEach(installDom);
   afterEach(clearDom);

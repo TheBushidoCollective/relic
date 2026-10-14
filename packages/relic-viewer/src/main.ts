@@ -5207,6 +5207,17 @@ export function buildThread(
     | undefined;
   /** Measures the open panel's target again, after the page moves under it. */
   let reanchor: (() => AnchorBox | undefined) | undefined;
+  /**
+   * Draws the thread's rows again from the last load, without fetching.
+   *
+   * A time mark cannot be placed until the media knows its duration, so the
+   * first paint, which runs before the metadata arrives, counts every time
+   * comment as unplaceable. The adapter paints them itself once the metadata
+   * lands and says so with `relic-repaint`; the rows have to hear it too, or
+   * each one goes on saying its mark cannot be shown while the mark sits on
+   * the scrubber.
+   */
+  let rerenderRows: (() => void) | undefined;
 
   const frameWindow = (): Window | null =>
     host?.querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
@@ -6004,7 +6015,11 @@ export function buildThread(
       return commentRow(node.entry, isUnplaceable, addressed, replies, isReply);
     };
 
-    list.replaceChildren(...tree.map((node) => renderNode(node)));
+    const renderRows = (): void => {
+      list.replaceChildren(...tree.map((node) => renderNode(node)));
+    };
+    renderRows();
+    rerenderRows = renderRows;
     updateThreadToggle(toggle, displayedEntries.length);
     status.replaceChildren(
       ...(displayedEntries.length === 0
@@ -6304,6 +6319,12 @@ export function buildThread(
         });
         next.addEventListener('relic:frame-ready', () => {
           paintMarks(lastEntries);
+        });
+        // Time marks wait for the media's duration. When it arrives they
+        // land, and the rows that said they could not are drawn again.
+        next.addEventListener('relic-repaint', () => {
+          paintMarks(lastEntries);
+          rerenderRows?.();
         });
         // A bare press on the scrubber seeks, and the player drops its
         // pending selection when it does. While a composer is still aimed at
