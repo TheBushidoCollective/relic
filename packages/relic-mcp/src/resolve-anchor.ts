@@ -21,7 +21,7 @@
  * - Unsupported anchors: the declared kind preserved without dropping.
  */
 
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,6 +36,8 @@ import {
 import { boxPosition, type CommentRecord, formatTimecode } from './comments.ts';
 import type { PublishDeps } from './publish.ts';
 import { loadPublishState } from './state.ts';
+
+const activeChildren = new Set<ChildProcess>();
 
 /**
  * Maximum dimension in pixels for images returned in tool results.
@@ -242,6 +244,7 @@ function runFfmpegPiped(
   const child = spawn(ffmpegPath, finalArgs, {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  activeChildren.add(child);
 
   let timedOut = false;
   let timer: NodeJS.Timeout | undefined;
@@ -257,8 +260,8 @@ function runFfmpegPiped(
       reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   }
-
   const cleanup = () => {
+    activeChildren.delete(child);
     if (timer) {
       clearTimeout(timer);
       timer = undefined;
@@ -270,7 +273,8 @@ function runFfmpegPiped(
 
   child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
   child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-
+  child.stdout.on('error', () => {});
+  child.stderr.on('error', () => {});
   child.on('error', (err) => {
     cleanup();
     if (!timedOut) {
@@ -326,6 +330,7 @@ export async function runFfmpegTemp(
     const child = spawn(ffmpegPath, finalArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    activeChildren.add(child);
     child.stdin.on('error', () => {});
     child.stdin.end();
 
@@ -343,8 +348,8 @@ export async function runFfmpegTemp(
         reject(new Error(`ffmpeg timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     }
-
     const cleanup = () => {
+      activeChildren.delete(child);
       if (timer) {
         clearTimeout(timer);
         timer = undefined;
@@ -356,7 +361,8 @@ export async function runFfmpegTemp(
 
     child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
     child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-
+    child.stdout.on('error', () => {});
+    child.stderr.on('error', () => {});
     child.on('error', (err) => {
       cleanup();
       if (!timedOut) reject(err);
@@ -484,10 +490,16 @@ export async function probeMediaDimensionsWithFfmpeg(
         stdio: ['pipe', 'ignore', 'pipe'],
       }
     );
+    activeChildren.add(child);
     const stderrChunks: Buffer[] = [];
     child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-    child.on('error', () => resolve(undefined));
+    child.stderr.on('error', () => {});
+    child.on('error', () => {
+      activeChildren.delete(child);
+      resolve(undefined);
+    });
     child.on('close', () => {
+      activeChildren.delete(child);
       const stderr = Buffer.concat(stderrChunks).toString('utf-8');
       const match = stderr.match(/Video:.*?,\s*(\d{2,5})x(\d{2,5})/);
       if (match?.[1] && match[2]) {
