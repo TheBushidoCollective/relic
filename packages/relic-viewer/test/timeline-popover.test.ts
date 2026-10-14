@@ -50,15 +50,22 @@ describe('a time comment in the thread', () => {
     const mounted = await mount({}, 'verified', [
       { id: 't1', body: 'Bars jump.', anchor: { kind: 'time', t: 3.5 } },
     ]);
-    // The first paint runs before the media knows its duration, so the row
-    // says the mark cannot be shown. That is true for a moment and no longer.
-    expect(withClass(mounted.thread, 'comment-unplaceable')).toHaveLength(1);
-
+    // The player is on the stage before its media knows how long it is,
+    // which is how every media relic opens.
     const video = new Node('video');
     video.className = 'media-player media-video relic-media';
-    (video as unknown as { duration: number }).duration = 20;
+    const media = video as unknown as { duration: number };
+    media.duration = Number.NaN;
     mounted.stage.appendChild(video);
-    // What the time adapter sends once the metadata lands and it has painted.
+    // A load of the thread with the stage attached, as the page's first one
+    // is. A time mark cannot be placed without a duration, so its row says
+    // the mark cannot be shown, which is true for a moment and no longer.
+    await mounted.post('About the whole thing.');
+    expect(withClass(mounted.thread, 'comment-unplaceable')).toHaveLength(1);
+
+    // The metadata lands, the time adapter paints the mark itself, and says
+    // so the way it does in a browser.
+    media.duration = 20;
     mounted.stage.dispatch('relic-repaint');
 
     expect(withClass(mounted.thread, 'comment-unplaceable')).toHaveLength(0);
