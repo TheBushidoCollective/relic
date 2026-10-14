@@ -1,8 +1,7 @@
 import type { CoverRenderResult } from '@relic/format/cover';
 import * as pdfjsLib from 'pdfjs-dist';
+import { findInkBox, PDF_CANVAS_WIDTH, trimPdfPage } from './pdf-trim.ts';
 
-export const PDF_GUTTER_PX = 20;
-export const PDF_CANVAS_WIDTH = 600;
 export const PDF_CANVAS_HEIGHT = 315;
 export const PDF_DEVICE_SCALE = 2;
 
@@ -15,45 +14,6 @@ export function ensurePdfWorker(): void {
     });
     workerInitialized = true;
   }
-}
-
-export interface InkBox {
-  readonly minX: number;
-  readonly maxX: number;
-  readonly minY: number;
-  readonly maxY: number;
-}
-
-export function findInkBox(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number
-): InkBox | null {
-  let minX = -1;
-  let maxX = -1;
-  let minY = -1;
-  let maxY = -1;
-
-  for (let y = 0; y < height; y++) {
-    const rowOffset = y * width * 4;
-    for (let x = 0; x < width; x++) {
-      const idx = rowOffset + x * 4;
-      const alpha = data[idx + 3] ?? 0;
-      const r = data[idx] ?? 0;
-      const g = data[idx + 1] ?? 0;
-      const b = data[idx + 2] ?? 0;
-      // An ink pixel has visible opacity and is darker than pure white.
-      if (alpha > 10 && (r < 250 || g < 250 || b < 250)) {
-        if (minX === -1 || x < minX) minX = x;
-        if (maxX === -1 || x > maxX) maxX = x;
-        if (minY === -1 || y < minY) minY = y;
-        if (maxY === -1 || y > maxY) maxY = y;
-      }
-    }
-  }
-
-  if (minX === -1) return null;
-  return { minX, maxX, minY, maxY };
 }
 
 export async function renderPdfCover(
@@ -129,18 +89,10 @@ export async function renderPdfCover(
     measureCanvas.height
   );
 
-  const minX = ink !== null ? ink.minX : 0;
-  const maxX = ink !== null ? ink.maxX : measureCanvas.width;
-  const minY = ink !== null ? ink.minY : 0;
-
-  const cropLeft = Math.max(0, minX - PDF_GUTTER_PX);
-  const cropRight = Math.min(measureCanvas.width, maxX + PDF_GUTTER_PX);
-  const cropTop = Math.max(0, minY - PDF_GUTTER_PX);
-  const croppedWidth = cropRight - cropLeft;
-
-  const trimScale = croppedWidth > 0 ? PDF_CANVAS_WIDTH / croppedWidth : 1;
-  const leftOffset = -cropLeft * trimScale;
-  const topOffset = -cropTop * trimScale;
+  const trim = trimPdfPage(ink, measureCanvas.width);
+  const trimScale = trim.scale;
+  const leftOffset = -trim.left * trimScale;
+  const topOffset = -trim.top * trimScale;
 
   // Render high-resolution vector output onto destination canvas at device scale factor 2.
   const finalScale = refScale * trimScale * PDF_DEVICE_SCALE;

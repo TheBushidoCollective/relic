@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { ArchiveEntry, ArchiveListing } from '@relic/format/cover';
 import {
   archiveRow,
+  artworkBox,
+  fitArtwork,
   fitPath,
   fitWaveform,
   formatBytes,
@@ -18,6 +20,8 @@ interface GlobalWithDom {
     getPropertyValue: (name: string) => string;
     paddingTop: string;
     paddingBottom: string;
+    paddingLeft?: string;
+    paddingRight?: string;
     borderTopWidth: string;
     borderBottomWidth: string;
   };
@@ -322,5 +326,76 @@ describe('fitWaveform', () => {
     );
     expect(wave.style.getPropertyValue('--wf-h')).not.toBe('');
     expect(wave.style.getPropertyValue('--wf-y')).not.toBe('');
+  });
+});
+
+describe('artworkBox', () => {
+  // The cover's stage leaves a 275 px square (315 less two 20 px paddings)
+  // and the artwork carries a 1 px hairline.
+  const SIDE = 275;
+  const BORDER = 1;
+
+  test('ordinary square artwork is scaled down to fill the square', () => {
+    const box = artworkBox(600, 600, SIDE, BORDER);
+    expect(box.width).toBeCloseTo(275, 6);
+    expect(box.height).toBeCloseTo(275, 6);
+  });
+
+  test('tiny square artwork is scaled up to the same square', () => {
+    const box = artworkBox(64, 64, SIDE, BORDER);
+    expect(box.width).toBeCloseTo(275, 6);
+    expect(box.height).toBeCloseTo(275, 6);
+  });
+
+  test('non-square artwork fits inside the square, whole and undistorted', () => {
+    const wide = artworkBox(1000, 670, SIDE, BORDER);
+    expect(wide.width).toBeCloseTo(275, 6);
+    expect(wide.height).toBeCloseTo(273 * 0.67 + 2, 6);
+    expect((wide.width - 2) / (wide.height - 2)).toBeCloseTo(1000 / 670, 6);
+
+    const tall = artworkBox(300, 600, SIDE, BORDER);
+    expect(tall.height).toBeCloseTo(275, 6);
+    expect(tall.width).toBeCloseTo(273 / 2 + 2, 6);
+  });
+});
+
+describe('fitArtwork', () => {
+  beforeEach(() => {
+    domGlobal.getComputedStyle = (el: ElementStub) => ({
+      getPropertyValue: (name: string) => el.style.getPropertyValue(name),
+      paddingTop: el.className === 'stage' ? '20px' : '0px',
+      paddingBottom: el.className === 'stage' ? '20px' : '0px',
+      paddingLeft: el.className === 'stage' ? '20px' : '0px',
+      paddingRight: el.className === 'stage' ? '20px' : '0px',
+      borderTopWidth: el.className === 'stage' ? '0px' : '1px',
+      borderBottomWidth: el.className === 'stage' ? '0px' : '1px',
+    });
+  });
+
+  afterEach(() => {
+    delete domGlobal.getComputedStyle;
+  });
+
+  test('sizes tiny artwork to the largest square the stage leaves', () => {
+    const cover = new ElementStub('div');
+    const stage = new ElementStub('main');
+    stage.className = 'stage';
+    stage.clientWidth = 600;
+    stage.clientHeight = 315;
+    const img = Object.assign(new ElementStub('img'), {
+      naturalWidth: 64,
+      naturalHeight: 64,
+    });
+    stage.appendChild(img);
+    cover.appendChild(stage);
+
+    fitArtwork(
+      cover as unknown as HTMLElement,
+      img as unknown as HTMLImageElement
+    );
+
+    const style = img.style as unknown as { width: string; height: string };
+    expect(style.width).toBe('275px');
+    expect(style.height).toBe('275px');
   });
 });
