@@ -76,6 +76,7 @@ async function callFresh(
     cwd: packageRoot,
     env: {
       ...process.env,
+      RELIC_CHROME_PATH: 'none',
       RELIC_SERVICE_ORIGIN: SERVICE,
       RELIC_PUBLISH_STATE: publishStatePath(),
     },
@@ -129,6 +130,11 @@ try {
     files: nodeFiles,
     fetch: grantFetch(),
     clientName: 'relic-mcp/path-check',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
   const firstPath = join(first, 'docs', 'report.md');
   const secondPath = join(second, 'docs', 'report.md');

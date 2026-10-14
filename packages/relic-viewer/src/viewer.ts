@@ -1126,3 +1126,21 @@ export async function loadCommentedRelics(
     return null;
   }
 }
+
+export const AUDIO_EXTENSIONS: Record<string, true> = {
+  mp3: true,
+  wav: true,
+  aac: true,
+  ogg: true,
+  flac: true,
+  m4a: true,
+  weba: true,
+  opus: true,
+};
+
+export function isAudioMedia(mimetype: string, filename: string): boolean {
+  const mime = mimetype.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (mime.startsWith('audio/')) return true;
+  const ext = filename.toLowerCase().split('.').pop() ?? '';
+  return AUDIO_EXTENSIONS[ext] === true;
+}

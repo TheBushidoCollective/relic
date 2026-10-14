@@ -1,0 +1,345 @@
+{
+  "decision": "Render each cover on the publisher's machine. A zero-dependency CDP client launches the user's own Chrome, Chromium or Edge headless over --remote-debugging-pipe. That browser loads a cover page that ships inside the relic-mcp package, built at relic-mcp build time from relic-viewer's own renderer modules, served through CDP Fetch interception on the non-resolvable origin https://cover.relic.invalid, with network egress closed by browser flags. Audio and video are decoded by the optional ffmpeg the client already probes for. The finished 1200x630 PNG or JPEG goes up through a new token-authorized POST /api/relics/{id}/cover that validates it strictly and stores it at m/cover/{id}/{sha256}. It is served at /{id}/cover/{sha256}.{png|jpg}, and og:image points at it only while it depicts the live, current version. Otherwise og:image stays card.v1.png byte for byte.",
+  "rejected": [
+    "Option (a), a render page served by the deployed server and fed plaintext over CDP. It hands the publish path server-supplied code holding the whole plaintext. That is the unreversed locked constraint frame.md:13 ('the server hands the agent no code to run, and that half stands unreversed'), restated in README.md:316-322 and publish.ts:9-12. It also widens Jason's authorized leak from first-screen pixels to the entire file under operator intent. A compromised server could exfiltrate by navigation, and it would control the page's CSP too.",
+    "Option (b), the real viewer at the full link. Same violation, plus it calls /api/relics/{id}/mint (spends opens and download cap) and needs the key in a URL handed to a browser.",
+    "Playwright or Puppeteer: they break the zero-runtime-dependency package (relic-mcp/package.json has no dependencies field; engines node>=18).",
+    "Server-side rendering: the server would need plaintext.",
+    "Pure-Node rasterizers (satori, resvg, canvas): they are runtime dependencies and cannot run HTML, JSX or PDF the way the viewer does.",
+    "Auto-downloading a browser: a runtime download of executable code, which conflicts with the provenance and readable-source posture (README.md:289-299)."
+  ],
+  "evidence": {
+    "code_facts": [
+      "frame.md:13 locked constraint 1, unreversed for the publish path; README.md:316-322 explains why a server-returned script is rejected.",
+      "relic-mcp ships zero runtime deps; index.ts:5-7 claims plain Node from 18; build.ts:42-44 uses define for build-time constants (process.env.RELIC_MCP_VERSION, read at server.ts:1342).",
+      "Existing optional-binary precedent: resolve-anchor.ts:154-193 probeFfmpeg (RELIC_FFMPEG_PATH, 'none'|'disabled', candidate paths), runFfmpeg pipe then 0600 temp-file fallback (204-291), PublishDeps.ffmpegPath seam publish.ts:193-194. It uses Promise.withResolvers (177, 224), a Node 22+ API, despite engines >=18. On Node 18/20 probeFfmpeg's try/catch swallows the TypeError and silently reports ffmpeg absent [INFERENCE from reading; Node 18/20 not run].",
+      "Viewer renderers: markdown main.ts:734-770, code 772-795, image 797-820, sandbox frame host 881, html 1035, jsx 1055, download card 1081, pdf 1112 (pdf.ts hardcodes '/assets/pdf.worker.js' at module load, pdf.ts:13-22), media 1165, audio detection isAudioMedia main.ts:1147-1163 (not exported).",
+      "Routing truth: viewer.ts routeFor 686-730 uses filename + declared mimetype + sniff; classFromMimetype sends image/svg+xml to html (viewer.ts:763) while the class table maps .svg to image (renderer-class.ts:141). Covers therefore must follow routeFor, not the stored class.",
+      "Sniff gaps: MAGIC (renderer-class.ts:113-129) has no WebP, ICO, 7z or RAR, so WebP/ICO images route to download (leastPrivileged 428-451) and .7z/.rar sniff as binary.",
+      "Sandbox frame protocol to reuse: sandbox.ts:1264-1349 ('relic:render' / 'relic:render-jsx'), mountComponent blob import 1351-1376, 'relic:tree' after two frames 1381-1394, 'relic:sandbox-ready' 1458. Production frame CSP app.ts:310-325 includes \"webrtc 'block'\".",
+      "Styles: no webfonts by design (styles.css:10-11), tokens 14-38, .stage padding 2rem 1.25rem (696-698), .doc max-width 46rem (700-703), .prose 1.06rem/1.7 (736-739).",
+      "Viewer dist/ is served wholesale as /assets by the server (relic-server/src/index.ts:136-139), and serveAsset gives non-PNG files no CSP (app.ts:262-272). So the cover page must never be built into relic-viewer/dist.",
+      "Server: shell og tags app.ts:2151 and 2177-2185, CARD_IMAGE_ALT 2098; router app.ts:121-135 (only 1-segment ids reach shell); apiRoute 329-416; republish handler 678-844 with beginVersion 816-822; complete 860-890; operatorDelete 1136-1229 deletes ciphertext and comments but keeps the row (the tombstone is checked first everywhere).",
+      "Store: RelicRow store.ts:19-63; gcsStore put is JSON-only (gcsstore.ts:144-174); mutateRelic CAS at gcsstore.ts:537; beginVersion gcsstore.ts:246-265. ObjectStorage (storage.ts:50-66) has no server-side write.",
+      "Infra: bucket prefixes r (ciphertext) and m (store) at deploy/terraform/modules/relic/locals.tf:25-26. Only m/challenge/ and m/dedup/ have lifecycle deletes (locals.tf:36-39). Soft delete is on (resource.google_storage_bucket.relics.tf:45-47). The LB backend has no Cloud CDN (resource.google_compute_lb.service.tf:32-47), so Cloud Run serves every cover fetch.",
+      "Tests that encode the old rule: unfurl-card-path.ts:189-194 (og:image is card.v1.png for a default publish), e2e.test.ts:806 and 936 (exact structuredContent key sets), PATH.md card section. Spawned path harnesses assert the MCP process prints nothing on stderr (comment-path.ts:128-129)."
+    ],
+    "measured": {
+      "setup": "Scratch probe /tmp/relic-cover-probe/probe.mjs (not committed; copy at local://cover-probe.mjs). Chrome 155.0.8059.40 on macOS, Node 24.15.0, Bun 1.4.2, ffmpeg 8.1.2.",
+      "results": [
+        "Pipe transport (stdio fds 3 and 4, NUL-framed JSON) works under Node 24 and Bun 1.4.2. First CDP response arrives 344-512 ms after spawn.",
+        "Fetch.fulfillRequest serves https://cover.relic.invalid pages, a module worker loaded by URL (/static/w.js) and a blob-URL worker, all with --host-resolver-rules=MAP * ~NOTFOUND and a dead proxy in place.",
+        "Emulation.setDeviceMetricsOverride 600x315 at deviceScaleFactor 2 gives a 1200x630 PNG with only IHDR/IDAT/IEND, 8-bit RGB (color type 2), not interlaced, and inflated IDAT exactly 630*(1+1200*3) = 2,268,630 bytes. JPEG q85 markers are APP0, APP2 (ICC), DQT, DQT, SOF0, DHT x4, SOS, so APP2 must be stripped before upload.",
+        "Legibility: a 17px serif prose sample at 600x315 CSS @2x renders crisp, with body text 34 image px (about 14 px at a 500 px unfurl). PNG 170,730 B; JPEG q85 64,328 B.",
+        "Sandboxed srcdoc frame (sandbox=allow-scripts) with a meta CSP: document.write'd HTML runs scripts, and a blob: module import works.",
+        "Egress, hostile HTML with no CSP at all aimed at a loopback collector (fetch, img, stylesheet, preconnect, sendBeacon, WebSocket, EventSource, delayed frame navigation, localhost variants): zero HTTP/TCP arrivals. Dropping the proxy alone still gave zero, and dropping the resolver rule alone still gave zero, so each layer is independently sufficient for HTTP-family traffic.",
+        "WebRTC STUN leaked (3 UDP packets) with --force-webrtc-ip-handling-policy, with meta CSP \"webrtc 'block'\", with Network.emulateNetworkConditions offline, and with --disable-blink-features=RTCPeerConnection. It went to zero with --webrtc-ip-handling-policy=disable_non_proxied_udp (loopback and LAN 10.4.1.26, two runs each) or with the profile pref webrtc.ip_handling_policy.",
+        "Page-session Fetch interception with pattern '*' never saw any request from the sandboxed srcdoc frame. Interception is an asset server, not containment.",
+        "A single Fetch.fulfillRequest body of 64 MiB works (600 ms in page). At 100 MiB Chrome closed the pipe (EPIPE), and the unhandled stream error crashed the Node host process. 7 x 16 MiB parts assembled to 100 MiB in 1.68 s.",
+        "ffmpeg: thumbnail=n=90 from MP4 with moov at the end fails on a pipe ('partial file') and works from a file (1920x1080 PNG), so use the existing temp-file fallback. '-filter_complex \"[0:a:0]aformat=channel_layouts=mono,showwavespic=s=2000x600:colors=white[w]\" -map \"[w]\"' works from a pipe, and the '-map 0:a:0' plus filtergraph form fails. Artwork extraction with '-map 0:v:0?' exits 0 with bytes when artwork is present and exits 234 with no bytes when absent."
+      ]
+    },
+    "inferred": [
+      "DNS egress via dns-prefetch is closed by MAP * ~NOTFOUND per the switch's documented semantics. Not measured (no packet capture).",
+      "Windows pipe transport and discovery: not run.",
+      "Bun 1.3.14 (CI pin) pipe transport: not run (measured on 1.4.2)."
+    ]
+  },
+  "decisions": {
+    "1_render_engine": {
+      "decision": "Use the publisher's system Chrome, Chromium or Edge, launched headless per cover over --remote-debugging-pipe by a zero-dependency CDP client in relic-mcp. One browser per publish call, a fresh 0700 temp profile removed after. Never pass --no-sandbox.",
+      "discovery": [
+        "deps seam: the renderer factory takes chromePath. undefined discovers; 'none' or 'disabled' -> skipped reason browser_disabled.",
+        "Env override RELIC_CHROME_PATH (mirrors RELIC_FFMPEG_PATH). 'none'|'disabled' -> browser_disabled. Any other value must be an executable file, else skipped browser_not_found with detail 'RELIC_CHROME_PATH points at <p>, which is not an executable file'. Discovery does not continue after a bad explicit value.",
+        "darwin, in order: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome, ~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome, /Applications/Chromium.app/Contents/MacOS/Chromium, /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge, /Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary.",
+        "linux, PATH lookup in order: google-chrome-stable, google-chrome, chromium, chromium-browser, microsoft-edge-stable, microsoft-edge, chrome-headless-shell; then /opt/google/chrome/chrome, /snap/bin/chromium.",
+        "win32: %PROGRAMFILES%\\Google\\Chrome\\Application\\chrome.exe, %PROGRAMFILES(X86)%\\Google\\Chrome\\Application\\chrome.exe, %LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe, %PROGRAMFILES(X86)%\\Microsoft\\Edge\\Application\\msedge.exe, %PROGRAMFILES%\\Microsoft\\Edge\\Application\\msedge.exe.",
+        "All platforms, after the defaults: PATH lookup of chrome-headless-shell and chromium.",
+        "Binaries whose basename contains 'headless-shell' get --headless; everything else gets --headless=new."
+      ],
+      "when_absent": "Publish and republish always complete. structuredContent.cover = {status:'skipped', reason:'browser_not_found', detail:'No Chrome, Chromium, or Edge was found on this machine (looked in: <list>). Set RELIC_CHROME_PATH to one to render covers.'}. The text result says 'Cover image: none. <detail> Link previews show the generic Relic card.' No cover request is sent and og:image stays card.v1.png. Launch failures (crash, root without sandbox, no CDP answer inside the startup timeout) -> browser_failed with the last 2 KB of Chrome stderr in detail. Chrome stderr is captured into a bounded buffer and never written to the MCP process's stderr."
+    },
+    "2_render_page": {
+      "decision": "Option (c). The cover page source lives in relic-viewer (packages/relic-viewer/src/cover/) and reuses its renderer modules: renderMarkdown, highlightCode, transpileJsx, sandbox.ts, styles.css and pdfjs-dist. A new buildCover({outdir}) in relic-viewer/build.ts emits it, and only relic-mcp/build.ts calls it, into packages/relic-mcp/dist/cover/. It is never written into relic-viewer/dist, so the service origin can never serve it. relic-mcp serves the files to Chrome through Fetch interception on https://cover.relic.invalid. The plaintext reaches the page only through that interception, so nothing leaves the machine.",
+      "html_jsx": "No usercontent origin. The cover page hosts the frame itself: <iframe sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\" srcdoc=frame.html>. frame.html is public/sandbox.html with the unminified sandbox.ts bundle inlined and the frame CSP as the first head element. The sandbox.ts protocol is reused unchanged.",
+      "csp_and_egress": "The page CSP arrives as a fulfilled response header and the frame CSP as a meta tag. Containment of relic content rests on browser flags, because interception cannot see the isolated sandboxed frame (measured). The flags are: --host-resolver-rules=MAP * ~NOTFOUND, --proxy-server=http://proxy.relic.invalid:1, --proxy-bypass-list=<-loopback>, --webrtc-ip-handling-policy=disable_non_proxied_udp, --disable-quic. Every fulfilled response carries cache-control: no-store so no plaintext lands in Chrome's disk cache.",
+      "version_skew": "The cover renderer is pinned to the npm client build. The server contract is only the upload endpoint and the og tags, both format-agnostic. Old client with new server: no covers, card. New client with old server: POST returns a non-problem 404, reported as skipped service_unsupported. Release the server first."
+    },
+    "3_per_class_rule": {
+      "viewport": "CSS 600x315 at deviceScaleFactor 2, giving 1200x630. Emulated prefers-color-scheme: light and prefers-reduced-motion: reduce. Body text reaches about 14 px at a 500 px unfurl (measured sample). The viewer's own .stage and .doc layout applies, with no bar, sidebar, toggle row or notices.",
+      "routing": "Node computes route = routeFor(filename, guessMimetype(filename, rendererClass), bytes) by importing @relic/viewer. The cover kind keys on route, not class.",
+      "table": [
+        {
+          "route": "markdown",
+          "kind": "markdown",
+          "producer": "page: main.stage.stage-markdown > div.doc > article.prose (innerHTML = renderMarkdown(text)). Input is the first 1 MiB cut at the last newline."
+        },
+        {
+          "route": "code",
+          "kind": "code",
+          "producer": "page: main.stage.stage-code > div.doc > buildCodeTable(text) (gutter + highlightCode). Same 1 MiB prefix."
+        },
+        {
+          "route": "sandboxed-html",
+          "kind": "html",
+          "producer": "page: srcdoc sandbox frame filling the viewport. Post relic:render, wait for relic:tree, settle 1000 ms. Whole file. SVG lands here."
+        },
+        {
+          "route": "sandboxed-jsx",
+          "kind": "jsx",
+          "producer": "same frame. Post relic:render-jsx with transpileJsx(text, dialect).",
+          "dialect": "Node passes 'tsx' when the filename ends .tsx, else 'jsx'"
+        },
+        {
+          "route": "image",
+          "kind": "image",
+          "producer": "page: <img> object-fit: cover; object-position: 50% 0% (top-anchored, horizontally centred), then await img.decode()."
+        },
+        {
+          "route": "pdf",
+          "kind": "pdf",
+          "producer": "page: pdfjs page 1 rendered 1200 device px wide (CSS 600), top-left aligned on white. The top 315 CSS px are captured. Password or parse failure -> skipped render_failed."
+        },
+        {
+          "route": "media, video",
+          "kind": "video",
+          "producer": "ffmpeg thumbnail=n=90 (the most representative of the first 90 frames, which avoids black fade-ins) as PNG at native size, then page <img> object-fit: cover; object-position: 50% 50%. A file with no video stream falls through to the audio rule."
+        },
+        {
+          "route": "media, audio (isAudioMedia)",
+          "kind": "audio-artwork | audio-waveform",
+          "producer": "ffmpeg '-map 0:v:0?' artwork PNG if present -> audio-artwork, else showwavespic 2000x600 white-on-transparent PNG -> audio-waveform. Both layouts are NEW DESIGNS."
+        },
+        {
+          "route": "download, content sniffs archive or class archive",
+          "kind": "archive",
+          "producer": "Node parses the listing (zip central directory; tar ustar/GNU/PAX headers; gzip: stream-gunzip, then tar if ustar at 257 else a one-entry listing from FNAME/ISIZE). The page lays it out. NEW DESIGN. bzip2, xz, zstd, 7z, rar and unknown formats -> skipped archive_format_unlisted, card. Zip-based Office files list their parts."
+        },
+        {
+          "route": "download, otherwise (binary, plus WebP/ICO that the viewer routes to download)",
+          "kind": "none",
+          "producer": "skipped no_cover_for_class, card. Justification: the recipient's first screen is Relic's download card, which shows no content. A hex dump would disclose raw bytes no recipient view shows, and a filename card would re-leak the envelope filename that title:'' exists to hide."
+        }
+      ],
+      "rules": "Covers never render the filename, title, mimetype or size: content only. Whitespace-only markdown or code -> skipped empty_content. new_designs_for_designer: archive listing, audio-artwork, audio-waveform."
+    },
+    "4_upload": {
+      "decision": "A separate JSON POST /api/relics/{id}/cover, authorized by publish_token in the body (the republish precedent), sent after the ciphertext PUT and complete. It is not inline in the grant, because a failed publish must never leave a plaintext cover behind and an old server must be detectable (404). It is not a signed GCS PUT, because the server must validate before anything is stored or served.",
+      "ordering_publish": "render (local, before encrypt and grant) -> encrypt -> grant -> PUT ciphertext -> complete -> savePublishState(cover_uploaded:false) -> POST cover -> if uploaded, savePublishState(cover_uploaded:true). If the second write fails the publish still succeeds, and the text says the local cover record was not updated.",
+      "ordering_republish": "digest -> duplicate gate (table below; may render first) -> render -> comment gate -> encrypt -> republish grant (server clears and deletes the old cover) -> PUT -> complete -> save state -> POST cover for the new version -> update state.",
+      "validation": "Shared validateCoverRaster in @relic/format/cover, which the client also runs before upload. The client strips PNG ancillary chunks and JPEG APP1-APP15/COM before upload.",
+      "storage": "m/cover/{id}/{sha256}, content-type set, no lifecycle rule, soft-delete applies. Row field cover (contract below)."
+    },
+    "5_serving": {
+      "decision": "GET|HEAD /{id}/cover/{sha256}.{png|jpg}, content-addressed. Republish changes the URL, so unfurl caches refresh. cache-control is public, max-age=86400 rather than immutable, so a takedown's tail in honoring caches is bounded to a day; a content-addressed URL never needs revalidation for correctness. The route mints nothing and touches no counter.",
+      "lifecycle": "New version: beginVersion clears row.cover, then the handler deletes every m/cover/{id}/* object. Decline is a republish without upload. Tombstone: operatorDelete deletes every cover object and reports covers_deleted. Expiry: the shell and cover route stop serving at once, and the object stays until a deletion, matching ciphertext behavior (bucket comment resource.google_storage_bucket.relics.tf:11-17). Deleted objects sit in soft delete per the existing policy.",
+      "fallback": "card.v1.png with today's exact tags when there is no row, a tombstone, expiry, no cover, cover.version !== row.version, or the store throws."
+    },
+    "6_disclosure": {
+      "surfaces": [
+        "relic-mcp server.ts: the publish and republish descriptions plus the cover input description; INSTRUCTIONS becomes 'Eight things', and item 8 is the cover; result text per status; describe_client structured fields and text.",
+        "skills/relic/SKILL.md (when to pass cover:false), relic-mcp README (what leaves the machine, the dist/cover renderer, the Chrome requirement), root README (readable-source section now covers dist/cover with vendored React, pdfjs and sucrase; the publish tool argument list).",
+        "/policy: disclosureStatement app.ts:2600 (server slice) gets a 'What we know' bullet and a cover section.",
+        "Specs: format.md 3.2 (what crosses), publish.md (input, endpoint, result, duplicate rule), service.md (endpoint, cover route, section 5 telemetry trade), viewer.md 6.2 (og:image rule).",
+        "Design docs: surface.md (one-raster budget reversed), topology.md (cover egress, no CDN, 1-day cache), storage.md (m/cover), operations.md (takedown, abuse surface).",
+        "knowledge/link-preview..., knowledge/relic-telemetry..., knowledge/renderer-class...; frame.md cost section; preconditions.md note that covers transit the app server; a dated entry in decisions.md; the title.ts comment; the store.ts header comment.",
+        "Use agent://SweepConstantRaster for every location and verdict."
+      ],
+      "release_order": [
+        "Merge to main. deploy.yml ships the server with the upload and serve routes and /policy describing covers. No released client sends covers yet, so the disclosure precedes the capability.",
+        "Post-deploy: run the live probe with the client built from source against https://relik.link.",
+        "Manual publish-mcp.yml with a version bump. Tool descriptions, INSTRUCTIONS, SKILL.md and describe_client ship in the same tarball that activates covers.",
+        "Run the live probe again through npx relic-mcp@<new version>.",
+        "Jason pastes one probe link into Slack or iMessage and confirms the cover unfurls. This is the one step no automation can observe."
+      ]
+    },
+    "7_guards_and_proof": {
+      "replacement_guarantee": "The service serves exactly two kinds of raster: /assets/card.v1.png, and a cover that a live row references for its current version and that passed validateCoverRaster. A declined cover leaves nothing in the row, the store or any URL.",
+      "guards": [
+        "G1 server, app.test.ts: a state table (no cover, declined, stale version, tombstoned, expired, unknown id, store throws, hash mismatch, extension mismatch) -> the shell og:image is card.v1.png and the cover route returns 404. Mutation proofs: drop the cover.version === row.version check, then drop the tombstone check in the cover route; each must fail a named case.",
+        "G2 format, cover.test.ts: the validator rejects a PNG+ZIP polyglot (trailing bytes), a tEXt chunk, 1200x631, interlaced, 16-bit, a bad CRC, oversized IDAT, JPEG with COM, JPEG with APP1, JPEG with bytes after EOI, and wrong JPEG dims. Mutation: remove the trailing-data check, and the polyglot case must fail.",
+        "G3 declined leaves nothing. Server: republish without upload -> row.cover undefined, listCovers(id) empty, the old URL 404. Client: cover:false -> zero renderCover calls and zero /cover requests. Mutation: make beginVersion keep cover, and the server case must fail.",
+        "G4 renderer containment: chromeArgs is pinned by an exact-list test, and the cover-path egress collector must see zero arrivals. Mutation: drop --webrtc-ip-handling-policy -> the list test fails, and the collector sees UDP (measured).",
+        "G5 the service never serves the renderer: relic-viewer dist/ contains none of the cover files, and GET /assets/cover.js returns 404.",
+        "Every worker runs its mutations and names the failing test in the PR body."
+      ],
+      "datastore_proof": "cover-path.ts and app.test.ts assert row.cover === undefined, store.listCovers(id) has length 0, and every previously issued cover URL returns 404 after a cover:false republish. gcsstore.test.ts asserts deleteCovers lists m/cover/{id}/ and issues a DELETE per object plus a CAS clear.",
+      "e2e": "packages/relic-mcp/test/cover-path.ts (contract below), plus a production probe and PATH.md entries."
+    }
+  },
+  "contracts": {
+    "format_module": "packages/relic-format/src/cover.ts, exported as \"./cover\" in packages/relic-format/package.json:\nexport const COVER_WIDTH = 1200; COVER_HEIGHT = 630; COVER_CSS_WIDTH = 600; COVER_CSS_HEIGHT = 315; COVER_DEVICE_SCALE = 2;\nexport const COVER_CAP_BYTES = 524_288; COVER_PAGE_PROTOCOL = 1; COVER_INPUT_PART_BYTES = 16_777_216;\nexport const COVER_KINDS = ['markdown','code','html','jsx','image','pdf','video','audio-artwork','audio-waveform','archive'] as const; export type CoverKind; export function isCoverKind(v: unknown): v is CoverKind;\nexport const COVER_TYPES = ['image/png','image/jpeg'] as const; export type CoverType; export function coverExtension(t: CoverType): 'png' | 'jpg';\nexport interface ArchiveEntry { readonly path: string; readonly size: number | null; readonly directory: boolean }\nexport interface ArchiveListing { readonly format: 'zip' | 'tar' | 'tar.gz' | 'gzip'; readonly entries: readonly ArchiveEntry[] /* first 200, archive order */; readonly totalEntries: number | null /* null when the walk cap stopped counting */; readonly totalBytes: number | null }\nexport interface CoverRenderRequest { readonly protocol: 1; readonly kind: CoverKind; readonly input?: { readonly bytes: number; readonly parts: number; readonly mimetype: string }; readonly dialect?: 'jsx' | 'tsx'; readonly listing?: ArchiveListing }\nexport type CoverRenderResult = { readonly ok: true } | { readonly ok: false; readonly reason: 'decode_failed' | 'parse_failed' | 'timeout' | 'empty'; readonly detail: string };\nexport interface CoverSource { readonly bytes: Uint8Array; readonly filename: string; readonly mimetype: string; readonly rendererClass: RendererClass }\nexport type CoverSkipReason = 'browser_disabled' | 'browser_not_found' | 'browser_failed' | 'ffmpeg_not_found' | 'no_cover_for_class' | 'archive_format_unlisted' | 'empty_content' | 'render_failed' | 'render_timeout' | 'over_size_budget' | 'service_unsupported' | 'service_refused' | 'upload_failed';\nexport type CoverOutcome = { readonly status: 'rendered'; readonly kind: CoverKind; readonly type: CoverType; readonly bytes: Uint8Array } | { readonly status: 'skipped'; readonly reason: CoverSkipReason; readonly detail: string };\nexport type CoverReport = { readonly status: 'uploaded'; readonly kind: CoverKind; readonly type: CoverType; readonly url: string; readonly bytes: number } | { readonly status: 'declined' } | { readonly status: 'skipped'; readonly reason: CoverSkipReason; readonly detail: string };\nexport type CoverValidationFailure = 'size' | 'signature' | 'dimensions' | 'structure' | 'chunk' | 'crc' | 'pixel_data' | 'trailing_data';\nexport type CoverValidation = { readonly ok: true; readonly type: CoverType } | { readonly ok: false; readonly failure: CoverValidationFailure; readonly detail: string };\nexport function crc32(bytes: Uint8Array): number; // IEEE, for PNG\nexport function validateCoverRaster(bytes: Uint8Array, inflate: (data: Uint8Array, maxOutputLength: number) => Uint8Array): CoverValidation; // no node imports; callers pass node:zlib inflateSync with {maxOutputLength}",
+    "validation_rules": "length 0 or > COVER_CAP_BYTES -> size. PNG: 8-byte signature; every chunk length within bounds and its CRC valid (crc); the first chunk is IHDR, length 13, 1200x630 (dimensions), bit depth 8, color type 2 or 6, compression 0, filter 0, interlace 0 (structure). Only IHDR, then one or more contiguous IDAT, then IEND of length 0, are allowed (chunk). Zero bytes after IEND (trailing_data). Inflated IDAT length is exactly 630*(1+1200*bpp) with bpp 3 or 4, and every row's filter byte is 0..4 (pixel_data). JPEG: SOI; markers allowed before SOS are APP0 (once, 'JFIF\\0'), DQT, SOF0 or SOF2 (exactly one, precision 8, height 630, width 1200, components 1 or 3), DHT, DRI. Then SOS, entropy data with FF00 stuffing and RST0-7, further DHT/SOS for progressive, and EOI as the last two bytes (trailing_data). Any other marker (APP1-15, COM) -> chunk.",
+    "row_and_store": "store.ts: export interface RelicCover { readonly version: number; readonly sha256: string /* lowercase hex of stored bytes */; readonly type: CoverType; readonly kind: CoverKind; readonly bytes: number; readonly uploadedAt: number }\nRelicRow gains: cover?: RelicCover | undefined\nRelicStore gains:\n  putCover(id: string, cover: RelicCover, bytes: Uint8Array): Promise<'stored' | 'stale_version' | 'not_found'>\n  getCoverBytes(id: string, sha256: string): Promise<Uint8Array | undefined>\n  listCovers(id: string): Promise<readonly string[]>   // sha256 of every stored object for id\n  deleteCovers(id: string): Promise<number>            // deletes every object, clears row.cover by CAS, returns the count\nbeginVersion (both stores) also sets cover: undefined.\nGCS object key: `${storePrefix}/cover/${id}/${sha256}` (production m/cover/{id}/{sha256}), uploadType=media with content-type = cover.type. getCoverBytes uses ?alt=media; listCovers uses a names-only list of prefix `${storePrefix}/cover/${id}/`.\nputCover (GCS) sequence: write the object, then mutateRelic. If row.version !== cover.version, return 'stale_version' and delete the just-written object; if there is no row, return 'not_found'. Otherwise set row.cover, then delete the other objects under the prefix. MemoryStore: Map<id, Map<sha256, {bytes, type}>> with identical semantics.",
+    "upload_endpoint": "POST /api/relics/{id}/cover\nRequest: content-type application/json; body over 720,000 bytes (by content-length, or by a capped streamed read) -> invalid_cover failure size.\n{ \"publish_token\": string, \"version\": integer, \"kind\": CoverKind, \"type\": \"image/png\" | \"image/jpeg\", \"data\": string /* RFC 4648 base64, padded, /^[A-Za-z0-9+/]*={0,2}$/, length % 4 === 0 */ }\nCheck order: killSwitchEngaged -> service_paused; limiter.check(`cover ${ip}`, config.publishRateLimit) -> publish_rate_limited; parseRelicId -> invalid_relic_id; tombstone -> relic_removed; row -> relic_not_found; body cap and JSON -> invalid_cover (size | structure); sha256Hex(publish_token) timingSafeEqual row.publishTokenHash -> invalid_publish_token; version !== row.version -> cover_version_stale (extensions relic_id, current_version); storage.stat(objectKey(id, version)) absent -> relic_not_yet_published; isCoverKind and COVER_TYPES -> invalid_cover structure; base64 -> invalid_cover structure; decoded length > config.coverCapBytes -> invalid_cover size (size_limit_bytes); validateCoverRaster(bytes, inflateSync) -> invalid_cover <failure>; the declared type must match the detected type -> invalid_cover signature; store.putCover -> stale_version -> cover_version_stale | not_found -> relic_not_found.\n200: { \"relic_id\": string, \"version\": number, \"kind\": CoverKind, \"type\": CoverType, \"sha256\": string, \"bytes\": number, \"cover_url\": \"<serviceOrigin>/<id>/cover/<sha256>.<png|jpg>\" }\nproblems.ts: add invalid_cover 400 'Invalid cover image', cover_version_stale 409 'Cover is for a version that is no longer current'. ProblemExtensions: cover_validation_failure?: CoverValidationFailure; current_version?: number.\nconfig.ts: coverCapBytes: COVER_CAP_BYTES (imported from @relic/format/cover, like PLAINTEXT_CAP_BYTES).",
+    "serve_route": "Router (app.ts handle, before the final 404): segments.length === 3 && segments[1] === 'cover' && head is not reserved && method GET|HEAD -> coverRoute(head, segments[2]).\nName must match /^([0-9a-f]{64})\\.(png|jpg)$/. Check order: parseRelicId, tombstone, row, expiry, row.cover present, cover.version === row.version, sha256 equal, extension === coverExtension(type), getCoverBytes. Any miss -> 404, body 'Not found', headers cache-control: no-store, x-content-type-options: nosniff, x-robots-tag: noindex. A store error -> 503 with cache-control: no-store.\n200 headers exactly: content-type: <cover.type>; content-length: <n>; cache-control: public, max-age=86400; x-content-type-options: nosniff; referrer-policy: no-referrer; x-robots-tag: noindex; content-security-policy: default-src 'none'; sandbox. No content-encoding. HEAD: same headers, null body.\nNever calls mint, markPublished, consumeMint, rememberMint or appendMintLog.",
+    "shell_og": "When there is no tombstone, the row exists, the relic is not expired, and row.cover?.version === row.version:\n  og:image and twitter:image = `${serviceOrigin}/${canonicalId}/cover/${cover.sha256}.${coverExtension(cover.type)}`\n  og:image:type = cover.type; og:image:width = 1200; og:image:height = 630; og:image:alt = COVER_ALT[cover.kind]\nOtherwise today's tags, byte for byte. Tag order unchanged.\ncard.ts COVER_ALT: markdown 'The opening of this Markdown document, as it renders.'; code 'The first lines of this code file, as they render.'; html 'The top of this HTML page, as it renders.'; jsx 'The top of this JSX component, as it renders.'; image 'This image, cropped to the card.'; pdf 'The top of this PDF's first page.'; video 'A frame from the opening seconds of this video.'; audio-artwork 'The artwork embedded in this audio file.'; audio-waveform 'The waveform of this audio file.'; archive 'The list of files inside this archive.'",
+    "server_other": "republish handler: after store.beginVersion succeeds, await store.deleteCovers(relicId). Errors propagate as 500, the same as a signUpload failure after beginVersion today. operatorDelete: const coversRemoved = await store.deleteCovers(relicId) before putTombstone; add covers_deleted to the response JSON. disclosureStatement: add the cover disclosure (what it is, default on in relic-mcp, who can see it including unfurl services and their caches, cover:false and republish clear it, takedown deletes it, expiry stops serving while the object remains until deletion, soft-delete retention). store.ts header comment and RelicRow.title comment amended.",
+    "client_surface": "PublishInput and RepublishInput: cover?: boolean | undefined (undefined means true). inputSchema property cover: { type:'boolean', default:true, description:'Optional. Render a picture of the first screen of the file on this machine and upload it for link previews. Defaults to true. NOT encrypted: the service stores it and anyone who fetches the link sees it, with or without the key. Pass false for anything you would not show in a chat preview.' }.\nPublishDeps gains: readonly renderCover: CoverRenderer (required; every test deps object passes a fake).\nResults gain cover: CoverReport. outputSchema cover = { type:'object', properties:{ status:{enum:['uploaded','declined','skipped']}, kind:{type:'string'}, type:{type:'string'}, url:{type:'string'}, bytes:{type:'integer'}, reason:{type:'string'}, detail:{type:'string'} }, required:['status'], additionalProperties:false }, and 'cover' is added to required.\nText lines: uploaded -> 'Cover image: uploaded. Link previews now show <PHRASE[kind]>. It is NOT encrypted: the service and anyone holding the link, even without the key, can see it. Republish with cover: false to remove it.' declined -> 'Cover image: none, as asked. Link previews show the generic Relic card.' skipped -> 'Cover image: none. <detail> Link previews show the generic Relic card.' PHRASE: markdown 'the top of the rendered document'; code 'the first lines of the file'; html 'the top of the rendered page'; jsx 'the top of the rendered component'; image 'the image, cropped to fit'; pdf 'the top of the first page'; video 'a frame from the opening seconds'; audio-artwork 'the artwork embedded in the file'; audio-waveform 'the waveform of the audio'; archive 'the list of files inside'.\nUpload error mapping (src/cover/upload.ts, never throws): 200 with cover_url -> uploaded; ServerRefusal code 'unknown' with status 404 -> service_unsupported ('the service at <origin> does not accept cover images (HTTP 404)'); any other problem -> service_refused ('<code>: <detail>'); network or AbortSignal.timeout(30000) -> upload_failed.\nstate.ts PublishState gains cover_uploaded?: boolean | undefined. The validator at state.ts:353 also accepts it only as a boolean.\nRepublish duplicate gate (republish.ts:196-219). same = digest equal; requested = input.cover !== false; previous = state.cover_uploaded === true. !same -> proceed. same && !requested && !previous -> duplicate_version. same && !requested && previous -> proceed (removes the cover). same && requested && previous -> duplicate_version. same && requested && !previous -> render first; rendered -> proceed (adds the cover); skipped -> duplicate_version with detail '... and no cover could be rendered: <detail>'.\nINSTRUCTIONS item 8: 'By default relic_publish and relic_republish upload a picture of the file's first screen, unencrypted, for link previews: the service and anyone holding the link without the key can see it. Pass cover: false for anything you would not show in a chat preview.'\ndescribe_client: replace plaintext_transmitted_to_service:false with plaintext_bytes_transmitted_to_service:false and cover_image:'by default a 1200x630 picture of the first screen, rendered on this machine by a local Chrome, Chromium, or Edge with networking disabled (ffmpeg for audio and video), uploaded unencrypted and shown in link previews; cover: false withholds it'. Add the matching step to the describeClient text.",
+    "cdp_module": "packages/relic-mcp/src/cover/cdp.ts:\nexport interface CdpEvent { readonly method: string; readonly params: Record<string, unknown>; readonly sessionId?: string }\nexport class CdpError extends Error { readonly method: string; readonly code: number }\nexport class CdpClosedError extends Error {}\nexport interface CdpConnection {\n  send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>>;\n  onEvent(listener: (event: CdpEvent) => void): () => void;\n  waitForEvent(method: string, options: { readonly sessionId?: string; readonly timeoutMs: number; readonly predicate?: (event: CdpEvent) => boolean }): Promise<CdpEvent>;\n  readonly closed: Promise<void>; // resolves on transport close; every pending send rejects with CdpClosedError\n  dispose(): void;\n}\nexport function connectPipe(toChrome: NodeJS.WritableStream, fromChrome: NodeJS.ReadableStream): CdpConnection;\nRules: frames are JSON + '\\0', accumulated as Buffers (never string concatenation, so split UTF-8 survives); 'error' listeners on both streams and on the child (EPIPE closes the connection instead of crashing the MCP process, measured hazard); no Node 22-only APIs (no Promise.withResolvers, no global WebSocket).\npackages/relic-mcp/src/cover/chrome.ts:\nexport type ChromeDiscovery = { kind:'found'; path:string; source:'env'|'default'|'path' } | { kind:'disabled'; detail:string } | { kind:'not_found'; detail:string; searched: readonly string[] };\nexport interface DiscoverySystem { readonly env: Readonly<Record<string, string | undefined>>; readonly platform: NodeJS.Platform; readonly homedir: string; readonly isExecutable: (path: string) => Promise<boolean> }\nexport async function discoverChrome(override: string | undefined, sys: DiscoverySystem): Promise<ChromeDiscovery>;\nexport function chromeArgs(binaryPath: string, userDataDir: string): readonly string[];\nexport interface RunningChrome { readonly cdp: CdpConnection; readonly product: string; close(): Promise<void> } // Browser.close, wait for exit up to 5000 ms, SIGKILL, rm -rf the profile\nexport async function launchChrome(binaryPath: string, options: { readonly startupTimeoutMs: number }): Promise<RunningChrome>; // spawn stdio ['ignore','ignore','pipe','pipe','pipe']; startup = Browser.getVersion answered; throws ChromeLaunchError carrying the stderr tail\nchromeArgs, exact order (pinned by test): headless flag; --remote-debugging-pipe; --user-data-dir=<dir>; --no-first-run; --no-default-browser-check; --disable-background-networking; --disable-component-update; --disable-default-apps; --disable-extensions; --disable-sync; --disable-domain-reliability; --disable-breakpad; --disable-crash-reporter; --metrics-recording-only; --mute-audio; --hide-scrollbars; --force-color-profile=srgb; --use-mock-keychain; --password-store=basic; --host-resolver-rules=MAP * ~NOTFOUND; --proxy-server=http://proxy.relic.invalid:1; --proxy-bypass-list=<-loopback>; --webrtc-ip-handling-policy=disable_non_proxied_udp; --disable-quic; about:blank. Never --no-sandbox. Never substitute --force-webrtc-ip-handling-policy (measured ineffective).",
+    "renderer_factory": "packages/relic-mcp/src/cover/render.ts:\nexport interface CoverRendererOptions { readonly chromePath: string | undefined; readonly ffmpegPath: string | null | undefined; readonly assetDir: string; readonly deadlineMs: number }\nexport type CoverRenderer = (source: CoverSource) => Promise<CoverOutcome>; // never throws\nexport function chromeCoverRenderer(options: CoverRendererOptions): CoverRenderer;\nsrc/cover/assets.ts: export function coverAssetDir(): string = fileURLToPath(new URL(process.env.RELIC_MCP_COVER_DIR ?? '../../dist/cover/', import.meta.url)); relic-mcp/build.ts defines 'process.env.RELIC_MCP_COVER_DIR': JSON.stringify('./cover/'). The protocol test asserts the bundle no longer contains the raw expression.\nindex.ts wiring (done at integration): renderCover: chromeCoverRenderer({ chromePath: process.env['RELIC_CHROME_PATH'], ffmpegPath: undefined, assetDir: coverAssetDir(), deadlineMs: 45000 }).\nConstants: CHROME_STARTUP_TIMEOUT_MS 10000; PAGE_LOAD_TIMEOUT_MS 10000; RENDER_TIMEOUT_MS 20000 (Node side, around the evaluate); page-side render timeout 15000; FRAME_SETTLE_MS 1000; whole-cover deadline 45000 (kill Chrome -> render_timeout); ffmpeg runs get timeoutMs 30000; TEXT_PREFIX_BYTES 1048576; archive walk cap 100000 entries or 1 GiB decompressed; listing cap 200 entries.",
+    "page_protocol": "Virtual origin https://cover.relic.invalid. Node handles Fetch.requestPaused (pattern '*', stage Request): /index.html, /cover.js, /cover.css, /styles.css, /frame.html, /pdf.worker.mjs from assetDir; /input/{i} = bytes.subarray(i*16 MiB, (i+1)*16 MiB); anything else -> Fetch.failRequest errorReason BlockedByClient. Every fulfilled response carries cache-control: no-store and a content-type by extension (.html text/html; charset=utf-8, .js/.mjs text/javascript; charset=utf-8, .css text/css; charset=utf-8, input application/octet-stream).\nindex.html additionally carries content-security-policy: default-src 'none'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; worker-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'\nframe.html, first head element: <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; worker-src 'none'; form-action 'none'; base-uri 'none'\">\nNode CDP sequence: Target.createTarget {url:'about:blank'}; Target.attachToTarget {targetId, flatten:true}; on that session: Fetch.enable; Page.enable; Runtime.enable; Emulation.setDeviceMetricsOverride {width:600,height:315,deviceScaleFactor:2,mobile:false}; Emulation.setEmulatedMedia {features:[{name:'prefers-color-scheme',value:'light'},{name:'prefers-reduced-motion',value:'reduce'}]}; Page.navigate {url:'https://cover.relic.invalid/index.html'}; wait for Page.loadEventFired; Runtime.evaluate 'window.__relicCover && window.__relicCover.protocol' must equal 1, else render_failed 'cover renderer assets are from a different build'; Runtime.evaluate `window.__relicCover.render(${JSON.stringify(request)})` with awaitPromise and returnByValue -> CoverRenderResult; if ok, Page.captureScreenshot {format:'png', captureBeyondViewport:false}. No Runtime binding: render completion comes only from the main-world evaluate, so frame content cannot spoof it.\nPage API (cover.js module, assigned synchronously at top level): window.__relicCover = { protocol: 1, render(request: CoverRenderRequest): Promise<CoverRenderResult> }. Input bytes: fetch('/input/0'..'/input/{parts-1}'), joined into new Blob(parts, {type: input.mimetype}). Every kind ends with await document.fonts.ready and two requestAnimationFrame ticks. html and jsx: fetch('/frame.html') text as srcdoc; post relic:render or relic:render-jsx after relic:sandbox-ready; wait for relic:tree; then FRAME_SETTLE_MS. pdf: GlobalWorkerOptions.workerPort = new Worker('/pdf.worker.mjs', {type:'module'}) created lazily, never via pdf.ts.\nEncode ladder (src/cover/raster.ts): PNG -> normalizePng (keep IHDR/IDAT/IEND) -> validateCoverRaster; if bytes <= COVER_CAP_BYTES, use it. Else JPEG q85 -> normalizeJpeg (drop APP1-15, COM) -> validate; else JPEG q70; else skipped over_size_budget. A validation failure on our own output -> render_failed.",
+    "ffmpeg_commands": "Reuse runFfmpeg (pipe, then the 0600 temp fallback).\nvideo: ['-hide_banner','-loglevel','error','-i','pipe:0','-map','0:v:0','-vf','thumbnail=n=90','-frames:v','1','-f','image2','-c:v','png','pipe:1']\nartwork: ['-hide_banner','-loglevel','error','-i','pipe:0','-map','0:v:0?','-frames:v','1','-c:v','png','-f','image2','pipe:1'] (non-zero exit or empty output means no artwork)\nwaveform: ['-hide_banner','-loglevel','error','-i','pipe:0','-filter_complex','[0:a:0]aformat=channel_layouts=mono,showwavespic=s=2000x600:colors=white[w]','-map','[w]','-frames:v','1','-f','image2','-c:v','png','pipe:1']\nNo ffmpeg -> skipped ffmpeg_not_found ('ffmpeg is needed to depict audio and video and was not found; set RELIC_FFMPEG_PATH').",
+    "designer_constraints": "Archive, audio-artwork and audio-waveform layouts: canvas 600x315 CSS at DSF 2; viewer tokens from styles.css:14-38 and the system font stacks only (no webfonts); content only (no wordmark, title, filename, class label or the word relic); minimum text 14 CSS px; strings set via textContent only; archive shows as many entries as fit plus '+ N more' (totalEntries, or plain 'more' when null); audio-artwork shows the artwork uncropped; audio-waveform uses the white PNG as a CSS mask-image tinted from the tokens, with no time labels (none are supplied)."
+  },
+  "plan": {
+    "phase_1_parallel": [
+      {
+        "slice": "F shared contracts (task agent)",
+        "files": [
+          "packages/relic-format/src/cover.ts (new, contract above)",
+          "packages/relic-format/package.json (exports './cover')",
+          "packages/relic-format/test/cover.test.ts (new: fixtures built in-test with node:zlib deflateSync + crc32)",
+          "packages/relic-viewer/src/viewer.ts (move AUDIO_EXTENSIONS and isAudioMedia from main.ts:1147-1163, exported)",
+          "packages/relic-viewer/src/main.ts (import isAudioMedia)",
+          "packages/relic-mcp/package.json (devDependencies '@relic/viewer': 'workspace:*')",
+          "bun.lock (bun install)"
+        ],
+        "acceptance": "bun test packages/relic-format/test packages/relic-viewer/test && bun run typecheck. Mutations: remove the trailing-data check and the polyglot case fails; remove the IDAT length check and the oversized-pixel case fails."
+      },
+      {
+        "slice": "M cover mock (designer agent)",
+        "files": [
+          "docs/plans/og-cover/mockup.html (self-contained, committed and pushed)"
+        ],
+        "work": "Show all 10 kinds plus the fallback card at 1200x630 and at 500 px display width. Design the three new layouts (archive listing of a realistic agent project zip, square album artwork, speech waveform) under the designer constraints.",
+        "acceptance": "Loaded in a headless browser and screenshotted. Jason approves before V implements those three layouts."
+      },
+      {
+        "slice": "C1 CDP client and Chrome launcher (task agent)",
+        "files": [
+          "packages/relic-mcp/src/cover/cdp.ts",
+          "packages/relic-mcp/src/cover/chrome.ts",
+          "packages/relic-mcp/test/cover-cdp.test.ts",
+          "packages/relic-mcp/test/cover-chrome.test.ts"
+        ],
+        "acceptance": "bun test packages/relic-mcp/test/cover-cdp.test.ts packages/relic-mcp/test/cover-chrome.test.ts. Covers: frames split across chunks; several frames per chunk; split multibyte UTF-8; pending sends reject on close; EPIPE does not throw; discovery per platform with injected isExecutable and env, including a bad explicit path; the exact chromeArgs list. Mutation: drop --webrtc-ip-handling-policy and the list test fails."
+      }
+    ],
+    "phase_2_parallel_from_F_and_C1": [
+      {
+        "slice": "V cover page and asset build (task agent; the three layouts by the designer agent from the approved mock)",
+        "files": [
+          "packages/relic-viewer/src/text-views.ts (new: buildProse(source), buildCodeTable(source); main.ts renderMarkdownView and renderCodeView call them)",
+          "packages/relic-viewer/src/cover/main.ts, frame.ts, pdf.ts, kinds.ts, layouts.ts, cover.css (new)",
+          "packages/relic-viewer/build.ts (export buildCover({outdir}): unminified cover.js; frame.html from public/sandbox.html with the unminified sandbox bundle inlined and the frame meta CSP inserted; styles.css; cover.css; index.html; node_modules/pdfjs-dist/build/pdf.worker.mjs copied as pdf.worker.mjs; buildViewer untouched)",
+          "packages/relic-mcp/build.ts (await buildCover into dist/cover/; define process.env.RELIC_MCP_COVER_DIR as './cover/')",
+          "packages/relic-viewer/test/cover-build.test.ts, cover-layouts.test.ts (new)"
+        ],
+        "acceptance": "bun test packages/relic-viewer/test: the exact file set; frame.html contains the frame CSP verbatim; index.html references only same-origin paths; relic-viewer dist/ after `bun run build` contains none of cover.js, cover.css, frame.html or index.html. Then bun run --cwd packages/relic-mcp build emits all six dist/cover files, and typecheck passes. Mutation: make buildViewer also emit cover.js into dist/ and the guard fails."
+      },
+      {
+        "slice": "C2 renderer orchestration, inputs, media and archive (task agent)",
+        "files": [
+          "packages/relic-mcp/src/cover/render.ts (chromeCoverRenderer)",
+          "src/cover/inputs.ts (planCover: routeFor and isAudioMedia from @relic/viewer, kind table, text prefix, part plan)",
+          "src/cover/raster.ts (normalizePng, normalizeJpeg, encode ladder)",
+          "src/cover/assets.ts (coverAssetDir, file map, headers)",
+          "src/cover/virtual-origin.ts (Fetch.requestPaused handler)",
+          "src/cover/archive.ts (zip, tar, tar.gz, gzip; walk caps)",
+          "src/cover/media.ts (the three ffmpeg calls)",
+          "src/resolve-anchor.ts (replace Promise.withResolvers with a local deferred helper; probeFfmpeg param typed { ffmpegPath?: string | null }; runFfmpeg optional timeoutMs that kills the child)",
+          "tests: cover-render.test.ts (scripted fake CdpConnection asserts the exact call sequence, the JPEG fallback when PNG > cap, close always, deadline kill), cover-inputs.test.ts, cover-raster.test.ts, cover-archive.test.ts, cover-media.test.ts (ffmpeg present in CI), node-compat.test.ts (no 'Promise.withResolvers' anywhere in packages/relic-mcp/src)"
+        ],
+        "acceptance": "bun test packages/relic-mcp/test/cover-*.test.ts packages/relic-mcp/test/node-compat.test.ts packages/relic-mcp/test/comments.test.ts && bun run typecheck. Real Chrome is exercised only in E."
+      },
+      {
+        "slice": "C3 publish, republish, state, tool surface, upload (task agent)",
+        "files": [
+          "packages/relic-mcp/src/publish.ts (PublishInput.cover, PublishDeps.renderCover, flow order)",
+          "src/republish.ts (flow, duplicate gate table)",
+          "src/state.ts (cover_uploaded plus validation)",
+          "src/cover/upload.ts (new)",
+          "src/server.ts (schemas, text, INSTRUCTIONS item 8, describe_client)",
+          "every test deps object gets renderCover; spawned path harness envs get RELIC_CHROME_PATH: 'none'; e2e.test.ts:806 and 936 key sets gain 'cover'"
+        ],
+        "acceptance": "bun test packages/relic-mcp/test && bun run typecheck. New cases: cover:false makes zero renderCover calls and zero /cover requests; an uploaded case with a fake renderer returning a validator-passing PNG and a fake 200; 404 -> service_unsupported; problem -> service_refused; network -> upload_failed; all four duplicate-gate rows; state validation of cover_uploaded. Mutation: skip the requested check in the gate and the 'cover:false removes cover' row fails."
+      },
+      {
+        "slice": "S server (task agent)",
+        "files": [
+          "packages/relic-server/src/store.ts, gcsstore.ts (contract above)",
+          "app.ts (upload route, cover route, shell og, republish deleteCovers, operatorDelete covers_deleted, disclosureStatement)",
+          "problems.ts",
+          "card.ts (COVER_ALT)",
+          "config.ts (coverCapBytes)",
+          "test/app.test.ts, test/gcsstore.test.ts, test/card.test.ts additions"
+        ],
+        "acceptance": "bun test packages/relic-server/test && bun run typecheck. Cases: every upload refusal in check order; a valid PNG and a valid JPEG accepted; the G1 state table; cover route headers exact; HEAD; no mint after shell and cover fetches (mintsUsed 0, mint log empty); republish clears and deletes; tombstone deletes; stale version. Mutations G1 and G3 recorded."
+      },
+      {
+        "slice": "D docs and disclosure prose (task agent)",
+        "files": [
+          "docs/decisions.md (dated entry: reversal, renderer choice, flags with the measurements, validation, serving, fallback, release order, guards)",
+          "docs/frame.md, docs/preconditions.md, docs/spec/format.md, publish.md, service.md, viewer.md",
+          "docs/design/surface.md, topology.md, storage.md, operations.md",
+          "docs/knowledge/link-preview-and-unfurl-behavior-by-client.md, relic-telemetry-trade-and-measurability.md, renderer-class-is-a-security-boundary-not-a-label.md",
+          "README.md, packages/relic-mcp/README.md, packages/relic-mcp/skills/relic/SKILL.md, packages/relic-format/src/title.ts (comment only)"
+        ],
+        "acceptance": "Every amend and stale location in agent://SweepConstantRaster is resolved. A grep of the changed files finds no sentence claiming one constant raster, or that the operator learns only title and class. No em or en dashes in changed lines. markdownlint-cli2 passes."
+      },
+      {
+        "slice": "E proof harness and CI (task agent)",
+        "files": [
+          "packages/relic-mcp/test/cover-path.ts (new)",
+          "packages/relic-mcp/test/cover-live-probe.ts (new)",
+          "packages/relic-mcp/test/unfurl-card-path.ts (repin to the fallback: renderCover skipped -> card.v1.png; the declined case uses cover:false; card raster assertions kept)",
+          "packages/relic-mcp/PATH.md (new 'The cover a pasted link shows' and 'Covers on the live service' sections; amend the card section)",
+          ".github/workflows/verify.yml (after Test: bun run --cwd packages/relic-mcp build && RELIC_CHROME_PATH=\"$(command -v google-chrome)\" bun packages/relic-mcp/test/cover-path.ts)",
+          ".github/workflows/publish-mcp.yml (tarball must contain dist/cover/{index.html,cover.js,cover.css,styles.css,frame.html,pdf.worker.mjs})",
+          ".github/workflows/deploy.yml (smoke: POST /api/relics/aaaaaaaaaaaaaaaaaaaaaaaaaa/cover returns 404 relic_not_found; GET /aaaaaaaaaaaaaaaaaaaaaaaaaa/cover/<64 zeros>.png returns 404; /policy contains the cover disclosure sentence)"
+        ],
+        "cover_path_spec": "Real createApp on Bun.serve loopback with MemoryStore and new MemoryStorage(`${origin}/__storage`); the server routes /__storage/upload/* PUT into storage.put and /__storage/o/* GET into storage.read; operatorTokens set; injectable clock; diskAssets(relic-viewer dist). Each publish and republish goes through a fresh `node packages/relic-mcp/dist/relic-mcp.js` stdio process (proves the packaged bundle, dist/cover resolution and the Node runtime). Fixtures are generated in scratch: report.md, sample.ts, page.html (inline script draws text after load, plus the hostile egress block aimed at a loopback HTTP+UDP collector), logo.svg, Widget.jsx, image.png (built with zlib), doc.pdf (hand-written PDF 1.4 with text), clip.mp4 (ffmpeg testsrc2, moov at end), tone.mp3, tagged.mp3 (attached pic), bundle.zip and bundle.tar.gz (built in-test), blob.xz (magic only), noise.bin. Per fixture it asserts result.cover, then fetches /{id} and parses og:image: uploaded -> URL shape, og:image:type, GET 200 with exact headers, validateCoverRaster ok and 1200x630; skipped -> the exact reason (xz archive_format_unlisted, bin no_cover_for_class) and card.v1.png. Also: the cover:false datastore proof; a republish toggle (new sha, old URL 404); an identical-content republish with cover:false allowed and leaving nothing; tombstone (covers_deleted >= 1, URL 404, store empty); expiry by clock; mintsUsed 0 and an empty mint log; collector arrivals 0. Each cover is written to $RELIC_COVER_PATH_ARTIFACTS when set. Prints one 'COVER kind=... status=... bytes=...' line per fixture, then 'COVER_EGRESS arrivals=0' and 'COVER_PATH_OK'.",
+        "live_probe_spec": "RELIC_SERVICE_ORIGIN (default https://relik.link), RELIC_CHROME_PATH optional, and RELIC_COVER_PROBE_CLIENT = 'source' or 'npx:<version>'. Publish a small markdown fixture with ttl_days 1, title '' and client name relic-mcp/cover-live-probe. Assert the cover uploaded, the live og:image is the cover URL, and GET returns 200 with exact headers at 1200x630. Republish changed content with cover:false. Assert the old cover URL returns 404 and og:image is card.v1.png. Never print the share URL. Ends 'COVER_LIVE_OK relic_id=<id>'.",
+        "acceptance": "Integration only."
+      }
+    ],
+    "phase_3_integration": [
+      "Create integration worktree branch feat/og-cover-image from F. Merge C1, V, C2, C3, S, D and E in that order.",
+      "Wire index.ts renderCover (renderer_factory contract). It needs both C2 and C3, so it lands here.",
+      "bun install --frozen-lockfile && mise run verify",
+      "bun run --cwd packages/relic-viewer build && bun run --cwd packages/relic-mcp build",
+      "Run every PATH.md command: source-versioning-path, comment-path, inventory-path, unfurl-card-path, and cover-path with RELIC_COVER_PATH_ARTIFACTS=<dir> (discovery finds Chrome 155 on this Mac).",
+      "Open every artifact PNG/JPEG with the read tool and compare them against mockup.html. This visual check is part of done.",
+      "Re-run G4 at integration: delete --webrtc-ip-handling-policy from chromeArgs, run cover-path, see COVER_EGRESS fail, then restore.",
+      "Push, open the PR with the mutation evidence, wait for CI including the Chrome step, merge, and watch deploy.yml and its smoke steps.",
+      "Live probe with the source client. Manual publish-mcp.yml with a version bump. Live probe via npx. Jason's real unfurl check."
+    ],
+    "fails_until_integration": [
+      "E: cover-path.ts and cover-live-probe.ts (need S, C2, C3, V and index wiring); unfurl-card-path.ts repin (needs C3 result shape and S); E's typecheck (imports C3 types).",
+      "relic-mcp end-to-end publish against the real server with covers (needs S + C2 + C3 + index wiring); unit tests in C3 use fakes and pass alone.",
+      "The CI Chrome step and the publish-mcp tarball checks (need V's build change).",
+      "Nothing else should fail in isolation. C2 uses a fixture asset dir and a fake CdpConnection, and C3 uses a fake renderCover."
+    ]
+  },
+  "confirm_with_jason_before_fanout": [
+    "No automatic browser download: covers need a local Chrome, Chromium or Edge, otherwise skipped with a plain message. Recommend yes.",
+    "Binary, unlisted archive formats (bzip2/xz/zstd/7z/rar) and images the viewer already routes to download (WebP, ICO) keep the constant card. Recommend yes.",
+    "Approve mockup.html for the three new designs before V builds them.",
+    "The WebRTC finding below goes to a separate change, not this PR. Recommend separate."
+  ],
+  "what_would_prove_this_wrong": [
+    "cover-path egress collector records any arrival. The containment is incomplete, so stop and come back.",
+    "The ubuntu-latest google-chrome cannot launch headless with its sandbox ('No usable sandbox'). The only acceptable fix is a CI-only sysctl; never --no-sandbox in product code.",
+    "Bun 1.3.14 (CI pin) or Node 18/20 cannot carry the fd 3 and 4 pipes (measured only on Bun 1.4.2 and Node 24).",
+    "Chrome's screenshot PNG is not 8-bit RGB/RGBA non-interlaced on Linux or Edge. The validator would refuse our own output.",
+    "pdfjs's real worker or React's mount fails inside the cover page or srcdoc frame. Only a trivial worker and a blob module import were measured.",
+    "Fetch fulfillment of the .invalid origin fails on another Chromium-family build in the discovery list.",
+    "Unfurlers reject or crop the cover. Real Slack and iMessage behavior is unmeasured until Jason pastes a link."
+  ],
+  "risks_and_unknowns": [
+    "Privacy posture: default-on means the operator, unfurl services and anyone with the link minus the fragment see every relic's first screen unless the agent declines. The tool text must carry this.",
+    "Removing a cover requires a republish, which the comment gate blocks until open comments are addressed (the addresses parameter clears them in the same call). Operator takedown remains.",
+    "Republish deletes the old cover, so an unfurler that cached the old shell shows a broken image until its own cache expires.",
+    "Egress: covers of up to 512 KiB per unfurl fetch are served by Cloud Run with no CDN, against the 35.7 KB immutable card.",
+    "Abuse: public plaintext images under relik.link. They are bounded by validation, deletion and the 1-day cache, and still a new surface.",
+    "npm tarball grows by the unminified cover assets (pdf.worker.mjs is 1.89 MB unminified per unpkg; plus pdfjs main, React and sucrase). README's readable-source claim must be restated to include vendored third-party code in dist/cover.",
+    "Covers follow viewer routing, so WebP and ICO get no cover until the sniffer learns them; zip-based Office files show their XML parts.",
+    "Covers can differ run to run (fonts, JS timing). The duplicate gate keys on cover presence, not cover bytes.",
+    "Unverified: Windows pipe transport and discovery; Chrome below 112 with --headless=new; snap Chromium's private /tmp; root containers (Chrome refuses without --no-sandbox, so covers are skipped with that reason)."
+  ],
+  "side_findings": [
+    "Measured, outside this scope: Chrome 155 does not enforce CSP \"webrtc 'block'\". A URL-loaded sandboxed frame served the production directive list as a header (app.ts:310-325 shape) still sent 5 STUN packets to an author-chosen address. Relic HTML can therefore learn a recipient's IP, which contradicts the closing-egress posture (README.md:49). The fix is not a header.",
+    "Pre-existing: Promise.withResolvers in resolve-anchor.ts (177, 224) breaks ffmpeg on Node 18-21 despite engines >=18. C2 fixes it and adds a guard."
+  ]
+}

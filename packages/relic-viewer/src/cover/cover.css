@@ -1,0 +1,273 @@
+/* Cover layout and style overrides for Open Graph preview cards. */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 600px;
+  height: 315px;
+  overflow: hidden;
+  background: var(--ground);
+}
+
+.cv {
+  --ground: #f1f2f0;
+  --surface: #fbfbfa;
+  --ink: #16191a;
+  --ink-soft: #5a6163;
+  --rule: #d2d5d2;
+  --rule-strong: #b3b8b4;
+  --patina: #1f6b64;
+  --patina-ink: #0f3b37;
+  --oxide: #8c4a2f;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 600px;
+  height: 315px;
+  overflow: hidden;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.55;
+  color-scheme: light;
+  -webkit-text-size-adjust: 100%;
+}
+
+.cv *, .cv *::before, .cv *::after {
+  box-sizing: border-box;
+}
+
+.cv, .cv * {
+  scrollbar-width: none;
+}
+
+/* The reading surface */
+.cv .stage {
+  padding: 2rem 1.25rem 5rem;
+}
+
+.cv .doc {
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+/* Code covers at 15 px override */
+.cv .code {
+  font-size: 15px;
+  line-height: 24px;
+}
+
+/* Sandboxed html and jsx fill the surface */
+.cv .stage-sandboxed-html,
+.cv .stage-sandboxed-jsx {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+
+.cv .stage-sandboxed-html .doc,
+.cv .stage-sandboxed-jsx .doc {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  max-width: none;
+  height: 100%;
+}
+
+.cv .usercontent-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+/* Picture kinds fill the canvas */
+.cv-picture img {
+  display: block;
+  width: 600px;
+  height: 315px;
+  object-fit: cover;
+}
+
+.cv-image img {
+  object-position: 50% 0%;
+}
+
+.cv-video img {
+  object-position: 50% 50%;
+}
+
+/* PDF */
+.cv-pdf {
+  background: #fff;
+  position: relative;
+  width: 600px;
+  height: 315px;
+  overflow: hidden;
+}
+
+/* Fallback card */
+.cv-card img {
+  display: block;
+  width: 600px;
+  height: 315px;
+}
+
+/* Archive listing layout */
+.cv-archive .stage {
+  height: 100%;
+  padding: 2rem 1.25rem 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ar {
+  --gutter: 3.25rem;
+  --row: 24px;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0.25rem 0;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 24px;
+  border: 1px solid var(--rule);
+  border-bottom: 0;
+  background:
+    linear-gradient(to right,
+      var(--ground) 0 var(--gutter),
+      var(--rule) var(--gutter) calc(var(--gutter) + 1px),
+      var(--surface) calc(var(--gutter) + 1px));
+  overflow: hidden;
+}
+
+.ar-row {
+  display: grid;
+  grid-template-columns: var(--gutter) minmax(0, 1fr) auto;
+  height: var(--row);
+  align-items: center;
+}
+
+.ar-num {
+  padding-right: 0.75rem;
+  text-align: right;
+  color: var(--ink-soft);
+}
+
+.ar-path {
+  --depth: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-left: calc(0.85rem + var(--depth) * 2ch);
+  white-space: nowrap;
+  background-image: repeating-linear-gradient(to right,
+    transparent 0 0.45ch,
+    var(--rule-strong) 0.45ch calc(0.45ch + 1px),
+    transparent calc(0.45ch + 1px) 2ch);
+  background-size: calc(var(--depth) * 2ch) 100%;
+  background-position: 0.85rem 0;
+  background-repeat: no-repeat;
+}
+
+.ar-dir {
+  flex: none;
+  color: var(--ink-soft);
+}
+
+.ar-base {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ar-lead {
+  flex: 1 1 0;
+  min-width: 1.5ch;
+  align-self: stretch;
+  margin-left: 0.75ch;
+  background: linear-gradient(to right, var(--rule-strong) 1px, transparent 1px)
+    repeat-x 0 calc(50% + 0.3em) / 5px 1px;
+}
+
+.ar-row.is-dir .ar-base {
+  color: var(--patina-ink);
+  font-weight: 600;
+}
+
+.ar-row.is-dir .ar-lead,
+.ar-row.is-more .ar-lead {
+  display: none;
+}
+
+.ar-size {
+  padding: 0 0.9rem 0 0.75ch;
+  text-align: right;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.ar-row.is-more .ar-path {
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+/* Audio artwork layout */
+.cv-artwork .stage {
+  height: 100%;
+  padding: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Sized whole into the largest square the stage leaves (fitArtwork). */
+.cv-artwork img {
+  display: block;
+  flex: none;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+/* Audio waveform layout */
+.cv-waveform .stage {
+  height: 100%;
+  padding: 2rem 1.25rem;
+}
+
+.wf {
+  position: relative;
+  height: 100%;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+}
+
+.wf-axis {
+  position: absolute;
+  left: 1.25rem;
+  right: 1.25rem;
+  top: 50%;
+  height: 1px;
+  background: var(--rule-strong);
+}
+
+.wf-wave {
+  position: absolute;
+  inset: 1.5rem 1.25rem;
+  background: var(--patina-ink);
+  -webkit-mask-image: var(--wf-src);
+  mask-image: var(--wf-src);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% var(--wf-h, 100%);
+  mask-size: 100% var(--wf-h, 100%);
+  -webkit-mask-position: 0 var(--wf-y, 50%);
+  mask-position: 0 var(--wf-y, 50%);
+}

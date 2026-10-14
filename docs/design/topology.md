@@ -461,15 +461,17 @@ The most consequential unfurler range-fetches the head. Slack, in its own words 
 
 > The four required properties for every page are
 
-`og:title`, `og:type`, `og:image`, and `og:url`. While `og:type` (`website`) and `og:image` carry constant values, `og:title` carries a publisher-declared plaintext title (defaulting to the source filename) or a per-class fallback, and `og:description` carries per-class copy revealing the coarse renderer class, reversing the prior all-constant rule per `docs/decisions.md`. The image remains the single constant raster at `/assets/card.v1.png` across all relics, preserving the one-raster budget on the service origin and the immutable cache policy.
+`og:title`, `og:type`, `og:image`, and `og:url`. While `og:type` (`website`) carries a constant value, `og:title` carries a publisher-declared plaintext title (defaulting to the source filename) or a per-class fallback, `og:description` reveals the coarse renderer class, and on 2026-10-13 `og:image` became per-relic when a cover is uploaded (with `/assets/card.v1.png` retained as fallback), reversing the prior constant-image rule per `docs/decisions.md`. For relics without a cover, the fallback card remains at `/assets/card.v1.png` under an immutable cache policy.
 
 **The failure it prevents.** If the metadata falls outside the fetched range the unfurl produces no card, and `viewer.md` §6.2 names what that looks like: **a blank card on an unfamiliar domain is the visual shape of a phishing link.** Getting the byte order wrong in a template produces exactly the phishing-shaped card the constant metadata exists to prevent, silently, on every channel that range-fetches.
 
-**The constant preview image is real recurring egress on the service origin.** Slack fetches it too and caches the result ([Slack robots](https://api.slack.com/robots)):
+**Preview imagery is real recurring egress on the service origin, with no CDN in front of it.** [Amended 2026-10-13: Per-relic covers are served directly from the service origin at `/{id}/cover/{sha256}.{png|jpg}` without a CDN, caching under `cache-control: public, max-age=86400` (1-day cache). See `docs/decisions.md` (2026-10-13).] The fallback image is served from the static path `/assets/card.v1.png` under an immutable cache policy (`public, max-age=31536000, immutable`). Per-relic covers use a 1-day cache to bound takedown visibility in honoring caches to 24 hours while allowing content-addressed cache busting on republish. Repeat unfurls within a client's cache window are served from cache rather than from the bucket.
+
+Slack fetches preview imagery and caches the result ([Slack robots](https://api.slack.com/robots)):
 
 > Responses to these requests are cached globally across the service for around 30 minutes.
 
-So the image is fetched per unfurl rather than per open, bounded per client by that client's cache window, and it is the one asset on the service origin whose volume scales with link pastes rather than with relic opens. **It is served from the static path `/assets/card.v1.png` under an immutable cache policy (`public, max-age=31536000, immutable`)**, so repeat unfurls are served from cache rather than from the bucket. The version sits in the filename, so a redesign ships as `card.v2.png` and the shell's constant moves with it.
+So the preview image is fetched per unfurl rather than per open, bounded per client by that client's cache window, and it is the one asset on the service origin whose volume scales with link pastes rather than with relic opens.
 
 ## 6. Edge fidelity (`service.md` 7.1)
 

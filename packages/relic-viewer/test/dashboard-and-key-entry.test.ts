@@ -55,6 +55,18 @@ function matchesSelector(node: ElementStub, selector: string): boolean {
   }
   return node.tagName.toLowerCase() === selector.toLowerCase();
 }
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 2000
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`waitUntil timed out after ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 
 class ElementStub {
   readonly tagName: string;
@@ -623,7 +635,7 @@ describe('renderDead and Key Entry Form (DOM)', () => {
     input.value = 'r1badshort';
     form.submit();
 
-    await new Promise((r) => setTimeout(r, 10));
+    await waitUntil(() => feedback.textContent !== '');
 
     expect(feedback.textContent).toBe('That is not a key.');
     expect(input.value).toBe('r1badshort');
@@ -689,7 +701,7 @@ describe('renderDead and Key Entry Form (DOM)', () => {
     input.value = wrongFragment;
     form.submit();
 
-    await new Promise((r) => setTimeout(r, 20));
+    await waitUntil(() => feedback.textContent !== '');
 
     expect(feedback.textContent).toBe('That key does not open this relic.');
     expect(input.value).toBe(wrongFragment);
@@ -752,7 +764,7 @@ describe('renderDead and Key Entry Form (DOM)', () => {
     input.value = correctFragment;
     form.submit();
 
-    await new Promise((r) => setTimeout(r, 20));
+    await waitUntil(() => rootBody.querySelector('.stage-dead') === null);
 
     // Decryption succeeded in place: dead card is gone and document is rendered
     expect(rootBody.querySelector('.stage-dead')).toBeNull();
@@ -818,7 +830,7 @@ describe('renderDead and Key Entry Form (DOM)', () => {
     input.value = phrase;
     form.submit();
 
-    await new Promise((r) => setTimeout(r, 25));
+    await waitUntil(() => rootBody.querySelector('.stage-dead') === null);
 
     expect(rootBody.querySelector('.stage-dead')).toBeNull();
     expect(rootBody.querySelector('.doc')).not.toBeNull();
@@ -911,8 +923,19 @@ describe('Network security: no key material sent in any request', () => {
       expect(call.url).not.toContain(fragment);
       expect(call.body ?? '').not.toContain(fragment);
 
+      // Single words are matched as URL tokens, not substrings: the fixed
+      // route text ('relics', 'example', 'mint') can contain a short word by
+      // chance and fail a correct client. A leaked phrase is still caught,
+      // whole or with its separators dropped or encoded.
+      const urlTokens = call.url.split(/[/.:?&=#_-]+/);
+      const decodedUrl = decodeURIComponent(call.url.replace(/\+/g, ' '));
+      for (const joined of [' ', '', '-', '_'].map((sep) =>
+        mnemonicWords.join(sep)
+      )) {
+        expect(decodedUrl).not.toContain(joined);
+      }
       for (const word of mnemonicWords) {
-        expect(call.url).not.toContain(word);
+        expect(urlTokens).not.toContain(word);
         expect(call.body ?? '').not.toContain(word);
       }
     }
@@ -1098,7 +1121,7 @@ describe('Dashboard rendering (DOM)', () => {
 
     await renderDashboard(deps);
 
-    await new Promise((r) => setTimeout(r, 20));
+    await waitUntil(() => rootBody.querySelector('.relic-openable') !== null);
 
     const commentedSection = rootBody.querySelector(
       '.commented-relics-section'

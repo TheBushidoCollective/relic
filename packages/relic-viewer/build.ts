@@ -241,6 +241,100 @@ export async function buildViewer(options?: {
   return buildHash;
 }
 
+export const FRAME_CSP =
+  "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; worker-src 'none'; form-action 'none'; base-uri 'none'";
+
+export const FRAME_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${FRAME_CSP}">`;
+
+export async function buildCover(options?: { outdir?: string }): Promise<void> {
+  const out = options?.outdir ?? `${pkgDir}dist/cover/`;
+  await mkdir(out, { recursive: true });
+
+  const builtCover = await Bun.build({
+    entrypoints: [`${pkgDir}src/cover/main.ts`],
+    outdir: out,
+    target: 'browser',
+    format: 'esm',
+    minify: false,
+    splitting: false,
+    naming: 'cover.js',
+    define: { 'process.env.NODE_ENV': '"production"' },
+  });
+
+  if (!builtCover.success) {
+    for (const log of builtCover.logs) console.error(log);
+    throw new Error('Failed to bundle cover.js');
+  }
+
+  const builtSandbox = await Bun.build({
+    entrypoints: [`${pkgDir}src/sandbox.ts`],
+    target: 'browser',
+    format: 'esm',
+    minify: false,
+    splitting: false,
+    define: { 'process.env.NODE_ENV': '"production"' },
+  });
+
+  if (!builtSandbox.success) {
+    for (const log of builtSandbox.logs) console.error(log);
+    throw new Error('Failed to bundle sandbox for frame.html');
+  }
+
+  const output = builtSandbox.outputs[0];
+  if (!output) {
+    throw new Error('Failed to bundle sandbox for frame.html');
+  }
+  const sandboxJs = await output.text();
+  const SCRIPT_TAG = '<script type="module" src="/assets/sandbox.js"></script>';
+  const shell = await Bun.file(`${pkgDir}public/sandbox.html`).text();
+  if (!shell.includes(SCRIPT_TAG)) {
+    throw new Error('sandbox.html does not contain the expected script tag');
+  }
+
+  let frameHtml = shell.replace(
+    SCRIPT_TAG,
+    () =>
+      `<script type="module">${sandboxJs.replace(/<\/script/gi, '<\\/script')}</script>`
+  );
+
+  if (frameHtml.includes('<head>')) {
+    frameHtml = frameHtml.replace('<head>', `<head>\n${FRAME_CSP_META}`);
+  } else {
+    frameHtml = frameHtml.replace(
+      '<!doctype html>\n',
+      `<!doctype html>\n${FRAME_CSP_META}\n`
+    );
+  }
+
+  await Bun.write(`${out}frame.html`, frameHtml);
+
+  await copyFile(`${pkgDir}src/styles.css`, `${out}styles.css`);
+  await copyFile(`${pkgDir}src/cover/cover.css`, `${out}cover.css`);
+
+  const indexHtml = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=600, height=315, initial-scale=1">
+  <title>Cover</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/cover.css">
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/cover.js"></script>
+</body>
+</html>
+`;
+  await Bun.write(`${out}index.html`, indexHtml);
+
+  const workerPath = new URL(
+    './node_modules/pdfjs-dist/build/pdf.worker.mjs',
+    import.meta.url
+  ).pathname;
+  await copyFile(workerPath, `${out}pdf.worker.mjs`);
+}
+
 if (import.meta.main) {
   await buildViewer();
 }

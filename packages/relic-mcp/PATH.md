@@ -86,8 +86,12 @@ bun packages/relic-mcp/test/unfurl-card-path.ts
 
 The command puts the real app server on a loopback socket serving the real
 built viewer assets, publishes through `relic_publish` with no title argument
-so the filename becomes the title, and reads the served head over HTTP. It
-asserts the Open Graph and Twitter block lands after the character-set
+so the filename becomes the title, and reads the served head over HTTP. When
+cover rendering is skipped (e.g. when no local browser is available) or
+explicitly declined with `cover: false`, link previews fall back to the
+constant card `card.v1.png`. The command exercises this fallback path.
+
+It asserts the Open Graph and Twitter block lands after the character-set
 declaration and before the first `link` or `script` tag, because an unfurler
 range-fetches the head and metadata outside that range produces no card at
 all. It also asserts that the card reveals the relic's coarse renderer class
@@ -96,9 +100,9 @@ browser and download tails and proving the class reaches the card even when
 the publisher declines a title. It catches false download claims on audio and
 video relics by asserting that sniffed media relics carry the played tail and
 the media fallback title. It then publishes the same file with an empty
-title and proves the name reaches no field on the relic row, fetches the card
-image and reads 1200x630 out of its PNG header, and confirms neither shell
-fetch spent an open.
+title and `cover: false`, proves the name reaches no field on the relic row,
+fetches the card image and reads 1200x630 out of its PNG header, and confirms
+neither shell fetch spent an open.
 Success ends with:
 
 ```text
@@ -112,4 +116,81 @@ MEDIA_CARD class=media tail=plays title=A media relic
 CARD_IMAGE bytes=<n> dimensions=1200x630 cache=immutable
 NO_MINT opens_spent=0 mint_log=0
 UNFURL_CARD_PATH_OK
+```
+
+## The cover a pasted link shows
+
+Run from the repository root, after building viewer and MCP:
+
+```bash
+bun run --cwd packages/relic-viewer build
+bun run --cwd packages/relic-mcp build
+bun packages/relic-mcp/test/cover-path.ts
+```
+
+Set `RELIC_COVER_PATH_ARTIFACTS=<dir>` to write every retrieved cover raster to
+a local folder for visual comparison against `mockup.html`.
+
+The command puts the real app server on a loopback listener with `MemoryStore`
+and `MemoryStorage`, serving real built viewer assets. Every publish and
+republish runs through a fresh `node packages/relic-mcp/dist/relic-mcp.js` stdio
+process, exercising the packaged bundle, cover asset resolution, and the Node
+runtime. It generates scratch fixtures across every renderer class (Markdown,
+code, HTML, SVG, JSX, PNG, PDF, video, audio waveforms, audio artwork, ZIP, and
+TAR.GZ), plus unlisted archives and raw binaries.
+
+For each renderable class, it verifies the cover is uploaded and validated at
+1200x630, the served HTML shell points `og:image` and `twitter:image` at the
+cover URL, and the cover route serves 200 with the exact required cache, CSP,
+and security headers. For unlisted archives and raw binaries, it proves the
+render is skipped with the exact documented reason and `og:image` falls back to
+`card.v1.png`.
+
+It also verifies:
+- The `cover: false` publication leaves no cover object in the store and serves
+  the fallback card.
+- A republish with new content uploads a new cover and renders the old cover
+  URL 404.
+- An identical-content republish with `cover: false` removes the cover, clearing
+  the store and reverting `og:image` to the fallback card.
+- Operator takedown (`DELETE /api/relics/{id}`) deletes the cover objects and
+  renders the cover URL 404.
+- Expiration stops serving the cover when time advances past TTL.
+- Zero mints are consumed by cover or shell requests.
+- The loopback HTTP and UDP egress collector receives zero packets from the
+  sandboxed renderer.
+
+Success ends with:
+
+```text
+COVER kind=<kind> status=<status> bytes=<n>
+...
+COVER_EGRESS arrivals=0
+COVER_PATH_OK classes=<n>
+```
+
+## Covers on the live service
+
+Run from the repository root:
+
+```bash
+bun packages/relic-mcp/test/cover-live-probe.ts
+```
+
+The probe exercises cover uploads and lifecycle against a live deployment. It
+respects `RELIC_SERVICE_ORIGIN` (defaulting to `https://relik.link`), optional
+`RELIC_CHROME_PATH`, and `RELIC_COVER_PROBE_CLIENT` (`'source'` or
+`'npx:<version>'`).
+
+It publishes a small Markdown fixture with 1-day TTL, an empty title, and the
+probe client name. It asserts that the cover uploads, the live `og:image` points
+to the cover URL, and GET returns 200 with exact headers at 1200x630. It then
+republishes changed content with `cover: false` and confirms that the old cover
+URL returns 404 and `og:image` reverts to `card.v1.png`. The share URL is never
+printed, because the fragment contains the encryption key.
+
+Success ends with:
+
+```text
+COVER_LIVE_OK relic_id=<id>
 ```

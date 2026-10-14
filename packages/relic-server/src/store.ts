@@ -1,13 +1,15 @@
 /**
  * The server's record of a relic's life.
  *
- * The server holds only ciphertext and metadata. Nothing here is finer than
- * the seven-value renderer class and the publishing client name, which is the
- * whole of what the frame conceded (`spec/format.md` 3.2). A filename or a
- * declared mimetype appearing in this file is drift.
+ * The server holds only ciphertext and metadata, plus optional unencrypted
+ * cover images stored in object storage for link previews. Nothing here is
+ * finer than the seven-value renderer class and the publishing client name,
+ * which is the whole of what the frame conceded (`spec/format.md` 3.2).
+ * A filename or a declared mimetype appearing in this file is drift.
  */
 
 import type { RendererClass } from '@relic/format';
+import type { CoverKind, CoverType } from '@relic/format/cover';
 
 /** Why a relic was removed. Private; the public code is always the same. */
 export type ReasonClass =
@@ -15,6 +17,15 @@ export type ReasonClass =
   | 'legal'
   | 'blocklist_match'
   | 'operator_error';
+
+export interface RelicCover {
+  readonly version: number;
+  readonly sha256: string /* lowercase hex of stored bytes */;
+  readonly type: CoverType;
+  readonly kind: CoverKind;
+  readonly bytes: number;
+  readonly uploadedAt: number;
+}
 
 export interface RelicRow {
   readonly id: string;
@@ -50,7 +61,7 @@ export interface RelicRow {
   /** Mints consumed against the per-relic cap, across all versions. */
   mintsUsed: number;
   /**
-   * The one plaintext field about a relic the service holds. Publisher-declared,
+   * A plaintext field about a relic the service holds. Publisher-declared,
    * stored in the clear so previews show a human-chosen name rather than a
    * blank card. A removal must take it with the row.
    */
@@ -60,6 +71,7 @@ export interface RelicRow {
    * Used to notify the creator when comments arrive.
    */
   ownerEmail?: string | undefined;
+  cover?: RelicCover | undefined;
 }
 
 export interface Tombstone {
@@ -275,6 +287,14 @@ export interface RelicStore {
     crc32c: string
   ): Promise<void>;
   consumeMint(id: string): Promise<number>;
+  putCover(
+    id: string,
+    cover: RelicCover,
+    bytes: Uint8Array
+  ): Promise<'stored' | 'stale_version' | 'not_found'>;
+  getCoverBytes(id: string, sha256: string): Promise<Uint8Array | undefined>;
+  listCovers(id: string): Promise<readonly string[]>; // sha256 of every stored object for id
+  deleteCovers(id: string): Promise<number>; // deletes every object, clears row.cover by CAS, returns the count
 
   /**
    * Open the relic's next version: increment `version`, adopt the new
@@ -363,6 +383,10 @@ export class MemoryStore implements RelicStore {
   private readonly authLinks = new Map<string, AuthLinkRow>();
   private readonly sessions = new Map<string, SessionRow>();
   private readonly verifiedEmails = new Set<string>();
+  private readonly covers = new Map<
+    string,
+    Map<string, { bytes: Uint8Array; type: CoverType }>
+  >();
 
   async getRelic(id: string): Promise<RelicRow | undefined> {
     return this.relics.get(id);
@@ -388,6 +412,7 @@ export class MemoryStore implements RelicStore {
       publishedAt: undefined,
       objectLength: undefined,
       objectCrc32c: undefined,
+      cover: undefined,
       title: nextTitle,
       ownerEmail: nextOwnerEmail,
     };
@@ -417,6 +442,60 @@ export class MemoryStore implements RelicStore {
     if (row === undefined) return 0;
     row.mintsUsed += 1;
     return row.mintsUsed;
+  }
+  async putCover(
+    id: string,
+    cover: RelicCover,
+    bytes: Uint8Array
+  ): Promise<'stored' | 'stale_version' | 'not_found'> {
+    let coversForRelic = this.covers.get(id);
+    if (coversForRelic === undefined) {
+      coversForRelic = new Map();
+      this.covers.set(id, coversForRelic);
+    }
+    coversForRelic.set(cover.sha256, { bytes, type: cover.type });
+
+    const row = this.relics.get(id);
+    if (row === undefined) {
+      coversForRelic.delete(cover.sha256);
+      return 'not_found';
+    }
+    if (row.version !== cover.version) {
+      coversForRelic.delete(cover.sha256);
+      return 'stale_version';
+    }
+
+    row.cover = cover;
+    for (const hash of [...coversForRelic.keys()]) {
+      if (hash !== cover.sha256) {
+        coversForRelic.delete(hash);
+      }
+    }
+    return 'stored';
+  }
+
+  async getCoverBytes(
+    id: string,
+    sha256: string
+  ): Promise<Uint8Array | undefined> {
+    return this.covers.get(id)?.get(sha256)?.bytes;
+  }
+
+  async listCovers(id: string): Promise<readonly string[]> {
+    const coversForRelic = this.covers.get(id);
+    if (coversForRelic === undefined) return [];
+    return [...coversForRelic.keys()];
+  }
+
+  async deleteCovers(id: string): Promise<number> {
+    const coversForRelic = this.covers.get(id);
+    const count = coversForRelic?.size ?? 0;
+    this.covers.delete(id);
+    const row = this.relics.get(id);
+    if (row !== undefined) {
+      row.cover = undefined;
+    }
+    return count;
   }
 
   async getTombstone(id: string): Promise<Tombstone | undefined> {

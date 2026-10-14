@@ -22,7 +22,13 @@ import {
   type RendererClass,
   relicUrl,
 } from '@relic/format';
+import type {
+  CoverOutcome,
+  CoverReport,
+  CoverSource,
+} from '@relic/format/cover';
 import { keyToMnemonic } from '@relic/format/mnemonic';
+import { uploadCover } from './cover/upload.ts';
 import {
   loadPublishedSource,
   resolveSourceIdentity,
@@ -155,6 +161,11 @@ export interface PublishInput {
    * intentional. False and undefined both preserve the existing URL.
    */
   readonly force_new?: boolean | undefined;
+  /**
+   * Optional cover image flag. Defaults to true. Pass false to decline
+   * rendering and uploading a cover image for link previews.
+   */
+  readonly cover?: boolean | undefined;
 }
 
 export interface PublishResult {
@@ -178,6 +189,7 @@ export interface PublishResult {
   readonly report_url: string;
   readonly disclosure_url: string;
   readonly key_phrase: string;
+  readonly cover: CoverReport;
 }
 
 export interface PublishDeps {
@@ -192,6 +204,7 @@ export interface PublishDeps {
   readonly maxCollisionRetries?: number;
   /** Path to ffmpeg binary, or null to simulate ffmpeg being absent. */
   readonly ffmpegPath?: string | null;
+  readonly renderCover: (source: CoverSource) => Promise<CoverOutcome>;
 }
 
 export interface RepublishToolCall {
@@ -341,6 +354,31 @@ export async function publish(
     title: normalizedTitle,
   });
 
+  const requested = input.cover !== false;
+  let coverOutcome: CoverOutcome;
+  if (!requested) {
+    coverOutcome = {
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'declined by publisher',
+    };
+  } else {
+    try {
+      coverOutcome = await deps.renderCover({
+        bytes: source.bytes,
+        filename,
+        mimetype: guessMimetype(filename, rendererClass),
+        rendererClass,
+      });
+    } catch (error) {
+      coverOutcome = {
+        status: 'skipped',
+        reason: 'render_failed',
+        detail: (error as Error).message,
+      };
+    }
+  }
+
   const retries = deps.maxCollisionRetries ?? 3;
   let lastCollision: ServerRefusal | undefined;
 
@@ -436,6 +474,7 @@ export async function publish(
         content_sha256: digest,
         published_at: new Date().toISOString(),
         expires_at: relicExpiresAt,
+        cover_uploaded: false,
       });
     } catch (error) {
       // The relic itself is live and the URL works, so both are handed over
@@ -449,6 +488,43 @@ export async function publish(
           `machine: ${(error as Error).message}`,
         { relic_id: relicId, url }
       );
+    }
+
+    let coverReport: CoverReport;
+    if (!requested) {
+      coverReport = { status: 'declined' };
+    } else if (coverOutcome.status === 'skipped') {
+      coverReport = {
+        status: 'skipped',
+        reason: coverOutcome.reason,
+        detail: coverOutcome.detail,
+      };
+    } else {
+      coverReport = await uploadCover(deps, {
+        relicId,
+        publishToken,
+        version: 1,
+        kind: coverOutcome.kind,
+        type: coverOutcome.type,
+        bytes: coverOutcome.bytes,
+      });
+      if (coverReport.status === 'uploaded') {
+        try {
+          await savePublishState(relicId, {
+            key: encodeKey(key),
+            publish_token: publishToken,
+            version: 1,
+            source: sourceLookup.source,
+            filename,
+            content_sha256: digest,
+            published_at: new Date().toISOString(),
+            expires_at: relicExpiresAt,
+            cover_uploaded: true,
+          });
+        } catch {
+          // If the second write fails the publish still succeeds
+        }
+      }
     }
 
     return {
@@ -465,6 +541,7 @@ export async function publish(
       report_url: String(grant['report_url']),
       disclosure_url: String(grant['disclosure_url']),
       key_phrase: keyToMnemonic(key).join(' '),
+      cover: coverReport,
     };
   }
 

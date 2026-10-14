@@ -70,6 +70,11 @@ beforeEach(async () => {
     files: nodeFiles,
     fetch: scopeFetch(),
     clientName: 'relic-mcp/comment-scope-test',
+    renderCover: async () => ({
+      status: 'skipped',
+      reason: 'browser_disabled',
+      detail: 'test fake renderer',
+    }),
   };
 });
 

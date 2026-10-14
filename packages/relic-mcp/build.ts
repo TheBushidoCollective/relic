@@ -12,9 +12,11 @@
  */
 
 import { chmod, mkdir } from 'node:fs/promises';
+import { buildCover } from '@relic/viewer/build';
 
 const out = new URL('./dist/', import.meta.url).pathname;
 await mkdir(out, { recursive: true });
+await buildCover({ outdir: `${out}cover/` });
 
 // Read before the build, not after, because the bundle is stamped with this
 // version and the manifests are generated from the same value. The release
@@ -41,6 +43,7 @@ const built = await Bun.build({
   // drift from the tarball the way a literal in the source did.
   define: {
     'process.env.RELIC_MCP_VERSION': JSON.stringify(pkg.version),
+    'process.env.RELIC_MCP_COVER_DIR': JSON.stringify('./cover/'),
   },
   // No banner: Bun preserves the entrypoint's own shebang, and adding a
   // second one puts `#!` on line 2, which is a syntax error rather than a

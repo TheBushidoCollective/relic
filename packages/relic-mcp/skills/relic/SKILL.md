@@ -8,8 +8,11 @@ description: Publish a local file as an encrypted, shareable link when someone o
 Turn a file on this machine into a URL you can hand to a person.
 
 The file is encrypted here, before anything is uploaded. Only ciphertext
-reaches the service. The key lives in the URL fragment, which browsers never
-send to a server, so the operator holds bytes they cannot open.
+reaches the service for the file contents. The key lives in the URL fragment,
+which browsers never send to a server, so the operator holds bytes they cannot
+open. By default, a 1200x630 cover image of the first screen is rendered locally
+in headless Chrome and uploaded unencrypted for link preview cards; pass
+`cover: false` to decline.
 
 ## Publishing
 
@@ -51,6 +54,14 @@ Optional arguments worth knowing:
   tab. It defaults to `filename`. It is NOT encrypted: the service stores it
   and anyone who fetches the link sees it, with or without the key. Pass `""`
   to publish without a title.
+- `cover` controls whether to render and upload a 1200x630 cover image of the
+  file's first screen for link previews. Defaults to `true`. Renders locally
+  in Chrome. It is NOT encrypted: the service stores it and anyone who fetches
+  the link sees it, with or without the key, including chat previews (Slack,
+  iMessage, etc.) and their caches. Pass `cover: false` for anything you would
+  not show in a chat preview (such as confidential documents, private drafts,
+  or credentials). When declined with `cover: false`, link previews show the
+  generic Relic card. Republishing with `cover: false` clears any stored cover.
 - `ttl_days` gives the link a lifetime in days, 1 to 3650. A relic is kept
   until it is deleted unless you set one. Shorter is better for anything
   sensitive: when the content should stop being available, say when.
@@ -230,5 +241,5 @@ fails: chat clients and ticket systems sometimes cut fragments.
 `relic_describe_client` returns the client's own account of what it uploads and
 what it withholds, plus the service it is pointed at. Use it when the user asks
 what is actually being sent, rather than paraphrasing this file. The published
-source is one file and is deliberately unminified, so "read it yourself" is a
-real answer.
+client source and cover rendering bundle in `dist/cover/` are unminified, so
+"read it yourself" is a real answer.
