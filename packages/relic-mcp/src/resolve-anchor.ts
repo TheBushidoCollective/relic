@@ -303,17 +303,14 @@ function runFfmpegPiped(
     }
   });
 
-  child.stdin.on('error', (err) => {
-    if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
-      cleanup();
-      reject(err);
-    }
-  });
-
   if (finalArgs.includes('pipe:0')) {
+    child.stdin.on('error', (err) => {
+      if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
+        cleanup();
+        reject(err);
+      }
+    });
     child.stdin.end(Buffer.from(inputBytes));
-  } else {
-    child.stdin.end();
   }
   return promise;
 }
@@ -340,7 +337,6 @@ export async function runFfmpegTemp(
     });
     activeChildren.add(child);
     child.stdin.on('error', () => {});
-    child.stdin.end();
 
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
