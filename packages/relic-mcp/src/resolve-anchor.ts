@@ -298,7 +298,7 @@ function runFfmpegPiped(
   return promise;
 }
 
-async function runFfmpegTemp(
+export async function runFfmpegTemp(
   ffmpegPath: string,
   args: readonly string[],
   inputBytes: Uint8Array,

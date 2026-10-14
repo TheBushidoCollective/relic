@@ -1,5 +1,5 @@
 import { isAudioMedia } from '@relic/viewer';
-import { probeFfmpeg, runFfmpeg } from '../resolve-anchor.ts';
+import { probeFfmpeg, runFfmpegTemp } from '../resolve-anchor.ts';
 
 export const FFMPEG_TIMEOUT_MS = 30_000;
 
@@ -94,7 +94,7 @@ export async function extractMediaCover(
   // If not audio, try video thumbnail first
   if (!isAudio) {
     try {
-      const thumbnail = await runFfmpeg(
+      const thumbnail = await runFfmpegTemp(
         binary,
         FFMPEG_VIDEO_THUMBNAIL_ARGS,
         bytes,
@@ -110,7 +110,7 @@ export async function extractMediaCover(
 
   // Audio rule: try artwork extraction first
   try {
-    const artwork = await runFfmpeg(
+    const artwork = await runFfmpegTemp(
       binary,
       FFMPEG_AUDIO_ARTWORK_ARGS,
       bytes,
@@ -125,7 +125,7 @@ export async function extractMediaCover(
 
   // Waveform fallback
   try {
-    const waveform = await runFfmpeg(
+    const waveform = await runFfmpegTemp(
       binary,
       FFMPEG_AUDIO_WAVEFORM_ARGS,
       bytes,
