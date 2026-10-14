@@ -29,13 +29,21 @@ on a schedule.
 
 Rendered content is not inert. A relic that renders as HTML or JSX runs its
 author's code in a sandboxed frame whose policy permits no remote source, so
-the code cannot reach the network or contact its author, and a page that
-expects external images, fonts, or scripts renders without them. The sandbox
-keeps that content away from the decryption key, which never leaves the link
-and your browser. The isolation is about network reach, not safety: the code
-runs in your browser, can use your CPU, and can render whatever it wants.
-The viewer says so on the page before the content renders, and so does
-`/policy`.
+the code cannot make outbound HTTP, WebSocket, or worker requests, and a page
+that expects external images, fonts, or scripts renders without them. Because
+browsers do not enforce Content-Security-Policy over WebRTC ICE candidate
+gathering, the frame bootstrap installs a tested deny-list inside the frame's
+JavaScript realm: it neutralizes WebRTC constructors across the global prototype
+chain and blocks nested browsing context creation (iframe, frame, object, embed,
+portal) to prevent UDP STUN candidate gathering. This is defense in depth
+alongside the opaque sandbox, not an architectural impossibility. Future browser
+APIs or parser entry points could reopen egress channels before we patch them,
+and the containment costs relic capabilities: nested frames and workers in HTML
+and JSX relics are denied. The sandbox keeps rendered content away from the
+decryption key, which never leaves the link and your browser. The isolation is
+about network reach, not safety: the code runs in your browser, can use your
+CPU, and can render whatever it wants. The viewer says so on the page before the
+content renders, and so does `/policy`.
 
 `/policy` states the whole trade: the telemetry, the optional plaintext title
 stored in the clear for unfurl cards, and what the operator learns. The frame
