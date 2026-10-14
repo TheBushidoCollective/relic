@@ -130,6 +130,50 @@ export function layoutArchive(
   }
 }
 
+export interface ArtworkBox {
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * The border box of embedded artwork shown whole in a square of `side` px:
+ * its longer edge fills the square, small artwork scaled up and large
+ * scaled down, never cropped, so non-square artwork sits inside the square
+ * with its hairline hugging the picture.
+ */
+export function artworkBox(
+  naturalWidth: number,
+  naturalHeight: number,
+  side: number,
+  border: number
+): ArtworkBox {
+  const inner = side - 2 * border;
+  const scale = inner / Math.max(naturalWidth, naturalHeight, 1);
+  return {
+    width: naturalWidth * scale + 2 * border,
+    height: naturalHeight * scale + 2 * border,
+  };
+}
+
+/** Sizes the artwork to the largest square the stage's padding leaves. */
+export function fitArtwork(cover: HTMLElement, img: HTMLImageElement): void {
+  const stage = cover.querySelector('.stage') as HTMLElement | null;
+  if (!stage) return;
+  const stageStyle = getComputedStyle(stage);
+  const side = Math.min(
+    stage.clientWidth -
+      parseFloat(stageStyle.paddingLeft || '0') -
+      parseFloat(stageStyle.paddingRight || '0'),
+    stage.clientHeight -
+      parseFloat(stageStyle.paddingTop || '0') -
+      parseFloat(stageStyle.paddingBottom || '0')
+  );
+  const border = parseFloat(getComputedStyle(img).borderTopWidth || '0');
+  const box = artworkBox(img.naturalWidth, img.naturalHeight, side, border);
+  img.style.width = `${box.width}px`;
+  img.style.height = `${box.height}px`;
+}
+
 export interface WaveformBounds {
   readonly height: number;
   readonly top: number;

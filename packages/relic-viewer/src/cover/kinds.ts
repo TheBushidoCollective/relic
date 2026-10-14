@@ -4,7 +4,12 @@ import type {
 } from '@relic/format/cover';
 import { buildCodeTable, buildProse } from '../text-views.ts';
 import { renderFrameCover } from './frame.ts';
-import { fitWaveform, layoutArchive, readWaveformBounds } from './layouts.ts';
+import {
+  fitArtwork,
+  fitWaveform,
+  layoutArchive,
+  readWaveformBounds,
+} from './layouts.ts';
 import { renderPdfCover } from './pdf.ts';
 
 export async function fetchInputBlob(
@@ -179,6 +184,7 @@ export async function renderKind(
       root.replaceChildren(cv);
       try {
         await img.decode();
+        fitArtwork(cv, img);
         return { ok: true };
       } catch (err) {
         return {
