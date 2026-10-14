@@ -1,7 +1,8 @@
 import { isAudioMedia } from '@relic/viewer';
 import { probeFfmpeg, runFfmpegTemp } from '../resolve-anchor.ts';
 
-export const FFMPEG_TIMEOUT_MS = 30_000;
+export const FFMPEG_TIMEOUT_MS = 10_000;
+export const FFMPEG_TOTAL_TIMEOUT_MS = 20_000;
 
 export const FFMPEG_VIDEO_THUMBNAIL_ARGS = [
   '-hide_banner',
@@ -77,8 +78,11 @@ export async function extractMediaCover(
   bytes: Uint8Array,
   filename: string,
   mimetype: string,
-  ffmpegPath?: string | null | undefined
+  ffmpegPath?: string | null | undefined,
+  totalTimeoutMs: number = FFMPEG_TOTAL_TIMEOUT_MS
 ): Promise<MediaCoverResult> {
+  const deadline = Date.now() + totalTimeoutMs;
+
   const binary = await probeFfmpeg({ ffmpegPath });
   if (!binary) {
     return {
@@ -93,43 +97,61 @@ export async function extractMediaCover(
 
   // If not audio, try video thumbnail first
   if (!isAudio) {
-    try {
-      const thumbnail = await runFfmpegTemp(
-        binary,
-        FFMPEG_VIDEO_THUMBNAIL_ARGS,
-        bytes,
-        FFMPEG_TIMEOUT_MS
-      );
-      if (thumbnail.length > 0) {
-        return { kind: 'video', bytes: thumbnail };
+    const remaining = Math.max(0, deadline - Date.now());
+    const timeout = Math.min(FFMPEG_TIMEOUT_MS, remaining);
+    if (timeout > 0) {
+      try {
+        const thumbnail = await runFfmpegTemp(
+          binary,
+          FFMPEG_VIDEO_THUMBNAIL_ARGS,
+          bytes,
+          timeout
+        );
+        if (thumbnail.length > 0) {
+          return { kind: 'video', bytes: thumbnail };
+        }
+      } catch {
+        // A file with no video stream falls through to the audio rule
       }
-    } catch {
-      // A file with no video stream falls through to the audio rule
     }
   }
 
   // Audio rule: try artwork extraction first
-  try {
-    const artwork = await runFfmpegTemp(
-      binary,
-      FFMPEG_AUDIO_ARTWORK_ARGS,
-      bytes,
-      FFMPEG_TIMEOUT_MS
-    );
-    if (artwork.length > 0) {
-      return { kind: 'audio-artwork', bytes: artwork };
+  const remainingForArtwork = Math.max(0, deadline - Date.now());
+  const artworkTimeout = Math.min(FFMPEG_TIMEOUT_MS, remainingForArtwork);
+  if (artworkTimeout > 0) {
+    try {
+      const artwork = await runFfmpegTemp(
+        binary,
+        FFMPEG_AUDIO_ARTWORK_ARGS,
+        bytes,
+        artworkTimeout
+      );
+      if (artwork.length > 0) {
+        return { kind: 'audio-artwork', bytes: artwork };
+      }
+    } catch {
+      // Non-zero exit or empty output means no artwork
     }
-  } catch {
-    // Non-zero exit or empty output means no artwork
   }
 
   // Waveform fallback
+  const remainingForWaveform = Math.max(0, deadline - Date.now());
+  const waveformTimeout = Math.min(FFMPEG_TIMEOUT_MS, remainingForWaveform);
+  if (waveformTimeout <= 0) {
+    return {
+      status: 'skipped',
+      reason: 'render_failed',
+      detail: 'ffmpeg cover extraction timed out',
+    };
+  }
+
   try {
     const waveform = await runFfmpegTemp(
       binary,
       FFMPEG_AUDIO_WAVEFORM_ARGS,
       bytes,
-      FFMPEG_TIMEOUT_MS
+      waveformTimeout
     );
     if (waveform.length > 0) {
       return { kind: 'audio-waveform', bytes: waveform };

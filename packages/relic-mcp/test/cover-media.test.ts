@@ -54,14 +54,12 @@ describe('cover-media', () => {
       new Uint8Array(0),
       10000
     );
-
     const res = await extractMediaCover(
       syntheticMp4,
       'clip.mp4',
       'video/mp4',
       ffmpegPath
     );
-
     expect('kind' in res).toBe(true);
     if ('kind' in res) {
       expect(res.kind).toBe('video');
@@ -351,5 +349,56 @@ describe('cover-media', () => {
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
+  });
+  test('runFfmpeg does not stack timeouts across piped and temp fallbacks', async () => {
+    const ffmpegPath = await probeFfmpeg();
+    if (!ffmpegPath) return;
+
+    const t0 = Date.now();
+    let caught: unknown;
+    try {
+      await runFfmpeg(
+        ffmpegPath,
+        [
+          '-f',
+          'lavfi',
+          '-i',
+          'testsrc=duration=60:size=1920x1080:rate=30',
+          '-c:v',
+          'mpeg4',
+          '-f',
+          'mp4',
+          '-movflags',
+          '+frag_keyframe+empty_moov',
+          'pipe:1',
+        ],
+        new Uint8Array(0),
+        100
+      );
+    } catch (err) {
+      caught = err;
+    }
+    const elapsed = Date.now() - t0;
+    expect(caught).toBeDefined();
+    expect((caught as Error).message).toContain('ffmpeg timed out');
+    expect(elapsed).toBeLessThan(400);
+  });
+
+  test('extractMediaCover enforces totalTimeoutMs bound across fallback steps', async () => {
+    const ffmpegPath = await probeFfmpeg();
+    if (!ffmpegPath) return;
+
+    const t0 = Date.now();
+    const dummyBytes = new Uint8Array([1, 2, 3, 4]);
+    const res = await extractMediaCover(
+      dummyBytes,
+      'empty.mp4',
+      'video/mp4',
+      ffmpegPath,
+      50
+    );
+    const elapsed = Date.now() - t0;
+    expect('status' in res).toBe(true);
+    expect(elapsed).toBeLessThan(1000);
   });
 });

@@ -39,6 +39,8 @@ import { loadPublishState } from './state.ts';
 
 const activeChildren = new Set<ChildProcess>();
 
+export const DEFAULT_FFMPEG_TIMEOUT_MS = 15_000;
+export const PROBE_FFMPEG_TIMEOUT_MS = 2_000;
 /**
  * Maximum dimension in pixels for images returned in tool results.
  *
@@ -193,8 +195,36 @@ export async function probeFfmpeg(deps?: {
     try {
       const { promise, resolve } = defer<boolean>();
       const child = spawn(candidate, ['-version'], { stdio: 'ignore' });
-      child.on('error', () => resolve(false));
-      child.on('close', (code) => resolve(code === 0));
+      activeChildren.add(child);
+
+      let timer: NodeJS.Timeout | undefined = setTimeout(() => {
+        timer = undefined;
+        try {
+          child.kill('SIGKILL');
+          child.unref();
+        } catch {
+          // Process may have exited already.
+        }
+        activeChildren.delete(child);
+        resolve(false);
+      }, PROBE_FFMPEG_TIMEOUT_MS);
+
+      const cleanup = () => {
+        activeChildren.delete(child);
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+      };
+
+      child.on('error', () => {
+        cleanup();
+        resolve(false);
+      });
+      child.on('close', (code) => {
+        cleanup();
+        resolve(code === 0);
+      });
       const ok = await promise;
       if (ok) {
         cachedSystemFfmpeg = candidate;
@@ -221,15 +251,21 @@ export async function runFfmpeg(
   ffmpegPath: string,
   args: readonly string[],
   inputBytes: Uint8Array,
-  timeoutMs?: number
+  timeoutMs: number = DEFAULT_FFMPEG_TIMEOUT_MS
 ): Promise<Uint8Array> {
+  const t0 = Date.now();
   try {
     return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
   } catch (pipeError) {
     if (!args.includes('pipe:0') && !args.includes('pipe:1')) {
       throw pipeError;
     }
-    return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
+    const elapsed = Date.now() - t0;
+    const remaining = timeoutMs - elapsed;
+    if (remaining <= 0) {
+      throw pipeError;
+    }
+    return await runFfmpegTemp(ffmpegPath, args, inputBytes, remaining);
   }
 }
 
@@ -237,18 +273,18 @@ function runFfmpegPiped(
   ffmpegPath: string,
   args: readonly string[],
   inputBytes: Uint8Array,
-  timeoutMs?: number
+  timeoutMs: number = DEFAULT_FFMPEG_TIMEOUT_MS
 ): Promise<Uint8Array> {
   const { promise, resolve, reject } = defer<Uint8Array>();
   const finalArgs = args.includes('-nostdin') ? args : ['-nostdin', ...args];
+  const usesPipe0 = finalArgs.includes('pipe:0');
   const child = spawn(ffmpegPath, finalArgs, {
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: [usesPipe0 ? 'pipe' : 'ignore', 'pipe', 'pipe'],
   });
   activeChildren.add(child);
-
   let timedOut = false;
   let timer: NodeJS.Timeout | undefined;
-  if (timeoutMs && timeoutMs > 0) {
+  if (timeoutMs > 0) {
     timer = setTimeout(() => {
       timedOut = true;
       try {
@@ -279,10 +315,10 @@ function runFfmpegPiped(
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
 
-  child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
-  child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-  child.stdout.on('error', () => {});
-  child.stderr.on('error', () => {});
+  child.stdout?.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+  child.stderr?.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
+  child.stdout?.on('error', () => {});
+  child.stderr?.on('error', () => {});
   child.on('error', (err) => {
     cleanup();
     if (!timedOut) {
@@ -303,7 +339,7 @@ function runFfmpegPiped(
     }
   });
 
-  if (finalArgs.includes('pipe:0')) {
+  if (usesPipe0 && child.stdin) {
     child.stdin.on('error', (err) => {
       if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
         cleanup();
@@ -319,7 +355,7 @@ export async function runFfmpegTemp(
   ffmpegPath: string,
   args: readonly string[],
   inputBytes: Uint8Array,
-  timeoutMs?: number
+  timeoutMs: number = DEFAULT_FFMPEG_TIMEOUT_MS
 ): Promise<Uint8Array> {
   const dir = await mkdtemp(join(tmpdir(), 'relic-media-'));
   await chmod(dir, 0o700);
@@ -341,17 +377,13 @@ export async function runFfmpegTemp(
 
     const { promise, resolve, reject } = defer<Uint8Array>();
     const child = usesPipe1
-      ? spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'ignore', 'pipe'] })
-      : spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+      ? spawn(ffmpegPath, finalArgs, { stdio: ['ignore', 'ignore', 'pipe'] })
+      : spawn(ffmpegPath, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
     activeChildren.add(child);
-    child.stdin.on('error', () => {});
-    if (finalArgs.includes('pipe:0')) {
-      child.stdin.end(Buffer.from(inputBytes));
-    }
 
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
-    if (timeoutMs && timeoutMs > 0) {
+    if (timeoutMs > 0) {
       timer = setTimeout(() => {
         timedOut = true;
         try {
@@ -511,7 +543,8 @@ export function parseImageDimensions(
  */
 export async function probeMediaDimensionsWithFfmpeg(
   ffmpegPath: string,
-  bytes: Uint8Array
+  bytes: Uint8Array,
+  timeoutMs: number = DEFAULT_FFMPEG_TIMEOUT_MS
 ): Promise<{ width: number; height: number } | undefined> {
   try {
     const { promise, resolve } = defer<
@@ -525,15 +558,40 @@ export async function probeMediaDimensionsWithFfmpeg(
       }
     );
     activeChildren.add(child);
+
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill('SIGKILL');
+          child.unref();
+        } catch {
+          // Process may have exited already.
+        }
+        cleanup();
+        resolve(undefined);
+      }, timeoutMs);
+    }
+    const cleanup = () => {
+      activeChildren.delete(child);
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
     const stderrChunks: Buffer[] = [];
     child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
     child.stderr.on('error', () => {});
     child.on('error', () => {
-      activeChildren.delete(child);
-      resolve(undefined);
+      cleanup();
+      if (!timedOut) resolve(undefined);
     });
     child.on('close', () => {
-      activeChildren.delete(child);
+      cleanup();
+      if (timedOut) return;
       const stderr = Buffer.concat(stderrChunks).toString('utf-8');
       const match = stderr.match(/Video:.*?,\s*(\d{2,5})x(\d{2,5})/);
       if (match?.[1] && match[2]) {
