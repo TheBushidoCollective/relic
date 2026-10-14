@@ -228,11 +228,16 @@ export async function runFfmpeg(
       return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
     } catch (pipeError) {
       lastError = pipeError;
-      const isSignalDeath =
+      const isTimeout =
+        pipeError instanceof Error && pipeError.message.includes('timed out');
+      if (isTimeout) {
+        throw pipeError;
+      }
+      const isRetryable =
         pipeError instanceof Error &&
-        pipeError.message.includes('code null') &&
-        !pipeError.message.includes('timed out');
-      if (isSignalDeath && attempt < maxAttempts) {
+        (pipeError.message.includes('code null') ||
+          (pipeError as NodeJS.ErrnoException).code === 'EBADF');
+      if (isRetryable && attempt < maxAttempts) {
         continue;
       }
       if (!args.includes('pipe:0')) {
@@ -242,11 +247,16 @@ export async function runFfmpeg(
         return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
       } catch (tempError) {
         lastError = tempError;
-        const isTempSignalDeath =
+        const isTempTimeout =
+          tempError instanceof Error && tempError.message.includes('timed out');
+        if (isTempTimeout) {
+          throw tempError;
+        }
+        const isTempRetryable =
           tempError instanceof Error &&
-          tempError.message.includes('code null') &&
-          !tempError.message.includes('timed out');
-        if (isTempSignalDeath && attempt < maxAttempts) {
+          (tempError.message.includes('code null') ||
+            (tempError as NodeJS.ErrnoException).code === 'EBADF');
+        if (isTempRetryable && attempt < maxAttempts) {
           continue;
         }
         throw tempError;
@@ -264,10 +274,9 @@ function runFfmpegPiped(
 ): Promise<Uint8Array> {
   const { promise, resolve, reject } = defer<Uint8Array>();
   const finalArgs = args.includes('-nostdin') ? args : ['-nostdin', ...args];
-  const usesPipe0 = finalArgs.includes('pipe:0');
-  const child = usesPipe0
-    ? spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
-    : spawn(ffmpegPath, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(ffmpegPath, finalArgs, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
 
   let timedOut = false;
   let timer: NodeJS.Timeout | undefined;
@@ -317,17 +326,18 @@ function runFfmpegPiped(
     }
   });
 
-  if (usesPipe0 && child.stdin) {
-    child.stdin.on('error', (err) => {
-      if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
-        cleanup();
-        reject(err);
-      }
-    });
+  child.stdin.on('error', (err) => {
+    if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && !timedOut) {
+      cleanup();
+      reject(err);
+    }
+  });
 
+  if (finalArgs.includes('pipe:0')) {
     child.stdin.end(Buffer.from(inputBytes));
+  } else {
+    child.stdin.end();
   }
-
   return promise;
 }
 
@@ -349,8 +359,10 @@ export async function runFfmpegTemp(
 
     const { promise, resolve, reject } = defer<Uint8Array>();
     const child = spawn(ffmpegPath, finalArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child.stdin.on('error', () => {});
+    child.stdin.end();
 
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
