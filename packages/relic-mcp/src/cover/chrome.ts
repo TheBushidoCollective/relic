@@ -447,12 +447,36 @@ export async function launchChrome(
             });
           })
           .catch((err) => {
-            reject(
-              new ChromeLaunchError(
-                `Browser.getVersion failed: ${err instanceof Error ? err.message : String(err)}`,
-                getStderrTail()
-              )
-            );
+            if (childSpawnError) {
+              reject(
+                new ChromeLaunchError(
+                  `Failed to start Chrome: ${childSpawnError.message}`,
+                  getStderrTail()
+                )
+              );
+              return;
+            }
+            if (child.exitCode !== null || child.signalCode !== null) {
+              reject(
+                new ChromeLaunchError(
+                  `Chrome exited during startup (code: ${child.exitCode}, signal: ${child.signalCode})`,
+                  getStderrTail()
+                )
+              );
+              return;
+            }
+
+            // When the CDP pipe closes during startup, the child may be in the
+            // process of exiting. Wait briefly for the exit or error event so
+            // we report the actual exit code, signal, and captured stderr.
+            setTimeout(() => {
+              reject(
+                new ChromeLaunchError(
+                  `Browser.getVersion failed: ${err instanceof Error ? err.message : String(err)}`,
+                  getStderrTail()
+                )
+              );
+            }, 100);
           });
       }
     );

@@ -450,16 +450,14 @@ process.exit(1);
 
     const fakeBinPath = path.join(
       tmpdir(),
-      `fake-slow-chrome-${Date.now()}.mjs`
+      `fake-slow-chrome-${Date.now()}.sh`
     );
     // A browser that starts and then never answers. It must stay alive for
-    // the whole startup window, held open by the CDP pipe the way Chrome is.
-    // A file stream on fd 3 can error on a pipe and exit the child first,
-    // and then the launcher reports a closed connection instead of the
-    // timeout this test is about.
-    const script = `#!/usr/bin/env node
-import net from 'node:net';
-new net.Socket({ fd: 3, readable: true, writable: false }).resume();
+    // the whole startup window, held open by the CDP pipes the way Chrome is.
+    // Holding both fd 3 and fd 4 open keeps the pipes alive without writing
+    // any response on fd 4 until the launcher startup timeout kills it.
+    const script = `#!/bin/sh
+exec sleep 1000 <&3 >&4
 `;
     await writeFile(fakeBinPath, script, { mode: 0o755 });
 
