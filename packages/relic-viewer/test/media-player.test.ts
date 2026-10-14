@@ -12,8 +12,10 @@
  * - Marker clustering reporting its member count.
  * - Backward compatibility with old time anchor shapes including rect frame boxes.
  * - Fullscreen playback idling to the bare frame, and staying awake while
- *   paused or while the pointer rests on the controls.
- * - Comment actions leaving fullscreen before the composer opens.
+ *   paused, while the pointer rests on the controls, or while a comment
+ *   panel is open on the stage.
+ * - Comment actions staying in fullscreen, and aims saying where on the
+ *   scrubber their moment or span sits.
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
@@ -1146,7 +1148,35 @@ describe('custom media player and comment timeline', () => {
     }
   });
 
-  test('a comment action in fullscreen leaves fullscreen before the composer opens, and a drag stays', async () => {
+  test('fullscreen playback stays awake while a comment panel is open on the stage', () => {
+    vi.useFakeTimers();
+    try {
+      const { video, stage } = fullscreenVideoPlayer();
+      const panel = new TestNode('div');
+      panel.className = 'popover popover-card';
+      stage.appendChild(panel);
+      void video.play();
+
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS * 4);
+      expect(stage.classes()).not.toContain('is-idle');
+
+      panel.remove();
+      stage.dispatchEvent({ type: 'pointermove', bubbles: true, clientX: 10 });
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS);
+      expect(stage.classes()).toContain('is-idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The reverse of what this test used to pin. It proved that a comment
+  // action left fullscreen before the composer opened, because the composer
+  // lived in the sidebar outside the fullscreen element. The composer now
+  // opens over the scrubber inside the stage, so every gesture aims from
+  // inside fullscreen and nothing here ever leaves it. Leaving for the one
+  // reader who must reach the sidebar is the page's decision, proven in
+  // `timeline-popover.test.ts`.
+  test('a comment action in fullscreen stays in fullscreen, for a drag and for the comment button', () => {
     const { stage, chrome } = fullscreenVideoPlayer();
     const scrubber = requireNode(
       chrome.querySelector('.media-scrubber'),
@@ -1158,18 +1188,14 @@ describe('custom media player and comment timeline', () => {
     );
 
     const aims: Array<{ focus: boolean; inFullscreen: boolean }> = [];
-    const composerAim = Promise.withResolvers<void>();
     chrome.addEventListener('relic:time-aim', (event: unknown) => {
       const detail = (event as { detail: { focus: boolean } }).detail;
       aims.push({
         focus: detail.focus,
         inFullscreen: fullscreenDocument().fullscreenElement === stage,
       });
-      if (detail.focus) composerAim.resolve();
     });
 
-    // A drag only paints the selection on the scrubber, so it stays in the
-    // frame.
     scrubber.dispatchEvent({
       type: 'pointerdown',
       clientX: 64,
@@ -1181,26 +1207,78 @@ describe('custom media player and comment timeline', () => {
     };
     win.dispatchEvent({ type: 'pointermove', clientX: 256, bubbles: true });
     win.dispatchEvent({ type: 'pointerup', clientX: 256, bubbles: true });
-    expect(aims).toEqual([{ focus: false, inFullscreen: true }]);
-    expect(fullscreenDocument().fullscreenElement).toBe(stage);
-    expect(fullscreenDocument().fullscreenExits).toBe(0);
 
-    // The comment button opens the composer, which is outside the fullscreen
-    // element: fullscreen ends first, then the aim goes out.
     scrubber.dispatchEvent({
       type: 'pointermove',
       clientX: 192,
       bubbles: true,
     });
     hoverBtn.click();
-    await composerAim.promise;
 
-    expect(fullscreenDocument().fullscreenExits).toBe(1);
-    expect(fullscreenDocument().fullscreenElement).toBeNull();
+    // Both are the start of a comment, so both ask for the composer's focus,
+    // and both went out while the stage was still fullscreen.
     expect(aims).toEqual([
-      { focus: false, inFullscreen: true },
-      { focus: true, inFullscreen: false },
+      { focus: true, inFullscreen: true },
+      { focus: true, inFullscreen: true },
     ]);
+    expect(fullscreenDocument().fullscreenElement).toBe(stage);
+    expect(fullscreenDocument().fullscreenExits).toBe(0);
+  });
+
+  test('an aim says where its moment and its span sit on the scrubber', () => {
+    const video = new MediaTestNode('video');
+    const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+      isAudio: false,
+    });
+    const chrome = player.chrome as unknown as TestNode;
+    const scrubber = requireNode(
+      chrome.querySelector('.media-scrubber'),
+      'scrubber'
+    );
+    scrubber.rect = { ...scrubber.rect, top: 400, bottom: 424, height: 24 };
+    const hoverBtn = requireNode(
+      chrome.querySelector('.timeline-hover-comment-btn'),
+      'hoverBtn'
+    );
+    const measured: Array<{ left: number; top: number; width: number }> = [];
+    chrome.addEventListener('relic:time-aim', (event: unknown) => {
+      const detail = (
+        event as {
+          detail: {
+            measure: () => { left: number; top: number; width: number };
+          };
+        }
+      ).detail;
+      measured.push(detail.measure());
+    });
+
+    // A moment at 30% of a 640px rail on a 100s clip.
+    scrubber.dispatchEvent({
+      type: 'pointermove',
+      clientX: 192,
+      bubbles: true,
+    });
+    hoverBtn.click();
+    // A span from 10% to 40%.
+    scrubber.dispatchEvent({
+      type: 'pointerdown',
+      clientX: 64,
+      bubbles: true,
+      preventDefault: () => {},
+    });
+    const win = window as unknown as {
+      dispatchEvent: (e: unknown) => void;
+    };
+    win.dispatchEvent({ type: 'pointermove', clientX: 256, bubbles: true });
+    win.dispatchEvent({ type: 'pointerup', clientX: 256, bubbles: true });
+
+    const span = spanFromDrag(10, 40);
+    expect(measured[0]).toMatchObject({ left: 192, top: 400, width: 0 });
+    expect(measured[1]?.left).toBeCloseTo(span.t * 6.4, 3);
+    expect(measured[1]?.width).toBeCloseTo(
+      ((span.t_end ?? span.t) - span.t) * 6.4,
+      3
+    );
   });
 
   test('stage path chosen when requestFullscreen exists', () => {

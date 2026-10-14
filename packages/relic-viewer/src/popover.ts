@@ -115,7 +115,13 @@ export function anchorFromClientRect(
 }
 
 export interface PopoverLayer {
-  /** Puts `content` on the stage over `anchor`, replacing anything open. */
+  /**
+   * Puts `content` on the stage over `anchor`, replacing anything open.
+   *
+   * Showing the panel that is already open moves it rather than rebuilding
+   * it, so a reader re-aiming a comment keeps the sentence they are typing
+   * and the focus they are typing it with.
+   */
   show(content: HTMLElement, anchor: AnchorBox): HTMLElement;
   /** Takes it down. Safe to call when nothing is open. */
   hide(): void;
@@ -132,21 +138,62 @@ export interface PopoverLayer {
  *
  * One rather than many because two open panels are two answers to "what is
  * the reader looking at", and the second one is always wrong.
+ *
+ * Anchors stay in the host's content coordinates whatever is on screen. When
+ * part of the host is fullscreen, that element is the only thing painted, so
+ * the panel is mounted inside it and the anchor translated into its
+ * coordinates here. Every caller keeps measuring against the host, and none
+ * of them has to know that fullscreen exists.
  */
 export function popoverLayer(host: HTMLElement): PopoverLayer {
   let open: HTMLElement | undefined;
   let anchored: AnchorBox | undefined;
+  let mounted: HTMLElement | undefined;
+
+  /** Where a panel can be seen right now. */
+  const mount = (): HTMLElement => {
+    const shown = (
+      typeof document === 'undefined' ? null : document.fullscreenElement
+    ) as HTMLElement | null | undefined;
+    if (shown && shown !== host && host.contains(shown)) return shown;
+    return host;
+  };
 
   const position = (): void => {
-    if (open === undefined || anchored === undefined) return;
+    if (open === undefined || anchored === undefined || mounted === undefined)
+      return;
+    let local = anchored;
+    if (mounted !== host) {
+      // Host content coordinates back to the viewport, then into the
+      // fullscreen element's own content coordinates. Both rects are read
+      // now, so the round trip is exact whatever moved in between.
+      const from = host.getBoundingClientRect();
+      const into = mounted.getBoundingClientRect();
+      local = {
+        left:
+          anchored.left -
+          host.scrollLeft +
+          from.left -
+          into.left +
+          mounted.scrollLeft,
+        top:
+          anchored.top -
+          host.scrollTop +
+          from.top -
+          into.top +
+          mounted.scrollTop,
+        width: anchored.width,
+        height: anchored.height,
+      };
+    }
     const placement = placePopover(
-      anchored,
+      local,
       { width: open.offsetWidth, height: open.offsetHeight },
       {
-        scrollLeft: host.scrollLeft,
-        scrollTop: host.scrollTop,
-        clientWidth: host.clientWidth,
-        clientHeight: host.clientHeight,
+        scrollLeft: mounted.scrollLeft,
+        scrollTop: mounted.scrollTop,
+        clientWidth: mounted.clientWidth,
+        clientHeight: mounted.clientHeight,
       }
     );
     open.style.left = `${placement.left}px`;
@@ -156,14 +203,25 @@ export function popoverLayer(host: HTMLElement): PopoverLayer {
 
   return {
     show(content, anchor) {
-      if (open !== undefined) open.remove();
+      if (open !== undefined && open !== content) open.remove();
       content.classList.add('popover');
-      // Appended before measuring, because the panel's own height is what
-      // decides whether it fits above, and an element outside the document
-      // has no height to read.
-      host.appendChild(content);
+      const into = mount();
+      if (open !== content || mounted !== into) {
+        // Moving a node drops the focus inside it, and the panel moving is
+        // never a reason for the reader to stop typing.
+        const active = (
+          typeof document === 'undefined' ? null : document.activeElement
+        ) as HTMLElement | null | undefined;
+        const refocus = active && content.contains(active) ? active : undefined;
+        // Appended before measuring, because the panel's own height is what
+        // decides whether it fits above, and an element outside the document
+        // has no height to read.
+        into.appendChild(content);
+        refocus?.focus();
+      }
       open = content;
       anchored = anchor;
+      mounted = into;
       position();
       return content;
     },
@@ -171,6 +229,7 @@ export function popoverLayer(host: HTMLElement): PopoverLayer {
       open?.remove();
       open = undefined;
       anchored = undefined;
+      mounted = undefined;
     },
     current() {
       return open;

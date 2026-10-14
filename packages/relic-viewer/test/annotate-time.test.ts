@@ -664,6 +664,71 @@ describe('annotate-time', () => {
     expect(video.paused).toBe(true);
   });
 
+  test('a marker press seeks and still reaches the stage, where its card opens', () => {
+    const host = new TestNode('div');
+    const video = new MediaTestNode('video');
+    video.duration = 100;
+    video.play();
+    host.appendChild(video);
+    const surface: AnchorSurface = {
+      host: host as unknown as HTMLElement,
+      content: video as unknown as HTMLElement,
+    };
+    const overlay = new TestNode('div');
+    host.appendChild(overlay);
+    timeAdapter.paint(
+      surface,
+      overlay as unknown as HTMLElement,
+      { kind: 'time', t: 33 },
+      'c-card'
+    );
+    const marker = overlay.querySelector('[data-comment-id="c-card"]');
+
+    // The marker used to stop the press here and scroll the sidebar, so the
+    // stage never heard it and no card opened. It seeks, and lets it go.
+    let stopped = false;
+    marker?.dispatchEvent({
+      type: 'click',
+      stopPropagation: () => {
+        stopped = true;
+      },
+    } as { type: string });
+    expect(stopped).toBe(false);
+    expect(video.currentTime).toBe(33);
+    expect(video.paused).toBe(true);
+
+    // The card is the one hover form. The bespoke tooltip is gone.
+    marker?.dispatchEvent('mouseenter');
+    expect(overlay.querySelector('.timeline-marker-tooltip')).toBeNull();
+  });
+
+  test('a cluster names every member for the card that lists them', () => {
+    const host = new TestNode('div');
+    const video = new MediaTestNode('video');
+    video.duration = 100;
+    host.appendChild(video);
+    const surface: AnchorSurface = {
+      host: host as unknown as HTMLElement,
+      content: video as unknown as HTMLElement,
+    };
+    const overlay = new TestNode('div');
+    host.appendChild(overlay);
+    for (const [id, t] of [
+      ['m1', 15],
+      ['m2', 15.2],
+      ['m3', 15.4],
+    ] as const) {
+      timeAdapter.paint(
+        surface,
+        overlay as unknown as HTMLElement,
+        { kind: 'time', t },
+        id
+      );
+    }
+    const cluster = overlay.querySelector('.time-marker-cluster');
+    expect(cluster?.dataset['clusterMembers']).toBe('m1 m2 m3');
+  });
+
   test('capture control comments on a frame and closes span on second activation', () => {
     let repainted = 0;
     let opened = 0;

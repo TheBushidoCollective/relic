@@ -254,6 +254,10 @@ body {
   position: absolute;
   z-index: 8;
   background: var(--surface);
+  /* Its own ink rather than whatever it inherits. Inside a fullscreen stage
+     the surface is dark and the page around it is not, and an inherited ink
+     put the comment's own words dark on dark. */
+  color: var(--ink);
   border: 1px solid var(--rule-strong);
   box-shadow: 0 6px 18px rgb(0 0 0 / 14%);
   font-family: var(--sans);
@@ -332,6 +336,14 @@ body {
   list-style: none;
 }
 
+/* The card lights the row it opened for, and the light runs edge to edge of
+   the row. The sidebar has margins around its rows; a card has none, so the
+   row brings its own and the author and the date stop touching the light. */
+.popover-thread .comment {
+  padding-right: 0.6rem;
+  padding-left: 0.6rem;
+}
+
 .popover-target {
   margin: 0 0 0.4rem;
   color: var(--ink-soft);
@@ -365,6 +377,68 @@ body {
   margin: 0.4rem 0 0;
   color: var(--ink-soft);
   font-size: 0.72rem;
+}
+
+/* The comments that share one cluster on the timeline. Each row opens that
+   comment's own card, so a row is a button that reads as the sidebar's
+   comment head shrunk to one line plus the start of what was said. */
+.popover-members {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.popover-members li + li {
+  border-top: 1px solid var(--rule);
+}
+
+.popover-member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 0.6rem;
+  row-gap: 0.15rem;
+  width: 100%;
+  padding: 0.45rem 0.3rem;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.popover-member:hover {
+  background: color-mix(in srgb, var(--patina) 12%, transparent);
+}
+
+.popover-member:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: -2px;
+}
+
+.popover-member-time {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--patina);
+}
+
+.popover-member-author {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.popover-member-body {
+  grid-column: 1 / -1;
+  display: -webkit-box;
+  overflow: hidden;
+  font-family: var(--serif);
+  font-size: 0.86rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 /* ---------- the accession band ---------- */
@@ -1148,6 +1222,14 @@ body {
   white-space: nowrap;
 }
 
+/* A panel open over the scrubber already names the time it is about, and it
+   sits exactly where this readout does: the readout's lower edge would show
+   under the panel as a stray notch. The rule and the comment button stay, so
+   a reader can still aim somewhere else. */
+.stage-wrap:has(.popover) .hover-timecode {
+  visibility: hidden;
+}
+
 .timeline-hover-comment-btn {
   position: absolute;
   top: calc(100% + 4px);
@@ -1285,6 +1367,10 @@ body {
 .media-stage:fullscreen {
   color-scheme: dark;
   --surface: #171b1c;
+  /* Below the band rather than above it: a comment field in a panel on the
+     stage sits on the ground, and the page's light ground under the stage's
+     light ink made what was typed there unreadable. */
+  --ground: #0e1112;
   --ink: #e6e9e7;
   --ink-soft: #969e9d;
   --rule: #3b4345;
@@ -3165,6 +3251,11 @@ canvas.relic-page {
   pointer-events: none;
 }
 
+/* Markers are drawn in ink inside a ring of the surface. The played bar is
+   patina and the unplayed rail a light tint of the ink, so a patina marker
+   vanished over everything already played. Ink stands off the tinted rail,
+   the surface ring stands off the patina, and the pair holds in the dark
+   fullscreen stage, where both tokens are redefined. */
 .time-marker {
   position: absolute;
   top: 50%;
@@ -3173,20 +3264,21 @@ canvas.relic-page {
   padding: 0;
   border: none;
   border-radius: 0;
-  background: var(--patina);
+  background: var(--ink);
   transform: translate(-50%, -50%);
   pointer-events: auto;
   cursor: pointer;
   z-index: 2;
-  box-shadow: none;
+  box-shadow: 0 0 0 1px var(--surface);
 }
 
 .time-marker:hover,
 .time-marker.is-active,
 .time-marker:focus-visible {
   width: 5px;
-  background: var(--patina-ink);
+  background: var(--ink);
   outline: 1px solid var(--patina);
+  outline-offset: 1px;
   z-index: 4;
 }
 
@@ -3195,16 +3287,18 @@ canvas.relic-page {
   border-style: dashed;
 }
 
+/* A span stands above and below the 4px rail, so its ring shows against the
+   controls band as well as against the rail, played or not. */
 .time-marker-span {
-  height: 100%;
-  top: 0;
+  height: 8px;
+  top: 50%;
   border-radius: 0;
-  border-left: 2px solid var(--patina);
-  border-right: 2px solid var(--patina);
+  border-left: 2px solid var(--ink);
+  border-right: 2px solid var(--ink);
   border-top: none;
   border-bottom: none;
-  background: color-mix(in srgb, var(--patina) 40%, transparent);
-  transform: none;
+  background: var(--ink);
+  transform: translateY(-50%);
   min-width: 4px;
   z-index: 2;
 }
@@ -3212,9 +3306,10 @@ canvas.relic-page {
 .time-marker-span:hover,
 .time-marker-span.is-active,
 .time-marker-span:focus-visible {
-  transform: none;
-  background: color-mix(in srgb, var(--patina) 75%, transparent);
+  transform: translateY(-50%);
+  background: var(--ink);
   outline: 1px solid var(--patina);
+  outline-offset: 1px;
   z-index: 4;
 }
 
@@ -3230,8 +3325,8 @@ canvas.relic-page {
   padding: 0 3px;
   border: 1px solid var(--surface);
   border-radius: 0;
-  background: var(--patina);
-  color: #fff;
+  background: var(--ink);
+  color: var(--surface);
   font-family: var(--mono);
   transform: translateY(-50%);
   pointer-events: auto;
@@ -3250,63 +3345,12 @@ canvas.relic-page {
 .time-marker-cluster.is-active,
 .time-marker-cluster:has(.is-active),
 .time-marker-cluster:focus-visible {
-  background: var(--patina-ink);
+  background: var(--ink);
   outline: 1px solid var(--patina);
+  outline-offset: 1px;
   z-index: 5;
 }
 
-.timeline-marker-tooltip {
-  position: absolute;
-  bottom: 100%;
-  margin-bottom: 8px;
-  transform: translateX(-50%);
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  padding: 0.35rem 0.5rem;
-  font-family: var(--sans);
-  font-size: 0.74rem;
-  color: var(--ink);
-  white-space: nowrap;
-  pointer-events: none;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.marker-tooltip-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.marker-tooltip-author {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--patina);
-}
-
-.marker-tooltip-time {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--ink-soft);
-}
-
-.marker-tooltip-snippet {
-  font-family: var(--sans);
-  font-size: 0.72rem;
-  color: var(--ink);
-  max-width: 18rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.marker-tooltip-item {
-  font-family: var(--sans);
-  font-size: 0.7rem;
-  color: var(--ink);
-}
 .time-frame-box {
   position: absolute;
   border: 2px solid var(--patina);
