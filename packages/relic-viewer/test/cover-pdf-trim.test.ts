@@ -50,9 +50,9 @@ describe('trimPdfPage', () => {
   });
 
   test('full-bleed ink and a blank page are drawn at the page width', () => {
-    expect(trimPdfPage({ minX: 0, maxX: 599, minY: 0, maxY: 776 }, PAGE)).toEqual(
-      { scale: 1, left: 0, top: 0 }
-    );
+    expect(
+      trimPdfPage({ minX: 0, maxX: 599, minY: 0, maxY: 776 }, PAGE)
+    ).toEqual({ scale: 1, left: 0, top: 0 });
     expect(trimPdfPage(null, PAGE)).toEqual({ scale: 1, left: 0, top: 0 });
   });
 });

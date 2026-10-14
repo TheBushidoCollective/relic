@@ -2,12 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  buildCover,
-  buildViewer,
-  FRAME_CSP,
-  FRAME_CSP_META,
-} from '../build.ts';
+import { buildViewer, FRAME_CSP, FRAME_CSP_META } from '../build.ts';
 
 const EXPECTED_COVER_FILES = [
   'cover.css',
@@ -19,6 +14,29 @@ const EXPECTED_COVER_FILES = [
 ].sort();
 
 const pkgDir = new URL('..', import.meta.url).pathname;
+
+/**
+ * Runs buildCover in a fresh bun process, the way the relic-mcp build runs
+ * it. Inside bun:test the first Bun.build of an entry whose imports climb a
+ * directory (`src/cover/kinds.ts` importing `../text-views.ts`) fails with
+ * "Could not resolve" (oven-sh/bun#22941, reproduced on the pinned 1.3.14);
+ * that is the test runner's resolver, not the build.
+ */
+async function buildCover(options: { outdir: string }): Promise<void> {
+  const script = [
+    `import { buildCover } from ${JSON.stringify(`${pkgDir}build.ts`)};`,
+    `await buildCover({ outdir: ${JSON.stringify(options.outdir)} });`,
+  ].join('\n');
+  const child = Bun.spawn([process.execPath, '-e', script], {
+    stdout: 'ignore',
+    stderr: 'pipe',
+  });
+  const [stderr, exit] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exit !== 0) throw new Error(`buildCover exited ${exit}: ${stderr}`);
+}
 
 describe('cover asset build', () => {
   test('emits the exact expected file set', async () => {
