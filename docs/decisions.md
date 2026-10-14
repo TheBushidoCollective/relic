@@ -695,3 +695,22 @@ the change (`field: false` after pressing Reply on a marker card) and fixed
 for every card. A hover that began before a composer opened could also replace
 it when its delay ran out; the delay now checks again before it opens
 anything, and a card never replaces a panel holding unposted text.
+
+Every time comment's sidebar row also said "This comment points at part of
+the document that this page cannot show" while its marker sat on the
+scrubber. Observed on origin/main for a verified reader on a fresh page: five
+rows of five carried the note with three markers painted, and still did a
+second later. The first paint runs before the media knows its duration, so
+every time mark is counted unplaceable; the time adapter paints the marks
+itself once the metadata lands and dispatches `relic-repaint`, which nothing
+heard, so the rows were never drawn again. The thread now repaints and
+redraws its rows on `relic-repaint`, and the same page shows none of the
+notes.
+
+Timeline markers were patina on a patina played bar and a faint tint on the
+unplayed rail, so a span over anything already played disappeared. Every
+marker kind is now drawn in `--ink` inside a 1px `--surface` ring. Measured
+in the browser: the fill against the unplayed rail is 12.73:1 on the page
+and 11.13:1 in the fullscreen stage, and the ring against the played bar is
+6.06:1 and 6.89:1. The fill alone against the played bar is 2.82:1 and
+2.06:1, which is why the ring is there.
