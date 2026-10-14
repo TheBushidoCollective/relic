@@ -221,49 +221,14 @@ export async function runFfmpeg(
   inputBytes: Uint8Array,
   timeoutMs?: number
 ): Promise<Uint8Array> {
-  const maxAttempts = 3;
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
-    } catch (pipeError) {
-      lastError = pipeError;
-      const isTimeout =
-        pipeError instanceof Error && pipeError.message.includes('timed out');
-      if (isTimeout) {
-        throw pipeError;
-      }
-      const isRetryable =
-        pipeError instanceof Error &&
-        (pipeError.message.includes('code null') ||
-          (pipeError as NodeJS.ErrnoException).code === 'EBADF');
-      if (isRetryable && attempt < maxAttempts) {
-        continue;
-      }
-      if (!args.includes('pipe:0')) {
-        throw pipeError;
-      }
-      try {
-        return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
-      } catch (tempError) {
-        lastError = tempError;
-        const isTempTimeout =
-          tempError instanceof Error && tempError.message.includes('timed out');
-        if (isTempTimeout) {
-          throw tempError;
-        }
-        const isTempRetryable =
-          tempError instanceof Error &&
-          (tempError.message.includes('code null') ||
-            (tempError as NodeJS.ErrnoException).code === 'EBADF');
-        if (isTempRetryable && attempt < maxAttempts) {
-          continue;
-        }
-        throw tempError;
-      }
+  try {
+    return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
+  } catch (pipeError) {
+    if (!args.includes('pipe:0')) {
+      throw pipeError;
     }
+    return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
   }
-  throw lastError;
 }
 
 function runFfmpegPiped(
