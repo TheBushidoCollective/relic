@@ -22,7 +22,7 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -226,7 +226,7 @@ export async function runFfmpeg(
   try {
     return await runFfmpegPiped(ffmpegPath, args, inputBytes, timeoutMs);
   } catch (pipeError) {
-    if (!args.includes('pipe:0')) {
+    if (!args.includes('pipe:0') && !args.includes('pipe:1')) {
       throw pipeError;
     }
     return await runFfmpegTemp(ffmpegPath, args, inputBytes, timeoutMs);
@@ -324,19 +324,30 @@ export async function runFfmpegTemp(
   const dir = await mkdtemp(join(tmpdir(), 'relic-media-'));
   await chmod(dir, 0o700);
   const tempPath = join(dir, 'content.bin');
+  const tempOutPath = join(dir, 'output.bin');
   try {
-    await writeFile(tempPath, inputBytes, { mode: 0o600 });
-    const adjustedArgs = args.map((arg) => (arg === 'pipe:0' ? tempPath : arg));
+    if (args.includes('pipe:0')) {
+      await writeFile(tempPath, inputBytes, { mode: 0o600 });
+    }
+    const usesPipe1 = args.includes('pipe:1');
+    const adjustedArgs = args.map((arg) => {
+      if (arg === 'pipe:0') return tempPath;
+      if (arg === 'pipe:1') return tempOutPath;
+      return arg;
+    });
     const finalArgs = adjustedArgs.includes('-nostdin')
       ? adjustedArgs
       : ['-nostdin', ...adjustedArgs];
 
     const { promise, resolve, reject } = defer<Uint8Array>();
-    const child = spawn(ffmpegPath, finalArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const child = usesPipe1
+      ? spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'ignore', 'pipe'] })
+      : spawn(ffmpegPath, finalArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
     activeChildren.add(child);
     child.stdin.on('error', () => {});
+    if (finalArgs.includes('pipe:0')) {
+      child.stdin.end(Buffer.from(inputBytes));
+    }
 
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
@@ -371,15 +382,17 @@ export async function runFfmpegTemp(
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
 
-    child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+    if (!usesPipe1 && child.stdout) {
+      child.stdout.on('data', (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+      child.stdout.on('error', () => {});
+    }
     child.stderr.on('data', (chunk) => stderrChunks.push(Buffer.from(chunk)));
-    child.stdout.on('error', () => {});
     child.stderr.on('error', () => {});
     child.on('error', (err) => {
       cleanup();
       if (!timedOut) reject(err);
     });
-    child.on('close', (code, signal) => {
+    child.on('close', async (code, signal) => {
       cleanup();
       if (timedOut) return;
       if (code !== 0) {
@@ -390,7 +403,16 @@ export async function runFfmpegTemp(
           )
         );
       } else {
-        resolve(new Uint8Array(Buffer.concat(stdoutChunks)));
+        if (usesPipe1) {
+          try {
+            const outBytes = await readFile(tempOutPath);
+            resolve(new Uint8Array(outBytes));
+          } catch (readErr) {
+            reject(readErr);
+          }
+        } else {
+          resolve(new Uint8Array(Buffer.concat(stdoutChunks)));
+        }
       }
     });
     return await promise;
