@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { extractMediaCover } from '../src/cover/media.ts';
 import { probeFfmpeg, runFfmpeg } from '../src/resolve-anchor.ts';
 
@@ -222,5 +226,132 @@ describe('cover-media', () => {
     }
     expect(caught).toBeDefined();
     expect((caught as Error).message).toContain('ffmpeg timed out');
+  });
+
+  test('extracts cover from late-moov MP4 and late-moov M4A', async () => {
+    const ffmpegPath = await probeFfmpeg();
+    if (!ffmpegPath) {
+      console.warn('ffmpeg not found, skipping late-moov test');
+      return;
+    }
+
+    const dir = await mkdtemp(join(tmpdir(), 'relic-late-moov-test-'));
+    try {
+      const faststartM4a = join(dir, 'faststart.m4a');
+      const lateMoovM4a = join(dir, 'late-moov.m4a');
+
+      // 1. Generate late-moov M4A
+      const p1 = spawn(
+        ffmpegPath,
+        [
+          '-f',
+          'lavfi',
+          '-i',
+          'sine=frequency=440:duration=10',
+          '-c:a',
+          'aac',
+          '-movflags',
+          '+faststart',
+          '-y',
+          faststartM4a,
+        ],
+        { stdio: 'ignore' }
+      );
+      await new Promise<void>((resolve, reject) => {
+        p1.on('close', (code) =>
+          code === 0
+            ? resolve()
+            : reject(new Error(`faststart m4a failed with code ${code}`))
+        );
+        p1.on('error', reject);
+      });
+
+      const p2 = spawn(
+        ffmpegPath,
+        ['-i', faststartM4a, '-c', 'copy', '-y', lateMoovM4a],
+        { stdio: 'ignore' }
+      );
+      await new Promise<void>((resolve, reject) => {
+        p2.on('close', (code) =>
+          code === 0
+            ? resolve()
+            : reject(new Error(`late-moov m4a failed with code ${code}`))
+        );
+        p2.on('error', reject);
+      });
+
+      const m4aBytes = await readFile(lateMoovM4a);
+      const m4aCover = await extractMediaCover(
+        new Uint8Array(m4aBytes),
+        'memo.m4a',
+        'audio/mp4',
+        ffmpegPath
+      );
+      expect('kind' in m4aCover).toBe(true);
+      if ('kind' in m4aCover) {
+        expect(m4aCover.kind).toBe('audio-waveform');
+        expect(m4aCover.bytes.length).toBeGreaterThan(0);
+      }
+
+      // 2. Generate late-moov MP4
+      const faststartMp4 = join(dir, 'faststart.mp4');
+      const lateMoovMp4 = join(dir, 'late-moov.mp4');
+
+      const p3 = spawn(
+        ffmpegPath,
+        [
+          '-f',
+          'lavfi',
+          '-i',
+          'color=c=blue:s=320x240:d=1',
+          '-c:v',
+          'libx264',
+          '-pix_fmt',
+          'yuv420p',
+          '-movflags',
+          '+faststart',
+          '-y',
+          faststartMp4,
+        ],
+        { stdio: 'ignore' }
+      );
+      await new Promise<void>((resolve, reject) => {
+        p3.on('close', (code) =>
+          code === 0
+            ? resolve()
+            : reject(new Error(`faststart mp4 failed with code ${code}`))
+        );
+        p3.on('error', reject);
+      });
+
+      const p4 = spawn(
+        ffmpegPath,
+        ['-i', faststartMp4, '-c', 'copy', '-y', lateMoovMp4],
+        { stdio: 'ignore' }
+      );
+      await new Promise<void>((resolve, reject) => {
+        p4.on('close', (code) =>
+          code === 0
+            ? resolve()
+            : reject(new Error(`late-moov mp4 failed with code ${code}`))
+        );
+        p4.on('error', reject);
+      });
+
+      const mp4Bytes = await readFile(lateMoovMp4);
+      const mp4Cover = await extractMediaCover(
+        new Uint8Array(mp4Bytes),
+        'video.mp4',
+        'video/mp4',
+        ffmpegPath
+      );
+      expect('kind' in mp4Cover).toBe(true);
+      if ('kind' in mp4Cover) {
+        expect(mp4Cover.kind).toBe('video');
+        expect(mp4Cover.bytes.length).toBeGreaterThan(0);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   });
 });
