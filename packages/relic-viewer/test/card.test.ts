@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { isCacheable } from '../src/sw-cache.ts';
 
 /**
- * Verifies the committed unfurl card at packages/relic-viewer/public/card.v1.png.
+ * Verifies the fallback unfurl card at packages/relic-viewer/public/card.v1.png.
+ * The card is the fallback when a relic has no current cover.
  *
  * Every major link unfurler (Slack, Discord, iMessage, Twitter) crops or
  * outright refuses a card that is not 1200x630, and an incorrect placeholder

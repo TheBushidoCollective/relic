@@ -136,7 +136,7 @@ import {
   type TreeDiff,
 } from './domdiff.ts';
 import { transpileJsx } from './jsx.ts';
-import { highlightCode, renderMarkdown } from './markdown.ts';
+import { renderMarkdown } from './markdown.ts';
 import {
   buildCommentedDashboardRows,
   buildLocalDashboardRows,
@@ -151,6 +151,7 @@ import {
   type Mark,
   type TreeNode,
 } from './rendered-tree.ts';
+import { buildCodeTable, buildProse } from './text-views.ts';
 import {
   type DeadView,
   formatBytes,
@@ -738,12 +739,7 @@ function renderMarkdownView(view: ReadyView): HTMLElement {
 
   const source = decodeText(view.content);
 
-  const prose = document.createElement('article');
-  prose.className = 'prose';
-  // renderMarkdown escapes before it adds markup, and nothing in the source
-  // can become an element. That property is asserted directly in
-  // test/markdown.test.ts against fifteen attack payloads.
-  prose.innerHTML = renderMarkdown(source);
+  const prose = buildProse(source);
 
   const raw = document.createElement('pre');
   raw.className = 'raw';
@@ -775,22 +771,7 @@ function renderCodeView(view: ReadyView): HTMLElement {
   wrapper.className = 'doc';
 
   const source = decodeText(view.content);
-  const lines = source.split('\n');
-
-  const table = document.createElement('div');
-  table.className = 'code';
-
-  const gutter = document.createElement('pre');
-  gutter.className = 'gutter';
-  gutter.setAttribute('aria-hidden', 'true');
-  gutter.textContent = lines.map((_line, index) => index + 1).join('\n');
-
-  const body = document.createElement('pre');
-  body.className = 'code-body';
-  // highlightCode escapes before it marks up.
-  body.innerHTML = highlightCode(source);
-
-  table.append(gutter, body);
+  const table = buildCodeTable(source);
   wrapper.appendChild(table);
   return wrapper;
 }

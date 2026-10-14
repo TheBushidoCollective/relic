@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Renders packages/relic-viewer/public/card.v1.png, the Open Graph and
- * Twitter unfurl card for relics.
+ * Renders packages/relic-viewer/public/card.v1.png, the fallback Open Graph and
+ * Twitter unfurl card when a relic has no current cover.
  *
  * Typography: IBM Plex Mono and IBM Plex Sans.
  * Font license: SIL Open Font License, Version 1.1 (OFL 1.1).

@@ -26,7 +26,7 @@ const CONTENT_TYPES: Record<string, string> = {
 export function coverAssetDir(): string {
   return fileURLToPath(
     new URL(
-      process.env['RELIC_MCP_COVER_DIR'] ?? '../../dist/cover/',
+      process.env.RELIC_MCP_COVER_DIR ?? '../../dist/cover/',
       import.meta.url
     )
   );

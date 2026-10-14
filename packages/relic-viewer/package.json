@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "main": "./src/viewer.ts",
+  "exports": {
+    ".": "./src/viewer.ts",
+    "./build": "./build.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "bun run build.ts"
