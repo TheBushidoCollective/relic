@@ -595,6 +595,58 @@ describe('cover-render', () => {
     expect(launchedChrome?.closeCount).toBeGreaterThanOrEqual(1);
   });
 
+  test('deadline resolves render_timeout even when RunningChrome close() never settles and page never finishes', async () => {
+    const validPng = makeValidPng();
+    const fakeCdp = new FakeCdpConnection(
+      Buffer.from(validPng).toString('base64'),
+      undefined,
+      1,
+      { ok: true },
+      true
+    );
+
+    let killed = false;
+    const fakeHangingChrome: RunningChrome = {
+      cdp: fakeCdp,
+      product: 'HangingChrome/1.0',
+      close: () => new Promise(() => {}),
+      kill: () => {
+        killed = true;
+      },
+    };
+
+    const renderer = chromeCoverRenderer(
+      {
+        chromePath: '/dummy/chrome',
+        ffmpegPath: undefined,
+        assetDir: tempAssetDir,
+        deadlineMs: 25,
+      },
+      {
+        discoverChrome: async () => ({
+          kind: 'found',
+          path: '/dummy/chrome',
+          source: 'default',
+        }),
+        launchChrome: async () => fakeHangingChrome,
+      }
+    );
+
+    const source: CoverSource = {
+      filename: 'hanging.md',
+      mimetype: 'text/markdown',
+      rendererClass: 'markdown',
+      bytes: new TextEncoder().encode('# Hanging Test\n'),
+    };
+
+    const outcome = await renderer(source);
+    expect(outcome.status).toBe('skipped');
+    if (outcome.status === 'skipped') {
+      expect(outcome.reason).toBe('render_timeout');
+      expect(outcome.detail).toContain('25ms');
+    }
+    expect(killed).toBe(true);
+  });
   test('fails with render_failed if protocol check does not equal 1', async () => {
     const validPng = makeValidPng();
     const fakeCdp = new FakeCdpConnection(
