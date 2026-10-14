@@ -16,7 +16,9 @@
  * The picture and its controls sit together in a stage, and the stage is what
  * goes fullscreen. There the picture fills the screen on black, the controls
  * lie over the bottom of the frame, and after a spell of idle playback they
- * fade out with the cursor so the frame is all that is left.
+ * fade out with the cursor so the frame is all that is left. A comment is
+ * written in a panel over the scrubber inside the stage, so commenting never
+ * has to leave fullscreen to find somewhere to type.
  */
 
 import type { CommentAnchor } from '@relic/format';
@@ -89,17 +91,47 @@ export interface MediaPlayerHandle {
   readonly setPendingAnchor: (span: TimeSpan | null) => void;
 }
 
-function getTrackGeometry(element: HTMLElement): {
-  left: number;
-  width: number;
-} {
+/** A box in viewport pixels, as `getBoundingClientRect` reports one. */
+export interface ClientBox {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * What `relic:time-aim` carries to the page.
+ *
+ * A measuring function rather than a box measured once, because where a
+ * moment sits on the scrubber moves whenever the page around it does, and the
+ * composer that opens on it has to follow: into fullscreen, out of it, or
+ * across a resize.
+ */
+export interface TimeAimDetail {
+  readonly anchor: Extract<CommentAnchor, { kind: 'time' }>;
+  /**
+   * Whether the composer takes focus. Every gesture that starts a comment
+   * asks for it. Adjusting the end of a span already drawn does not, because
+   * focus belongs to the handle the reader is adjusting it with.
+   */
+  readonly focus: boolean;
+  /** The moment or span on the scrubber, in viewport pixels. */
+  readonly measure: () => ClientBox;
+}
+
+function getTrackGeometry(element: HTMLElement): ClientBox {
   if (typeof element.getBoundingClientRect === 'function') {
     const rect = element.getBoundingClientRect();
     if (rect && rect.width > 0) {
-      return { left: rect.left, width: rect.width };
+      return {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
     }
   }
-  return { left: 0, width: 640 };
+  return { left: 0, top: 0, width: 640, height: 0 };
 }
 function createCustomEvent<T>(type: string, detail: T): Event {
   if (typeof CustomEvent === 'function') {
@@ -374,15 +406,44 @@ export function createMediaPlayer(
   };
 
   updateFullscreenSupport();
+
   /**
-   * Sends an aim to the composer. `afterAim` runs once the aim has gone out,
-   * so whatever a caller does next (focusing the span handle) still lands
-   * after the composer has taken its turn, on either path below.
+   * Where a moment or a span sits on the scrubber, in viewport pixels.
+   *
+   * Across, the rail, because that is where the times are laid out. Down, the
+   * whole scrubber rather than the 4px rail, so a panel placed above it
+   * clears the markers and the pending selection instead of sitting on them.
+   */
+  const measureOnScrubber = (span: TimeSpan): ClientBox => {
+    const duration = getDuration();
+    const across = getTrackGeometry(rail);
+    const down = getTrackGeometry(scrubber);
+    const start = timeToFraction(span.t, duration) ?? 0;
+    const end =
+      span.t_end === undefined
+        ? start
+        : (timeToFraction(span.t_end, duration) ?? start);
+    return {
+      left: across.left + start * across.width,
+      top: down.top,
+      width: Math.max(0, end - start) * across.width,
+      height: down.height,
+    };
+  };
+
+  /**
+   * Tells the page a comment is being aimed at a moment or a span.
+   *
+   * This used to leave fullscreen before an aim that focuses, because the
+   * composer lived in the sidebar outside the fullscreen element. The page
+   * now opens the composer over the scrubber inside the stage, so nothing
+   * here leaves. The one reader who still has to go to the sidebar is one
+   * who has not verified an address, and only the page knows that, so the
+   * page is what leaves fullscreen for them.
    */
   const dispatchTimeAim = (
     anchor: Extract<CommentAnchor, { kind: 'time' }>,
-    focus = true,
-    afterAim?: () => void
+    focus = true
   ): void => {
     const roundedAnchor: Extract<CommentAnchor, { kind: 'time' }> = {
       kind: 'time',
@@ -392,26 +453,13 @@ export function createMediaPlayer(
         : {}),
       ...(anchor.rect !== undefined ? { rect: anchor.rect } : {}),
     };
-    const send = (): void => {
-      if (typeof chrome.dispatchEvent === 'function') {
-        chrome.dispatchEvent(
-          createCustomEvent('relic:time-aim', {
-            anchor: roundedAnchor,
-            focus,
-          })
-        );
-      }
-      afterAim?.();
+    if (typeof chrome.dispatchEvent !== 'function') return;
+    const detail: TimeAimDetail = {
+      anchor: roundedAnchor,
+      focus,
+      measure: () => measureOnScrubber(roundedAnchor),
     };
-    // An aim that focuses opens the composer, which lives in the sidebar,
-    // outside the fullscreen element and so invisible from inside it. Leave
-    // fullscreen first and open the composer on the page that comes back. A
-    // drag aim only paints the selection on the scrubber, so it stays put.
-    if (focus && isFullscreen()) {
-      leaveFullscreen().then(send, send);
-      return;
-    }
-    send();
+    chrome.dispatchEvent(createCustomEvent('relic:time-aim', detail));
   };
 
   const updateTimeDisplay = (): void => {
@@ -551,7 +599,12 @@ export function createMediaPlayer(
       pointerOverChrome ||
       dragState !== null ||
       handleDragging ||
-      keyboardFocusInChrome()
+      keyboardFocusInChrome() ||
+      // A comment being written or read over the scrubber. Fading the
+      // controls out from under it would leave a panel pointing at a
+      // scrubber nobody can see, and hide the cursor over what is being
+      // typed.
+      stage.querySelector('.popover') !== null
     ) {
       return;
     }
@@ -708,11 +761,12 @@ export function createMediaPlayer(
     const onWindowMove = (e: PointerEvent): void => {
       if (dragState === null) return;
       // The rail rect is read live, which is only safe because nothing in
-      // this gesture can move it. The aiming event that opens the thread
-      // sidebar, and so shifts this rail 176px sideways, is held until
-      // pointerup: a track that slides under a reader's finger maps the
-      // same physical position to a later time, and the span they drew
-      // ends somewhere they never chose.
+      // this gesture can move it. The aiming event can open the thread
+      // sidebar, for a reader who has no verified address yet, and so shift
+      // this rail 176px sideways, which is why it is held until pointerup: a
+      // track that slides under a reader's finger maps the same physical
+      // position to a later time, and the span they drew ends somewhere they
+      // never chose.
       const g = getTrackGeometry(rail);
       const f = pointerFraction(e.clientX, g.left, g.width);
       const currentSeconds = fractionToTime(f, duration);
@@ -723,8 +777,8 @@ export function createMediaPlayer(
       media.currentTime = currentSeconds;
       if (dragState.hasMoved) {
         // Painted locally, so the reader still watches the selection and its
-        // two timecodes grow under the pointer. None of that needs the
-        // sidebar, which is the only reason this is safe to defer.
+        // two timecodes grow under the pointer. None of that needs the page,
+        // which is the only reason this is safe to defer.
         setPendingAnchor(spanFromDrag(dragState.startSeconds, currentSeconds));
       }
     };
@@ -742,22 +796,20 @@ export function createMediaPlayer(
         Math.abs(dragState.currentSeconds - dragState.startSeconds) >= 0.2
       ) {
         // The end is the last position the pointer reached against the
-        // geometry the whole gesture saw. Aiming below is what opens the
+        // geometry the whole gesture saw. Aiming below is what can open the
         // sidebar, so nothing has shifted between that read and this one.
+        // Letting go is where the comment starts, so the composer that opens
+        // over the span takes focus and the reader can type straight away.
         const span = spanFromDrag(
           dragState.startSeconds,
           dragState.currentSeconds
         );
         setPendingAnchor(span);
-        dispatchTimeAim(
-          {
-            kind: 'time',
-            t: span.t,
-            ...(span.t_end !== undefined ? { t_end: span.t_end } : {}),
-          },
-          false
-        );
-        spanHandle.focus();
+        dispatchTimeAim({
+          kind: 'time',
+          t: span.t,
+          ...(span.t_end !== undefined ? { t_end: span.t_end } : {}),
+        });
       } else {
         // Bare click seeking: seeks to time without opening composer
         setPendingAnchor(null);
@@ -777,7 +829,9 @@ export function createMediaPlayer(
 
   scrubber.addEventListener('pointermove', (event: PointerEvent) => {
     const duration = getDuration();
-    if (duration <= 0 || dragState !== null) return;
+    // Either drag owns the pointer. Offering a new comment under the end of
+    // a span the reader is still stretching is a second, competing target.
+    if (duration <= 0 || dragState !== null || handleDragging) return;
 
     const geom = getTrackGeometry(rail);
     const frac = pointerFraction(event.clientX, geom.left, geom.width);
@@ -818,7 +872,7 @@ export function createMediaPlayer(
       t: boundedTime,
     };
     setPendingAnchor({ t: boundedTime });
-    dispatchTimeAim(anchor, true, () => spanHandle.focus());
+    dispatchTimeAim(anchor);
   });
 
   // --------------------------------------------------------------------------
@@ -829,6 +883,7 @@ export function createMediaPlayer(
     if (typeof event.preventDefault === 'function') event.preventDefault();
     spanHandle.focus();
     handleDragging = true;
+    hoverIndicator.classList.add('is-hidden');
 
     const onHandleMove = (e: PointerEvent): void => {
       if (!handleDragging || pendingSpan === null) return;

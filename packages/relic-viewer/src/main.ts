@@ -34,8 +34,9 @@ import {
 } from './anchoring.ts';
 import { captureSelectionQuote } from './annotate-quote.ts';
 import { isImageElement } from './annotate-region.ts';
+import { formatTimecode, formatTimecodeTenths } from './annotate-time.ts';
 import { isFrameScrollMessage } from './frame-scroll.ts';
-import { createMediaPlayer } from './media-player.ts';
+import { createMediaPlayer, type TimeAimDetail } from './media-player.ts';
 import {
   landmarkScrollDelta,
   nearestScrollLandmark,
@@ -3526,7 +3527,73 @@ export interface MarkDeps {
    * in the sidebar. A panel that offered a field nobody could post from
    * would be worse than the hand-off.
    */
-  readonly compose?: (anchor: CommentAnchor, box: AnchorBox) => boolean;
+  readonly compose?: (
+    anchor: CommentAnchor,
+    box: AnchorBox,
+    options?: ComposeOptions
+  ) => boolean;
+}
+
+/** What a composer opened over the page is told beyond where it goes. */
+export interface ComposeOptions {
+  /**
+   * Whether the field takes focus. False while the reader is still adjusting
+   * what the comment is about, because focus belongs to the control they
+   * are adjusting it with.
+   */
+  readonly focus?: boolean;
+  /**
+   * Measures the target again, in the host's content coordinates, for a page
+   * that moved under the panel: a stage going into fullscreen or coming out.
+   */
+  readonly reanchor?: () => AnchorBox | undefined;
+}
+
+/**
+ * Tells the media player what a comment is aimed at, or that it no longer is.
+ *
+ * Dispatched on the player's own controls, because that is where it listens
+ * and an event dispatched on the stage around it bubbles away from the
+ * player rather than down into it. It still bubbles out to the stage, so
+ * anything listening there hears it too.
+ */
+function tellPlayer(
+  host: HTMLElement,
+  type: 'relic:time-selection' | 'relic:time-selection-cleared',
+  anchor?: CommentAnchor
+): void {
+  if (typeof CustomEvent !== 'function') return;
+  const player =
+    host.querySelector<HTMLElement>('.custom-media-player') ?? host;
+  if (typeof player.dispatchEvent !== 'function') return;
+  player.dispatchEvent(
+    new CustomEvent(type, {
+      bubbles: true,
+      ...(anchor !== undefined ? { detail: { anchor } } : {}),
+    })
+  );
+}
+
+/**
+ * Leaves fullscreen when something inside this stage holds it, then runs
+ * `next`.
+ *
+ * The sidebar sits outside the fullscreen element and cannot be seen from
+ * inside it, so anything that has to put the reader in the sidebar has to
+ * bring the page back first.
+ */
+function leaveStageFullscreen(host: HTMLElement, next: () => void): void {
+  const shown = document.fullscreenElement;
+  if (
+    shown === null ||
+    shown === undefined ||
+    !host.contains(shown) ||
+    typeof document.exitFullscreen !== 'function'
+  ) {
+    next();
+    return;
+  }
+  Promise.resolve(document.exitFullscreen()).then(next, next);
 }
 
 /**
@@ -3690,14 +3757,7 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     disarm();
     disarmSpan();
     removeKeyboardBox();
-    if (
-      typeof CustomEvent === 'function' &&
-      typeof host?.dispatchEvent === 'function'
-    ) {
-      host.dispatchEvent(
-        new CustomEvent('relic:time-selection-cleared', { bubbles: true })
-      );
-    }
+    if (host !== undefined) tellPlayer(host, 'relic:time-selection-cleared');
   };
 
   const paintChip = (): void => {
@@ -3741,17 +3801,8 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
     if (focusBody) {
       deps.focusBody();
     }
-    if (
-      next.kind === 'time' &&
-      typeof CustomEvent === 'function' &&
-      typeof host?.dispatchEvent === 'function'
-    ) {
-      host.dispatchEvent(
-        new CustomEvent('relic:time-selection', {
-          detail: { anchor: next },
-          bubbles: true,
-        })
-      );
+    if (next.kind === 'time' && host !== undefined) {
+      tellPlayer(host, 'relic:time-selection', next);
     }
   };
   const arm = (): void => {
@@ -4693,15 +4744,43 @@ export function buildMarkControls(deps: MarkDeps): MarkControls {
           row.scrollIntoView({ block: 'nearest' });
         }
       }) as EventListener);
+      // A moment or a span on the scrubber. Written in a panel over the
+      // scrubber, exactly as a selection is written over the words, and
+      // handed to the sidebar only when the page cannot compose here.
       next.addEventListener('relic:time-aim', ((
-        event: CustomEvent<{
-          anchor: Extract<CommentAnchor, { kind: 'time' }>;
-          focus?: boolean;
-        }>
+        event: CustomEvent<TimeAimDetail>
       ) => {
-        if (event.detail?.anchor) {
-          aim(event.detail.anchor, false, event.detail.focus ?? true);
+        const detail = event.detail;
+        if (!detail?.anchor) return;
+        const focus = detail.focus ?? true;
+        const reanchor = (): AnchorBox | undefined => {
+          const measured = detail.measure?.();
+          if (measured === undefined) return undefined;
+          return anchorFromClientRect(
+            measured,
+            next.getBoundingClientRect(),
+            next
+          );
+        };
+        const box = reanchor();
+        if (
+          box !== undefined &&
+          deps.compose?.(detail.anchor, box, { focus, reanchor }) === true
+        ) {
+          dismiss();
+          return;
         }
+        // The sidebar is where an address is verified, and it cannot be
+        // seen from inside fullscreen, so a reader sent there is brought
+        // back out first. An adjustment of a span already drawn only moves
+        // the target and leaves the reader where they are.
+        if (focus) {
+          leaveStageFullscreen(next, () => {
+            aim(detail.anchor, false, true);
+          });
+          return;
+        }
+        aim(detail.anchor, false, false);
       }) as EventListener);
 
       // A box on a rendered page. Self-guarding on a `canvas.relic-page`
@@ -4867,12 +4946,12 @@ export function buildThread(
       // mark would put a network round trip behind a text selection.
       paintMarks(lastEntries);
     },
-    compose: (anchor, box) => {
+    compose: (anchor, box, options) => {
       // Refused rather than half-offered when there is no identity yet:
       // verifying one is the sidebar's flow, and the caller falls back to it.
       if (host === undefined || popover === undefined) return false;
       if (session.kind !== 'verified' || cipher === undefined) return false;
-      openComposer(anchor, box);
+      openComposer(anchor, box, options);
       return true;
     },
   });
@@ -5111,6 +5190,23 @@ export function buildThread(
   // depend on how completely the harness imitates a browser.
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
   let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The new comment being written in the open panel, while there is one.
+   *
+   * Held apart from the panel because its target can move under it: a
+   * reader who drags the end of a span, or draws a new one, while the
+   * composer holds a sentence gets the target moved and the sentence kept.
+   */
+  let composing:
+    | {
+        anchor: CommentAnchor;
+        readonly panel: HTMLElement;
+        readonly target: HTMLElement;
+        readonly field: HTMLTextAreaElement;
+      }
+    | undefined;
+  /** Measures the open panel's target again, after the page moves under it. */
+  let reanchor: (() => AnchorBox | undefined) | undefined;
 
   const frameWindow = (): Window | null =>
     host?.querySelector<HTMLIFrameElement>('iframe.usercontent-frame')
@@ -5139,21 +5235,58 @@ export function buildThread(
     );
   };
 
+  /**
+   * The composer is gone, so whatever it was aimed at is no longer a target.
+   *
+   * A moment or a span is painted on the scrubber by the player rather than
+   * by `paintMarks`, so the player is told. Leaving it painted would show a
+   * target that nothing on the page is going to post to.
+   */
+  const dropComposing = (): void => {
+    const held = composing;
+    if (held === undefined) return;
+    composing = undefined;
+    if (held.anchor.kind === 'time' && host !== undefined) {
+      tellPlayer(host, 'relic:time-selection-cleared');
+    }
+  };
+
   const closeCard = (): void => {
     clearTimeout(hoverTimer);
     clearTimeout(leaveTimer);
     popover?.hide();
     stickyId = undefined;
+    reanchor = undefined;
+    dropComposing();
     setActiveMark(undefined);
   };
 
-  /** Where a painted mark sits, in the stage's content coordinates. */
+  /**
+   * Where a painted mark sits, in the stage's content coordinates.
+   *
+   * The first match that is laid out rather than the first match. A comment
+   * inside a cluster on the timeline is carried by a hidden element, for
+   * pairing, and painted by the cluster around it; the open card carries the
+   * id as well and is never the thing it points at.
+   */
   const anchorBoxFor = (id: string): AnchorBox | undefined => {
     if (host === undefined) return undefined;
-    const node = host.querySelector<HTMLElement>(`[data-comment-id="${id}"]`);
-    if (node === null) return undefined;
+    let fallback: HTMLElement | undefined;
+    for (const node of host.querySelectorAll<HTMLElement>(
+      `[data-comment-id="${id}"]`
+    )) {
+      if (node.closest('.popover') !== null) continue;
+      const painted =
+        node.closest<HTMLElement>('[data-cluster-members]') ?? node;
+      fallback ??= painted;
+      const rect = painted.getBoundingClientRect();
+      if (rect.width > 0 || rect.height > 0) {
+        return anchorFromClientRect(rect, host.getBoundingClientRect(), host);
+      }
+    }
+    if (fallback === undefined) return undefined;
     return anchorFromClientRect(
-      node.getBoundingClientRect(),
+      fallback.getBoundingClientRect(),
       host.getBoundingClientRect(),
       host
     );
@@ -5179,6 +5312,8 @@ export function buildThread(
     const layer = popover;
     if (layer === undefined) return;
     clearTimeout(leaveTimer);
+    // The card takes the panel, so a composer that held it is over.
+    dropComposing();
 
     const nodes = threadEntries(lastEntries);
     const node = nodes.find((candidate) => candidate.entry.id === entry.id);
@@ -5350,19 +5485,36 @@ export function buildThread(
       className: 'popover-open-thread',
       kind: 'quiet',
       onSelect: () => {
-        setOpen(true);
-        const row = list.querySelector(`[data-comment-id="${id}"]`);
-        if (row instanceof HTMLElement)
-          row.scrollIntoView({ block: 'nearest' });
         closeCard();
-        setActiveMark(id);
+        const surface = host;
+        const show = (): void => {
+          setOpen(true);
+          const row = list.querySelector(`[data-comment-id="${id}"]`);
+          if (row instanceof HTMLElement)
+            row.scrollIntoView({ block: 'nearest' });
+          setActiveMark(id);
+        };
+        // The thread is in the sidebar, which a fullscreen stage hides, so
+        // asking for it from a card in fullscreen brings the page back.
+        if (surface === undefined) show();
+        else leaveStageFullscreen(surface, show);
       },
     });
 
     const card = popoverCard({ content: rows, actions, commentId: id });
-    // Crossing the gap from a mark into its own card must not close it, and
-    // the pointer leaving both must. Bound on the card rather than tracked
-    // globally, because the card is replaced on every state change.
+    holdOnHover(card);
+    layer.show(card, box);
+    reanchor = () => anchorBoxFor(id);
+    if (sticky) stickyId = id;
+    setActiveMark(id);
+  };
+
+  /**
+   * Crossing the gap from a mark into its own card must not close it, and
+   * the pointer leaving both must. Bound on the card rather than tracked
+   * globally, because the card is replaced on every state change.
+   */
+  const holdOnHover = (card: HTMLElement): void => {
     card.addEventListener('mouseenter', () => {
       clearTimeout(leaveTimer);
     });
@@ -5370,24 +5522,144 @@ export function buildThread(
       if (stickyId !== undefined) return;
       leaveTimer = setTimeout(closeCard, MARK_HOVER_CLOSE_MS);
     });
-    layer.show(card, box);
-    if (sticky) stickyId = id;
-    setActiveMark(id);
   };
 
   /**
-   * Writing a new comment on the words it is about.
+   * Several comments that sit too close on the timeline to tell apart.
+   *
+   * A list that leads to each one's own card, rather than every thread
+   * stacked in one panel, because each card already carries its own reply,
+   * edit and resolve. A stack would need those per thread or lose them, and
+   * a list keeps every comment one press away.
+   */
+  const openClusterCard = (
+    ids: readonly string[],
+    box: AnchorBox,
+    sticky: boolean
+  ): void => {
+    const layer = popover;
+    if (host === undefined || layer === undefined) return;
+    const members = ids
+      .map((id) => entryById(id))
+      .filter((entry): entry is CommentEntry => entry !== undefined);
+    const first = members[0];
+    const firstId = first?.id;
+    if (first === undefined || firstId === null || firstId === undefined) {
+      return;
+    }
+    clearTimeout(leaveTimer);
+    dropComposing();
+
+    const firstAnchor = first.kind === 'open' ? first.anchor : null;
+    const label =
+      firstAnchor?.kind === 'time'
+        ? `${members.length} comments around ${formatTimecode(firstAnchor.t)}`
+        : `${members.length} comments here`;
+    const heading = document.createElement('p');
+    heading.className = 'popover-target';
+    heading.textContent = label;
+
+    const list = document.createElement('ol');
+    list.className = 'popover-members';
+    for (const member of members) {
+      const memberId = member.id;
+      if (memberId === null) continue;
+      const anchor = member.kind === 'open' ? member.anchor : null;
+      // Tenths, because these sit close enough to have clustered, and in
+      // whole seconds most of them read as the same time.
+      const when =
+        anchor?.kind !== 'time'
+          ? ''
+          : anchor.t_end === undefined
+            ? formatTimecodeTenths(anchor.t)
+            : `${formatTimecodeTenths(anchor.t)} to ${formatTimecodeTenths(anchor.t_end)}`;
+      const who =
+        member.kind === 'open' && member.displayName !== null
+          ? member.displayName
+          : (member.author ?? '');
+      const said =
+        member.kind === 'open'
+          ? member.body.replace(/\s+/g, ' ').trim()
+          : 'This comment did not decrypt.';
+
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'popover-member';
+      pick.dataset['memberId'] = memberId;
+      const time = document.createElement('span');
+      time.className = 'popover-member-time';
+      time.textContent = when;
+      const author = document.createElement('span');
+      author.className = 'popover-member-author';
+      author.textContent = plainLabel(who);
+      const body = document.createElement('span');
+      body.className = 'popover-member-body';
+      body.textContent = plainLabel(said);
+      pick.append(time, author, body);
+      pick.addEventListener('click', (event) => {
+        event.preventDefault();
+        // The cluster's own press went to its first member's moment. This
+        // one is a choice of member, so it goes to that member's.
+        const surface = host === undefined ? undefined : anchorSurfaceFor(host);
+        if (surface !== undefined && anchor !== null) {
+          adapterFor(anchor, surface)?.reveal?.(surface, anchor);
+        }
+        openCard(member, anchorBoxFor(memberId) ?? box, true);
+      });
+      const item = document.createElement('li');
+      item.appendChild(pick);
+      list.appendChild(item);
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.append(heading, list);
+    const card = popoverCard({ content: wrapper, actions: [] });
+    card.setAttribute('aria-label', label);
+    holdOnHover(card);
+    layer.show(card, box);
+    reanchor = () => anchorBoxFor(firstId);
+    if (sticky) stickyId = firstId;
+    setActiveMark(firstId);
+  };
+
+  /**
+   * Writing a new comment on the thing it is about.
    *
    * The sidebar composer stays: it is where a remark about the whole
    * document is written and where an address is verified. This one exists
-   * because a reader who has just selected a sentence is looking at the
-   * sentence, and asking them to cross the page to say something about it
-   * is how a mark ends up on the wrong line.
+   * because a reader who has just selected a sentence, or pressed a moment
+   * on the timeline, is looking at it, and asking them to cross the page to
+   * say something about it is how a mark ends up on the wrong line.
+   *
+   * A time composer that is already open is re-aimed rather than rebuilt:
+   * dragging the end of the span, or drawing a new one, moves the target and
+   * the panel and never touches the sentence being typed.
    */
-  const openComposer = (anchor: CommentAnchor, box: AnchorBox): void => {
+  const openComposer = (
+    anchor: CommentAnchor,
+    box: AnchorBox,
+    options: ComposeOptions = {}
+  ): void => {
     const layer = popover;
     const opener = cipher;
     if (layer === undefined || opener === undefined) return;
+    const focus = options.focus ?? true;
+
+    const held = composing;
+    if (
+      held !== undefined &&
+      layer.current() === held.panel &&
+      held.anchor.kind === 'time' &&
+      anchor.kind === 'time'
+    ) {
+      held.anchor = anchor;
+      held.target.textContent = markTargetLabel(anchor);
+      layer.show(held.panel, box);
+      reanchor = options.reanchor;
+      if (focus) held.field.focus();
+      return;
+    }
+
     closeCard();
 
     const target = document.createElement('p');
@@ -5405,13 +5677,16 @@ export function buildThread(
       },
       onSubmit: (body) => {
         composer.setBusy(true);
+        // Read at the press rather than captured at the open, because the
+        // target of a time composer can have moved since.
+        const aimed = state.anchor;
         void (async () => {
           const result = await postComment(
             relicId,
             {
               body,
               display_name: readDisplayName() || null,
-              anchor,
+              anchor: aimed,
             },
             deps,
             opener,
@@ -5424,8 +5699,10 @@ export function buildThread(
           }
           // The chip goes back to the whole document, because the target it
           // was holding has been spent. Leaving it aimed would put the next
-          // comment on the last thing selected.
-          marks.clear();
+          // comment on the last thing selected. A moment or a span never
+          // went through the chip, and clearing it would also put focus in
+          // the sidebar, which a fullscreen stage cannot even show.
+          if (aimed.kind !== 'time') marks.clear();
           window.getSelection()?.removeAllRanges();
           closeCard();
           await refresh();
@@ -5433,11 +5710,14 @@ export function buildThread(
       },
     });
     panel.appendChild(composer.element);
+    const state = { anchor, panel, target, field: composer.field };
     layer.show(panel, box);
+    composing = state;
+    reanchor = options.reanchor;
     // Held open against hover, because a composer that vanished when the
     // pointer wandered would take the sentence being typed with it.
     stickyId = COMPOSING;
-    composer.field.focus();
+    if (focus) composer.field.focus();
   };
 
   /** Opens the card for a mark the reader is pointing at, by id. */
@@ -5446,6 +5726,9 @@ export function buildThread(
     box: AnchorBox | undefined,
     sticky: boolean
   ): void => {
+    // A press on a mark is not a reason to throw away what somebody is
+    // typing in the open panel, and nothing here could give it back.
+    if (holdsUnsavedText()) return;
     const entry = entryById(id);
     if (entry === undefined) return;
     const at = box ?? anchorBoxFor(id);
@@ -5453,16 +5736,39 @@ export function buildThread(
     openCard(entry, at, sticky);
   };
 
+  /**
+   * The card for whatever mark the pointer or the focus landed on: one
+   * comment's, or the list for a cluster of them on the timeline.
+   */
+  const cardForMark = (mark: HTMLElement, sticky: boolean): void => {
+    const members = (mark.dataset['clusterMembers'] ?? '')
+      .split(' ')
+      .filter((member) => member.length > 0);
+    const first = members[0];
+    if (members.length > 1 && first !== undefined) {
+      if (holdsUnsavedText()) return;
+      const at = anchorBoxFor(first);
+      if (at !== undefined) openClusterCard(members, at, sticky);
+      return;
+    }
+    const id = mark.dataset['commentId'];
+    if (id !== undefined) cardForId(id, undefined, sticky);
+  };
+
   const bindMarkPointing = (root: HTMLElement): void => {
     root.addEventListener('mouseover', (event: Event) => {
       if (!(event.target instanceof Element)) return;
       const mark = event.target.closest<HTMLElement>('[data-comment-id]');
-      const id = mark?.dataset.commentId;
-      if (id === undefined || stickyId !== undefined) return;
+      if (mark === null || stickyId !== undefined) return;
       clearTimeout(leaveTimer);
       clearTimeout(hoverTimer);
       hoverTimer = setTimeout(() => {
-        cardForId(id, undefined, false);
+        // Asked again when the delay runs out, not only when it starts. A
+        // drag across the timeline passes over markers on its way to the
+        // release that opens a composer, and a hover that began before the
+        // composer must not replace it after.
+        if (stickyId !== undefined) return;
+        cardForMark(mark, false);
       }, MARK_HOVER_OPEN_MS);
     });
     root.addEventListener('mouseout', (event: Event) => {
@@ -5476,11 +5782,14 @@ export function buildThread(
     // A keyboard reader gets the card the same way a pointer does.
     root.addEventListener('focusin', (event: Event) => {
       if (!(event.target instanceof Element)) return;
-      const id =
-        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
-          .commentId;
-      if (id === undefined) return;
-      cardForId(id, undefined, true);
+      // Focus moving inside an open card is the reader using it: the field
+      // a Reply just put up, or the next button along. The card carries its
+      // comment's id, so without this the focus rebuilt the card around it
+      // and threw away the reply before a word of it was typed.
+      if (event.target.closest('.popover') !== null) return;
+      const mark = event.target.closest<HTMLElement>('[data-comment-id]');
+      if (mark === null) return;
+      cardForMark(mark, true);
     });
     root.addEventListener('click', (event: Event) => {
       if (!(event.target instanceof Element)) return;
@@ -5494,16 +5803,14 @@ export function buildThread(
       // press had just opened.
       if (event.target.closest('.popover') !== null) return;
       if (popover?.contains(event.target) === true) return;
-      const id =
-        event.target.closest<HTMLElement>('[data-comment-id]')?.dataset
-          .commentId;
+      const mark = event.target.closest<HTMLElement>('[data-comment-id]');
       // Closing is not handled here. A press lands on the sidebar, the
       // taskbar or the page around them as often as on the stage, and only
       // one of those reaches this listener, so the rule lives at the
       // document, where every press does.
-      if (id === undefined) return;
+      if (mark === null) return;
       event.preventDefault();
-      cardForId(id, undefined, true);
+      cardForMark(mark, true);
     });
     root.addEventListener('relic:frame-mark-hover', ((
       event: CustomEvent<FrameMarkHoverMessage>
@@ -5525,6 +5832,7 @@ export function buildThread(
           ? frameAnchorBox(frame, msg.rect, host)
           : undefined;
       hoverTimer = setTimeout(() => {
+        if (stickyId !== undefined) return;
         cardForId(id, box, false);
       }, MARK_HOVER_OPEN_MS);
     }) as EventListener);
@@ -5548,6 +5856,19 @@ export function buildThread(
   // a reader who has learned one has learned the other.
   document.addEventListener('keydown', (event: KeyboardEvent) => {
     if (event.key === 'Escape' && popover?.current() !== undefined) closeCard();
+  });
+
+  // A stage going into fullscreen or coming out of it moves whatever the
+  // open panel points at, and changes where a panel can be seen at all. The
+  // panel follows instead of closing, because it can be holding a sentence;
+  // `show` on the open panel moves it, into the stage or back out of it,
+  // with its text and its focus.
+  document.addEventListener('fullscreenchange', () => {
+    const layer = popover;
+    const open = layer?.current();
+    if (layer === undefined || open === undefined) return;
+    const at = reanchor?.();
+    if (at !== undefined) layer.show(open, at);
   });
 
   /** Text a reader typed and has not posted, anywhere in the open panel. */
@@ -5983,6 +6304,16 @@ export function buildThread(
         });
         next.addEventListener('relic:frame-ready', () => {
           paintMarks(lastEntries);
+        });
+        // A bare press on the scrubber seeks, and the player drops its
+        // pending selection when it does. While a composer is still aimed at
+        // a moment, that moment stays painted, so the scrubber and the
+        // panel never disagree about what the comment is about.
+        next.addEventListener('relic:time-selection-cleared', () => {
+          const held = composing;
+          if (held === undefined || held.anchor.kind !== 'time') return;
+          if (popover?.current() !== held.panel) return;
+          tellPlayer(next, 'relic:time-selection', held.anchor);
         });
       }
       paintMarks(lastEntries);

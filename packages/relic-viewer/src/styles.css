@@ -367,6 +367,68 @@ body {
   font-size: 0.72rem;
 }
 
+/* The comments that share one cluster on the timeline. Each row opens that
+   comment's own card, so a row is a button that reads as the sidebar's
+   comment head shrunk to one line plus the start of what was said. */
+.popover-members {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.popover-members li + li {
+  border-top: 1px solid var(--rule);
+}
+
+.popover-member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 0.6rem;
+  row-gap: 0.15rem;
+  width: 100%;
+  padding: 0.45rem 0.3rem;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.popover-member:hover {
+  background: color-mix(in srgb, var(--patina) 12%, transparent);
+}
+
+.popover-member:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: -2px;
+}
+
+.popover-member-time {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--patina);
+}
+
+.popover-member-author {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.popover-member-body {
+  grid-column: 1 / -1;
+  display: -webkit-box;
+  overflow: hidden;
+  font-family: var(--serif);
+  font-size: 0.86rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 /* ---------- the accession band ---------- */
 
 .bar {
@@ -1146,6 +1208,14 @@ body {
   font-size: 0.68rem;
   color: var(--ink);
   white-space: nowrap;
+}
+
+/* A panel open over the scrubber already names the time it is about, and it
+   sits exactly where this readout does: the readout's lower edge would show
+   under the panel as a stray notch. The rule and the comment button stay, so
+   a reader can still aim somewhere else. */
+.stage-wrap:has(.popover) .hover-timecode {
+  visibility: hidden;
 }
 
 .timeline-hover-comment-btn {
@@ -3255,58 +3325,6 @@ canvas.relic-page {
   z-index: 5;
 }
 
-.timeline-marker-tooltip {
-  position: absolute;
-  bottom: 100%;
-  margin-bottom: 8px;
-  transform: translateX(-50%);
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  padding: 0.35rem 0.5rem;
-  font-family: var(--sans);
-  font-size: 0.74rem;
-  color: var(--ink);
-  white-space: nowrap;
-  pointer-events: none;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.marker-tooltip-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.marker-tooltip-author {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--patina);
-}
-
-.marker-tooltip-time {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--ink-soft);
-}
-
-.marker-tooltip-snippet {
-  font-family: var(--sans);
-  font-size: 0.72rem;
-  color: var(--ink);
-  max-width: 18rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.marker-tooltip-item {
-  font-family: var(--sans);
-  font-size: 0.7rem;
-  color: var(--ink);
-}
 .time-frame-box {
   position: absolute;
   border: 2px solid var(--patina);

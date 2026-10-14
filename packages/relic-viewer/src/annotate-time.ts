@@ -210,7 +210,6 @@ interface TrackMarkerState {
 }
 
 const trackStates = new WeakMap<HTMLElement, TrackMarkerState>();
-let activeMarkerTooltip: HTMLElement | null = null;
 
 /**
  * Finds or creates the timeline marker track inside the player or overlay.
@@ -291,8 +290,6 @@ export function paintTimeMark(
   if (state === undefined || state.lastOverlay !== overlay) {
     state = { lastOverlay: overlay, entries: [] };
     trackStates.set(track, state);
-    activeMarkerTooltip?.remove();
-    activeMarkerTooltip = null;
     track.replaceChildren();
   }
 
@@ -338,68 +335,16 @@ export function paintTimeMark(
         markerBtn.title = formatTimecode(member.t);
       }
 
+      // Seeking is this marker's own business. Opening the comment is the
+      // page's, so the press is left to bubble to the stage, where the same
+      // card every other kind of mark opens takes it. Hovering and focusing
+      // reach the stage the same way, and need nothing here at all.
       markerBtn.addEventListener('click', (event) => {
         event.preventDefault();
-        event.stopPropagation();
         const originalAnchor = state?.entries.find(
           (e) => e.commentId === member.commentId
         )?.anchor ?? { kind: 'time', t: member.t };
         revealTimeMark(surface, originalAnchor);
-        const doc =
-          surface.host.ownerDocument ??
-          (typeof document !== 'undefined' ? document : null);
-        const row = doc?.querySelector(
-          `.thread [data-comment-id="${member.commentId}"]`
-        ) as HTMLElement | null;
-        row?.scrollIntoView?.({ block: 'nearest' });
-      });
-
-      markerBtn.addEventListener('mouseenter', () => {
-        activeMarkerTooltip?.remove();
-        activeMarkerTooltip = null;
-        const doc =
-          surface.host.ownerDocument ??
-          (typeof document !== 'undefined' ? document : null);
-        const row = doc?.querySelector(
-          `.thread [data-comment-id="${member.commentId}"]`
-        );
-        const author =
-          row?.querySelector('.comment-author')?.textContent ?? 'Comment';
-        const body = row?.querySelector('.comment-body')?.textContent ?? '';
-        const timecode = isSpan
-          ? `${formatTimecode(member.t)} – ${formatTimecode(member.t_end ?? member.t)}`
-          : formatTimecode(member.t);
-
-        const tip = document.createElement('div');
-        tip.className = 'timeline-marker-tooltip';
-
-        const header = document.createElement('div');
-        header.className = 'marker-tooltip-header';
-        const authorEl = document.createElement('span');
-        authorEl.className = 'marker-tooltip-author';
-        authorEl.textContent = author;
-        const timeEl = document.createElement('span');
-        timeEl.className = 'marker-tooltip-time';
-        timeEl.textContent = timecode;
-        header.append(authorEl, timeEl);
-        tip.appendChild(header);
-
-        if (body.length > 0) {
-          const snippet = document.createElement('div');
-          snippet.className = 'marker-tooltip-snippet';
-          snippet.textContent =
-            body.length > 70 ? `${body.slice(0, 67)}…` : body;
-          tip.appendChild(snippet);
-        }
-
-        tip.style.left = `${member.start * 100}%`;
-        track.appendChild(tip);
-        activeMarkerTooltip = tip;
-      });
-
-      markerBtn.addEventListener('mouseleave', () => {
-        activeMarkerTooltip?.remove();
-        activeMarkerTooltip = null;
       });
 
       track.appendChild(markerBtn);
@@ -412,6 +357,12 @@ export function paintTimeMark(
       clusterBtn.className = 'time-marker time-marker-cluster';
       clusterBtn.dataset.commentId = firstMember.commentId;
       clusterBtn.dataset.clusterCount = String(cluster.members.length);
+      // Every member, in timeline order, for the card that lists them. The
+      // hidden children below carry the same ids for pairing, which lights
+      // the cluster when any one of its rows is hovered in the sidebar.
+      clusterBtn.dataset.clusterMembers = cluster.members
+        .map((m) => m.commentId)
+        .join(' ');
       clusterBtn.style.left = `${Number((cluster.start * 100).toFixed(4))}%`;
       if (cluster.width > 0) {
         clusterBtn.style.width = `${Number((cluster.width * 100).toFixed(4))}%`;
@@ -432,62 +383,10 @@ export function paintTimeMark(
 
       clusterBtn.addEventListener('click', (event) => {
         event.preventDefault();
-        event.stopPropagation();
         const originalAnchor = state?.entries.find(
           (e) => e.commentId === firstMember.commentId
         )?.anchor ?? { kind: 'time', t: firstMember.t };
         revealTimeMark(surface, originalAnchor);
-        const doc =
-          surface.host.ownerDocument ??
-          (typeof document !== 'undefined' ? document : null);
-        const row = doc?.querySelector(
-          `.thread [data-comment-id="${firstMember.commentId}"]`
-        ) as HTMLElement | null;
-        row?.scrollIntoView?.({ block: 'nearest' });
-      });
-
-      clusterBtn.addEventListener('mouseenter', () => {
-        activeMarkerTooltip?.remove();
-        activeMarkerTooltip = null;
-        const doc =
-          surface.host.ownerDocument ??
-          (typeof document !== 'undefined' ? document : null);
-
-        const tip = document.createElement('div');
-        tip.className = 'timeline-marker-tooltip';
-
-        const header = document.createElement('div');
-        header.className = 'marker-tooltip-header';
-        const countEl = document.createElement('span');
-        countEl.className = 'marker-tooltip-author';
-        countEl.textContent = `${cluster.members.length} comments`;
-        const timeEl = document.createElement('span');
-        timeEl.className = 'marker-tooltip-time';
-        timeEl.textContent = formatTimecode(firstMember.t);
-        header.append(countEl, timeEl);
-        tip.appendChild(header);
-
-        for (const m of cluster.members.slice(0, 3)) {
-          const row = doc?.querySelector(
-            `.thread [data-comment-id="${m.commentId}"]`
-          );
-          const author =
-            row?.querySelector('.comment-author')?.textContent ?? 'Comment';
-          const body = row?.querySelector('.comment-body')?.textContent ?? '';
-          const item = document.createElement('div');
-          item.className = 'marker-tooltip-snippet';
-          item.textContent = `${author}: ${body.length > 40 ? `${body.slice(0, 37)}…` : body}`;
-          tip.appendChild(item);
-        }
-
-        tip.style.left = `${cluster.start * 100}%`;
-        track.appendChild(tip);
-        activeMarkerTooltip = tip;
-      });
-
-      clusterBtn.addEventListener('mouseleave', () => {
-        activeMarkerTooltip?.remove();
-        activeMarkerTooltip = null;
       });
 
       track.appendChild(clusterBtn);
