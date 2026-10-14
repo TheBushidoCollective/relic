@@ -31,6 +31,7 @@ export interface RunningChrome {
   readonly cdp: CdpConnection;
   readonly product: string;
   close(): Promise<void>;
+  kill?: () => void;
 }
 
 export function defaultDiscoverySystem(): DiscoverySystem {
@@ -541,9 +542,20 @@ export async function launchChrome(
     return closePromise;
   }
 
+  function kill(): void {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Best effort
+    }
+    cdp.dispose();
+    fs.rm(profileDir, { recursive: true, force: true }).catch(() => {});
+  }
+
   return {
     cdp,
     product,
     close,
+    kill,
   };
 }
