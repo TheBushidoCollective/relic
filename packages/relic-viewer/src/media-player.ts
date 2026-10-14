@@ -32,6 +32,13 @@ import {
   timeToFraction,
 } from './media-timeline.ts';
 
+interface WebKitFullscreenVideoElement extends HTMLMediaElement {
+  readonly webkitSupportsFullscreen?: boolean;
+  readonly webkitDisplayingFullscreen?: boolean;
+  webkitEnterFullscreen?: () => void;
+  webkitExitFullscreen?: () => void;
+}
+
 const ICONS = {
   play: 'M4 3l9 5-9 5V3z',
   pause: 'M4 3h3v10H4V3zm5 0h3v10H9V3z',
@@ -317,6 +324,29 @@ export function createMediaPlayer(
   let pointerOverChrome = false;
   let cancelIdle: (() => void) | undefined;
 
+  const videoMedia = media as WebKitFullscreenVideoElement;
+
+  const canStageFullscreen = (): boolean =>
+    typeof stage.requestFullscreen === 'function';
+
+  const canNativeFullscreen = (): boolean =>
+    typeof videoMedia.webkitEnterFullscreen === 'function' &&
+    videoMedia.webkitSupportsFullscreen === true;
+
+  const hasFullscreenSupport = (): boolean =>
+    canStageFullscreen() || canNativeFullscreen();
+
+  const updateFullscreenSupport = (): void => {
+    if (!fullscreenBtn) return;
+    const supported = hasFullscreenSupport();
+    fullscreenBtn.hidden = !supported;
+    if (supported) {
+      fullscreenBtn.removeAttribute('hidden');
+    } else {
+      fullscreenBtn.setAttribute('hidden', '');
+    }
+  };
+
   const getDuration = (): number => {
     const d = media.duration;
     return Number.isFinite(d) && d > 0 ? d : 0;
@@ -324,11 +354,26 @@ export function createMediaPlayer(
 
   const isStageFullscreen = (): boolean => doc.fullscreenElement === stage;
 
+  const isNativeFullscreen = (): boolean =>
+    videoMedia.webkitDisplayingFullscreen === true;
+
+  const isFullscreen = (): boolean =>
+    isStageFullscreen() || isNativeFullscreen();
+
   const leaveFullscreen = (): Promise<void> => {
+    if (isNativeFullscreen()) {
+      if (typeof videoMedia.webkitExitFullscreen === 'function') {
+        try {
+          videoMedia.webkitExitFullscreen();
+        } catch {}
+      }
+      return Promise.resolve();
+    }
     if (typeof doc.exitFullscreen !== 'function') return Promise.resolve();
     return Promise.resolve(doc.exitFullscreen()).then(() => undefined);
   };
 
+  updateFullscreenSupport();
   /**
    * Sends an aim to the composer. `afterAim` runs once the aim has gone out,
    * so whatever a caller does next (focusing the span handle) still lands
@@ -362,7 +407,7 @@ export function createMediaPlayer(
     // outside the fullscreen element and so invisible from inside it. Leave
     // fullscreen first and open the composer on the page that comes back. A
     // drag aim only paints the selection on the scrubber, so it stays put.
-    if (focus && isStageFullscreen()) {
+    if (focus && isFullscreen()) {
       leaveFullscreen().then(send, send);
       return;
     }
@@ -464,14 +509,18 @@ export function createMediaPlayer(
   // Fullscreen and the idle frame
   // --------------------------------------------------------------------------
   const toggleFullscreen = (): void => {
-    if (isStageFullscreen()) {
+    if (isFullscreen()) {
       leaveFullscreen().catch(() => {});
       return;
     }
-    if (typeof stage.requestFullscreen === 'function') {
+    if (canStageFullscreen()) {
       Promise.resolve(stage.requestFullscreen({ navigationUI: 'hide' })).catch(
         () => {}
       );
+    } else if (canNativeFullscreen()) {
+      try {
+        videoMedia.webkitEnterFullscreen?.();
+      } catch {}
     }
   };
 
@@ -523,8 +572,13 @@ export function createMediaPlayer(
     cancelIdle = () => clearTimeout(timer);
   };
 
-  const onFullscreenChange = (): void => {
-    const isFs = isStageFullscreen();
+  const onFullscreenChange = (event?: Event): void => {
+    const isFs =
+      event?.type === 'webkitbeginfullscreen'
+        ? true
+        : event?.type === 'webkitendfullscreen'
+          ? false
+          : isFullscreen();
     fullscreenBtn?.replaceChildren(
       createSvgIcon(isFs ? ICONS.fullscreenExit : ICONS.fullscreen)
     );
@@ -569,14 +623,19 @@ export function createMediaPlayer(
   media.addEventListener('pause', updatePlayState);
   media.addEventListener('timeupdate', updateTimeDisplay);
   media.addEventListener('durationchange', () => {
+    updateFullscreenSupport();
     updateTimeDisplay();
     updateBufferedDisplay();
     updatePendingVisuals();
   });
   media.addEventListener('loadedmetadata', () => {
+    updateFullscreenSupport();
     updateTimeDisplay();
     updateBufferedDisplay();
     updatePendingVisuals();
+  });
+  media.addEventListener('canplay', () => {
+    updateFullscreenSupport();
   });
   media.addEventListener('progress', updateBufferedDisplay);
   media.addEventListener('volumechange', updateMuteState);
@@ -587,6 +646,8 @@ export function createMediaPlayer(
   if (fullscreenBtn) {
     fullscreenBtn.addEventListener('click', toggleFullscreen);
     doc.addEventListener('fullscreenchange', onFullscreenChange);
+    media.addEventListener('webkitbeginfullscreen', onFullscreenChange);
+    media.addEventListener('webkitendfullscreen', onFullscreenChange);
     stage.addEventListener('pointermove', wake);
     stage.addEventListener('pointerdown', wake);
     stage.addEventListener('pointerup', wake);
@@ -943,7 +1004,7 @@ export function createMediaPlayer(
       }
       case 'f':
       case 'F': {
-        if (!isAudio) {
+        if (!isAudio && hasFullscreenSupport()) {
           event.preventDefault();
           toggleFullscreen();
         }
@@ -1007,6 +1068,8 @@ export function createMediaPlayer(
         media.removeEventListener('play', wake);
         media.removeEventListener('pause', wake);
         media.removeEventListener('timeupdate', updateTimeDisplay);
+        media.removeEventListener('webkitbeginfullscreen', onFullscreenChange);
+        media.removeEventListener('webkitendfullscreen', onFullscreenChange);
         media.removeEventListener('progress', updateBufferedDisplay);
         media.removeEventListener('volumechange', updateMuteState);
       }

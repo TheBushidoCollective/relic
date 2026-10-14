@@ -234,6 +234,10 @@ class MediaTestNode extends TestNode {
   muted = false;
   volume = 1;
   controls = false;
+  webkitSupportsFullscreen?: boolean;
+  webkitDisplayingFullscreen?: boolean;
+  webkitEnterFullscreen?: () => void;
+  webkitExitFullscreen?: () => void;
   buffered = {
     length: 1,
     start: (_i: number) => 0,
@@ -1197,5 +1201,150 @@ describe('custom media player and comment timeline', () => {
       { focus: false, inFullscreen: true },
       { focus: true, inFullscreen: false },
     ]);
+  });
+
+  test('stage path chosen when requestFullscreen exists', () => {
+    const video = new MediaTestNode('video');
+    const webkitEnter = vi.fn();
+    video.webkitEnterFullscreen = webkitEnter;
+    video.webkitSupportsFullscreen = true;
+
+    const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+      isAudio: false,
+      filename: 'clip.mp4',
+    });
+    const chrome = player.chrome as unknown as TestNode;
+    const stage = player.stage as unknown as TestNode;
+    const fsBtn = requireNode(
+      chrome.querySelector('.media-fullscreen-btn'),
+      'fsBtn'
+    );
+    expect(fsBtn.hidden).toBe(false);
+
+    fsBtn.click();
+    expect(fullscreenDocument().fullscreenElement).toBe(stage);
+    expect(webkitEnter).not.toHaveBeenCalled();
+  });
+
+  test('native path calls webkitEnterFullscreen when only it exists', () => {
+    const video = new MediaTestNode('video');
+    const webkitEnter = vi.fn();
+    video.webkitEnterFullscreen = webkitEnter;
+    video.webkitSupportsFullscreen = true;
+
+    const proto = TestNode.prototype as {
+      requestFullscreen?: () => Promise<void>;
+    };
+    const origRequestFs = proto.requestFullscreen;
+    delete proto.requestFullscreen;
+    try {
+      const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+        isAudio: false,
+        filename: 'clip.mp4',
+      });
+      const chrome = player.chrome as unknown as TestNode;
+      const fsBtn = requireNode(
+        chrome.querySelector('.media-fullscreen-btn'),
+        'fsBtn'
+      );
+      expect(fsBtn.hidden).toBe(false);
+
+      fsBtn.click();
+      expect(webkitEnter).toHaveBeenCalledTimes(1);
+      expect(fullscreenDocument().fullscreenElement).toBeNull();
+    } finally {
+      if (origRequestFs !== undefined) {
+        proto.requestFullscreen = origRequestFs;
+      } else {
+        delete proto.requestFullscreen;
+      }
+    }
+  });
+
+  test('button hidden when neither stage nor native fullscreen is supported', () => {
+    const video = new MediaTestNode('video');
+    const proto = TestNode.prototype as {
+      requestFullscreen?: () => Promise<void>;
+    };
+    const origRequestFs = proto.requestFullscreen;
+    delete proto.requestFullscreen;
+    try {
+      const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+        isAudio: false,
+        filename: 'clip.mp4',
+      });
+      const chrome = player.chrome as unknown as TestNode;
+      const fsBtn = requireNode(
+        chrome.querySelector('.media-fullscreen-btn'),
+        'fsBtn'
+      );
+      expect(fsBtn.hidden).toBe(true);
+      expect(fsBtn.attributes.has('hidden')).toBe(true);
+    } finally {
+      if (origRequestFs !== undefined) {
+        proto.requestFullscreen = origRequestFs;
+      } else {
+        delete proto.requestFullscreen;
+      }
+    }
+  });
+
+  test('fullscreen button state and idle logic follow native fullscreen events', () => {
+    vi.useFakeTimers();
+    const proto = TestNode.prototype as {
+      requestFullscreen?: () => Promise<void>;
+    };
+    const origRequestFs = proto.requestFullscreen;
+    delete proto.requestFullscreen;
+    try {
+      const video = new MediaTestNode('video');
+      const webkitExit = vi.fn();
+      video.webkitEnterFullscreen = vi.fn();
+      video.webkitExitFullscreen = webkitExit;
+      video.webkitSupportsFullscreen = true;
+
+      const player = createMediaPlayer(video as unknown as HTMLMediaElement, {
+        isAudio: false,
+        filename: 'clip.mp4',
+      });
+      const chrome = player.chrome as unknown as TestNode;
+      const stage = player.stage as unknown as TestNode;
+      const fsBtn = requireNode(
+        chrome.querySelector('.media-fullscreen-btn'),
+        'fsBtn'
+      );
+
+      expect(fsBtn.getAttribute('aria-label')).toBe('Fullscreen');
+
+      // Native fullscreen begins
+      video.webkitDisplayingFullscreen = true;
+      video.dispatchEvent({ type: 'webkitbeginfullscreen' });
+
+      expect(fsBtn.getAttribute('aria-label')).toBe('Exit fullscreen');
+      expect(stage.classes()).not.toContain('is-idle');
+
+      // Advancing timer does not put stage into idle in native fullscreen
+      void video.play();
+      vi.advanceTimersByTime(FULLSCREEN_IDLE_MS * 4);
+      expect(stage.classes()).not.toContain('is-idle');
+
+      // Tapping button while in native fullscreen exits native fullscreen
+      fsBtn.click();
+      expect(webkitExit).toHaveBeenCalledTimes(1);
+
+      // Native fullscreen ends
+      video.webkitDisplayingFullscreen = false;
+      video.dispatchEvent({ type: 'webkitendfullscreen' });
+
+      expect(fsBtn.getAttribute('aria-label')).toBe('Fullscreen');
+      expect(stage.classes()).not.toContain('is-idle');
+    } finally {
+      vi.useRealTimers();
+      if (origRequestFs !== undefined) {
+        proto.requestFullscreen = origRequestFs;
+      } else {
+        delete proto.requestFullscreen;
+      }
+    }
   });
 });
