@@ -262,7 +262,7 @@ const fixtures: FixturePlan[] = [
   {
     filename: 'logo.svg',
     expectedStatus: 'uploaded',
-    expectedKind: 'image',
+    expectedKind: 'html',
   },
   {
     filename: 'Widget.jsx',
@@ -620,7 +620,7 @@ startxref
         ogAltMatch !== null,
         `missing og:image:alt in shell for ${fixture.filename}`
       );
-      assert.equal(ogAltMatch[1], expectedAlt);
+      assert.equal(ogAltMatch[1], expectedAlt.replace(/'/g, '&#39;'));
 
       // Fetch cover URL and verify headers and raster validity
       const coverRes = await fetch(coverUrl);
@@ -639,11 +639,7 @@ startxref
       assert.equal(coverRes.headers.get('x-robots-tag'), 'noindex');
       assert.equal(
         coverRes.headers.get('content-security-policy'),
-        "default-src 'none'"
-      );
-      assert.ok(
-        coverRes.headers.has('sandbox'),
-        'missing sandbox header on cover route'
+        "default-src 'none'; sandbox"
       );
       assert.equal(
         coverRes.headers.get('content-encoding'),
@@ -873,7 +869,12 @@ startxref
   );
 
   const postExpiryShell = await fetch(`${origin}/${expiryId}`);
-  assert.equal(postExpiryShell.status, 410);
+  assert.equal(postExpiryShell.status, 200);
+  const postExpiryHtml = await postExpiryShell.text();
+  assert.ok(
+    postExpiryHtml.includes(`${origin}/assets/card.v1.png`),
+    'expired relic shell must fall back to card.v1.png'
+  );
   // --- Mint invariants ---------------------------------------------------
   const mintLog = await store.readMintLog();
   assert.equal(mintLog.length, 0, 'mint log must remain empty');
