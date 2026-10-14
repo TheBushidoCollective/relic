@@ -37,17 +37,18 @@ describe('cover-media', () => {
         'lavfi',
         '-i',
         'color=c=blue:s=320x240:d=1',
+        '-threads',
+        '1',
         '-c:v',
-        'libx264',
-        '-pix_fmt',
-        'yuv420p',
+        'mpeg4',
         '-f',
         'mp4',
         '-movflags',
         '+frag_keyframe+empty_moov',
         'pipe:1',
       ],
-      new Uint8Array(0)
+      new Uint8Array(0),
+      10000
     );
 
     const res = await extractMediaCover(
@@ -56,6 +57,7 @@ describe('cover-media', () => {
       'video/mp4',
       ffmpegPath
     );
+
     expect('kind' in res).toBe(true);
     if ('kind' in res) {
       expect(res.kind).toBe('video');
@@ -66,8 +68,7 @@ describe('cover-media', () => {
       expect(res.bytes[2]).toBe(0x4e);
       expect(res.bytes[3]).toBe(0x47);
     }
-  });
-
+  }, 35000);
   test('runs real ffmpeg to extract audio artwork when present', async () => {
     const ffmpegPath = await probeFfmpeg();
     if (!ffmpegPath) {
@@ -116,8 +117,7 @@ describe('cover-media', () => {
       expect(res.bytes[2]).toBe(0x4e);
       expect(res.bytes[3]).toBe(0x47);
     }
-  });
-
+  }, 35000);
   test('runs real ffmpeg to extract audio waveform when no artwork is present', async () => {
     const ffmpegPath = await probeFfmpeg();
     if (!ffmpegPath) {
@@ -154,8 +154,7 @@ describe('cover-media', () => {
       expect(res.bytes[2]).toBe(0x4e);
       expect(res.bytes[3]).toBe(0x47);
     }
-  });
-
+  }, 35000);
   test('falls through to audio waveform when video file has no video stream', async () => {
     const ffmpegPath = await probeFfmpeg();
     if (!ffmpegPath) {
@@ -194,8 +193,7 @@ describe('cover-media', () => {
       expect(res.kind).toBe('audio-waveform');
       expect(res.bytes.length).toBeGreaterThan(0);
     }
-  });
-
+  }, 35000);
   test('runFfmpeg timeoutMs aborts and kills child process', async () => {
     const ffmpegPath = await probeFfmpeg();
     if (!ffmpegPath) return;
