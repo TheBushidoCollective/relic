@@ -309,14 +309,22 @@ export function createApp(options: AppOptions = {}): RelicApp {
    * `blob:` remains in `script-src` for one reason: the JSX mount imports a
    * module built from posted code, and that import is local.
    *
-   * Measured against a collector server under this exact policy: `fetch`,
+   * Measured against a collector server under this policy: `fetch`,
    * `<img>`, `sendBeacon`, `WebSocket`, and `EventSource` produced zero
    * arrivals. `sendBeacon` returned `true` while delivering nothing, so its
    * return value is not evidence of delivery. A form with `target=_blank`
    * submitted and never arrived. `window.open` was blocked in the probe,
    * but no user gesture preceded it, so CSP is not what stopped it; popups
-   * are closed by the sandbox attribute in the viewer, which is where that
-   * guarantee has to live.
+   * are closed by the sandbox attribute in the viewer.
+   *
+   * WebRTC egress: Chrome ignores CSP `webrtc 'block'`. Runtime containment
+   * in the sandboxed frame neutralizes `RTCPeerConnection` constructors across
+   * the global prototype chain and blocks nested frame creation so author code
+   * cannot reach an unpatched realm. This is a tested deny-list in the frame's
+   * JavaScript realm rather than an architectural impossibility, serving as
+   * defense in depth alongside the opaque sandbox. Future browser APIs or parser
+   * entry points could reopen egress channels before we patch them. Legitimate
+   * relics cannot use nested frames or workers.
    */
   async function serveSandbox(request: Request): Promise<Response> {
     const asset = await assets.get('sandbox.html');
@@ -3038,9 +3046,14 @@ Anyone claiming otherwise about a service of this shape is overclaiming.
 
 A relic that renders as HTML or JSX runs its author's code in your browser.
 The frame that hosts it is served a policy that permits no remote source, so
-that code cannot make an outbound request: it cannot reach the network, and
-it cannot contact its author. A page that expects external images, fonts, or
-scripts renders without them, because nothing is fetched.
+that code cannot make outbound HTTP, WebSocket, or worker requests: it cannot
+fetch external resources, and a page that expects external images, fonts, or
+scripts renders without them. Because Chrome does not enforce Content-Security-Policy
+over WebRTC ICE candidate gathering, the viewer frame installs a runtime deny-list
+that neutralizes WebRTC constructors across the prototype chain and blocks nested
+frame creation to prevent UDP STUN egress. This containment is tested defense in
+depth rather than an architectural impossibility: future platform APIs could reopen
+channels, and nested frames or workers in HTML and JSX relics are denied.
 
 **The isolation is about network and cross-origin reach, not safety.** The
 code still runs locally in your browser, can consume your CPU, and can

@@ -1393,7 +1393,483 @@ function scheduleReport(): void {
   window.setTimeout(reportTree, 0);
 }
 
+/**
+ * Strip elements that create nested browsing contexts or external plugin realms.
+ *
+ * Chrome does not enforce CSP webrtc 'block' or prevent about:blank or srcdoc
+ * subframes from instantiating unpatched WebRTC constructors. Stripping frame,
+ * object, and embed markup prevents author HTML from creating fresh realms.
+ */
+export function sanitizeFrameHtml(rawHtml: string): string {
+  if (typeof rawHtml !== 'string') return rawHtml;
+  return rawHtml.replace(
+    /<\s*\/?\s*(?:iframe|frame|object|embed|portal)\b(?:"[^"]*"|'[^']*'|[^'">])*(?:>|$)/gi,
+    ''
+  );
+}
+
+/**
+ * Contain WebRTC and worker egress channels in the sandboxed frame.
+ *
+ * Chrome ignores CSP webrtc 'block', allowing sandboxed frames to gather ICE
+ * candidates and transmit STUN packets over UDP. This containment:
+ * 1. Neutralizes WebRTC constructors and prototype methods on window,
+ *    Window.prototype, and globalThis.
+ * 2. Neutralizes Worker and SharedWorker constructors.
+ * 3. Overrides contentWindow and contentDocument on frame/object element prototypes.
+ * 4. Prevents programmatic creation and DOM insertion of nested frame/object elements.
+ */
+export function installSandboxContainment(win: Window, _doc?: Document): void {
+  const winRecord = win as unknown as Record<string, unknown>;
+  if (!win || winRecord['__relicSandboxContained'] === true) {
+    return;
+  }
+  try {
+    Object.defineProperty(win, '__relicSandboxContained', {
+      value: true,
+      configurable: false,
+      writable: false,
+    });
+  } catch {
+    winRecord['__relicSandboxContained'] = true;
+  }
+  const rtcProps = [
+    'RTCPeerConnection',
+    'webkitRTCPeerConnection',
+    'RTCIceGatherer',
+    'RTCIceTransport',
+    'RTCDtlsTransport',
+    'RTCSctpTransport',
+    'RTCSessionDescription',
+    'RTCIceCandidate',
+    'RTCDataChannel',
+    'RTCRtpSender',
+    'RTCRtpReceiver',
+    'RTCPeerConnectionIceEvent',
+  ] as const;
+
+  for (const name of [
+    'RTCPeerConnection',
+    'webkitRTCPeerConnection',
+    'RTCIceGatherer',
+    'RTCIceTransport',
+    'RTCDtlsTransport',
+    'RTCSctpTransport',
+    'RTCSessionDescription',
+    'RTCIceCandidate',
+    'RTCDataChannel',
+    'RTCRtpSender',
+    'RTCRtpReceiver',
+  ] as const) {
+    const cls = winRecord[name];
+    if (typeof cls === 'function' && cls.prototype) {
+      try {
+        const proto = cls.prototype as Record<string, unknown>;
+        proto.createOffer = () =>
+          Promise.reject(new Error('WebRTC is disabled'));
+        proto.setLocalDescription = () =>
+          Promise.reject(new Error('WebRTC is disabled'));
+        proto.createDataChannel = () => {
+          throw new Error('WebRTC is disabled');
+        };
+        proto.addIceCandidate = () =>
+          Promise.reject(new Error('WebRTC is disabled'));
+      } catch {}
+    }
+  }
+
+  const visited = new Set<unknown>();
+  const collectChain = (start: unknown): unknown[] => {
+    const chain: unknown[] = [];
+    let cur = start;
+    while (cur && (typeof cur === 'object' || typeof cur === 'function')) {
+      if (visited.has(cur)) break;
+      visited.add(cur);
+      chain.push(cur);
+      try {
+        cur = Object.getPrototypeOf(cur);
+      } catch {
+        break;
+      }
+    }
+    return chain;
+  };
+
+  const winWindow = winRecord['Window'] as
+    | { prototype?: Record<string, unknown> }
+    | undefined;
+
+  const targets: unknown[] = [
+    ...collectChain(win),
+    ...collectChain(winWindow?.prototype),
+    ...collectChain(globalThis),
+  ];
+
+  for (const target of targets) {
+    const record = target as Record<string, unknown>;
+    for (const prop of rtcProps) {
+      try {
+        delete record[prop];
+      } catch {}
+      try {
+        Object.defineProperty(record, prop, {
+          value: undefined,
+          writable: false,
+          configurable: false,
+        });
+      } catch {}
+    }
+    for (const prop of ['Worker', 'SharedWorker'] as const) {
+      try {
+        delete record[prop];
+      } catch {}
+      try {
+        Object.defineProperty(record, prop, {
+          value: undefined,
+          writable: false,
+          configurable: false,
+        });
+      } catch {}
+    }
+  }
+
+  const nullGetter = {
+    get() {
+      return null;
+    },
+    set() {},
+    configurable: true,
+    enumerable: false,
+  };
+
+  const iframeCtor = winRecord['HTMLIFrameElement'] as
+    | { prototype: Record<string, unknown> }
+    | undefined;
+  if (iframeCtor?.prototype) {
+    try {
+      Object.defineProperty(iframeCtor.prototype, 'contentWindow', nullGetter);
+      Object.defineProperty(
+        iframeCtor.prototype,
+        'contentDocument',
+        nullGetter
+      );
+    } catch {}
+  }
+
+  const frameCtor = winRecord['HTMLFrameElement'] as
+    | { prototype: Record<string, unknown> }
+    | undefined;
+  if (frameCtor?.prototype) {
+    try {
+      Object.defineProperty(frameCtor.prototype, 'contentWindow', nullGetter);
+      Object.defineProperty(frameCtor.prototype, 'contentDocument', nullGetter);
+    } catch {}
+  }
+
+  const objectCtor = winRecord['HTMLObjectElement'] as
+    | { prototype: Record<string, unknown> }
+    | undefined;
+  if (objectCtor?.prototype) {
+    try {
+      Object.defineProperty(objectCtor.prototype, 'contentWindow', nullGetter);
+      Object.defineProperty(
+        objectCtor.prototype,
+        'contentDocument',
+        nullGetter
+      );
+    } catch {}
+  }
+
+  const embedCtor = winRecord['HTMLEmbedElement'] as
+    | { prototype: Record<string, unknown> }
+    | undefined;
+  if (embedCtor?.prototype) {
+    try {
+      Object.defineProperty(embedCtor.prototype, 'getSVGDocument', {
+        value() {
+          return null;
+        },
+        configurable: false,
+        writable: false,
+      });
+    } catch {}
+  }
+  const BLOCKED_TAGS: Record<string, true> = {
+    iframe: true,
+    frame: true,
+    object: true,
+    embed: true,
+    portal: true,
+  };
+
+  const nodeCtor = winRecord['Node'] as
+    | { prototype: Node; ELEMENT_NODE: number }
+    | undefined;
+  const elementNodeType = nodeCtor?.ELEMENT_NODE ?? 1;
+
+  const isBlockedNode = (node: Node | null): boolean => {
+    if (!node || node.nodeType !== elementNodeType) return false;
+    const tag = ((node as Element).tagName || '').toLowerCase();
+    if (BLOCKED_TAGS[tag]) return true;
+    if (
+      (node as Element).querySelector?.('iframe, frame, object, embed, portal')
+    ) {
+      return true;
+    }
+    return false;
+  };
+  const docCtor = winRecord['Document'] as { prototype: Document } | undefined;
+  if (docCtor?.prototype) {
+    const origCreateElement = docCtor.prototype.createElement;
+    docCtor.prototype.createElement = function (
+      this: Document,
+      tagName: string,
+      options?: ElementCreationOptions
+    ): HTMLElement {
+      if (typeof tagName === 'string' && BLOCKED_TAGS[tagName.toLowerCase()]) {
+        throw new DOMException(
+          `Frame creation is blocked: ${tagName}`,
+          'SecurityError'
+        );
+      }
+      return origCreateElement.call(this, tagName, options);
+    };
+
+    const origCreateElementNS = docCtor.prototype.createElementNS;
+    docCtor.prototype.createElementNS = function (
+      this: Document,
+      ns: string | null,
+      tagName: string,
+      options?: ElementCreationOptions | string
+    ): Element {
+      if (typeof tagName === 'string' && BLOCKED_TAGS[tagName.toLowerCase()]) {
+        throw new DOMException(
+          `Frame creation is blocked: ${tagName}`,
+          'SecurityError'
+        );
+      }
+      return origCreateElementNS.call(
+        this,
+        ns as unknown as 'http://www.w3.org/1999/xhtml',
+        tagName,
+        options
+      );
+    } as typeof docCtor.prototype.createElementNS;
+    const origDocWrite = docCtor.prototype.write;
+    docCtor.prototype.write = function (
+      this: Document,
+      ...text: string[]
+    ): void {
+      const sanitized = text.map((t) =>
+        typeof t === 'string' ? sanitizeFrameHtml(t) : t
+      );
+      origDocWrite.apply(this, sanitized as string[]);
+    };
+
+    const origDocWriteln = docCtor.prototype.writeln;
+    docCtor.prototype.writeln = function (
+      this: Document,
+      ...text: string[]
+    ): void {
+      const sanitized = text.map((t) =>
+        typeof t === 'string' ? sanitizeFrameHtml(t) : t
+      );
+      origDocWriteln.apply(this, sanitized as string[]);
+    };
+
+    const origAdoptNode = docCtor.prototype.adoptNode;
+    if (origAdoptNode) {
+      docCtor.prototype.adoptNode = function <T extends Node>(
+        this: Document,
+        node: T
+      ): T {
+        if (isBlockedNode(node)) {
+          throw new DOMException(
+            'Node adoption blocked: frame element',
+            'SecurityError'
+          );
+        }
+        return origAdoptNode.call(this, node) as T;
+      };
+    }
+
+    const origImportNode = docCtor.prototype.importNode;
+    if (origImportNode) {
+      docCtor.prototype.importNode = function <T extends Node>(
+        this: Document,
+        node: T,
+        deep?: boolean
+      ): T {
+        if (isBlockedNode(node)) {
+          throw new DOMException(
+            'Node import blocked: frame element',
+            'SecurityError'
+          );
+        }
+        return origImportNode.call(this, node, deep) as T;
+      };
+    }
+  }
+
+  const elCtor = winRecord['Element'] as { prototype: Element } | undefined;
+  if (elCtor?.prototype) {
+    const origInnerHtmlDesc = Object.getOwnPropertyDescriptor(
+      elCtor.prototype,
+      'innerHTML'
+    );
+    if (origInnerHtmlDesc?.set) {
+      Object.defineProperty(elCtor.prototype, 'innerHTML', {
+        get() {
+          return origInnerHtmlDesc.get?.call(this);
+        },
+        set(val: string) {
+          origInnerHtmlDesc.set?.call(this, sanitizeFrameHtml(val));
+        },
+        configurable: true,
+        enumerable: true,
+      });
+    }
+
+    const origOuterHtmlDesc = Object.getOwnPropertyDescriptor(
+      elCtor.prototype,
+      'outerHTML'
+    );
+    if (origOuterHtmlDesc?.set) {
+      Object.defineProperty(elCtor.prototype, 'outerHTML', {
+        get() {
+          return origOuterHtmlDesc.get?.call(this);
+        },
+        set(val: string) {
+          origOuterHtmlDesc.set?.call(this, sanitizeFrameHtml(val));
+        },
+        configurable: true,
+        enumerable: true,
+      });
+    }
+
+    const origInsertAdjacentHTML = elCtor.prototype.insertAdjacentHTML;
+    elCtor.prototype.insertAdjacentHTML = function (
+      this: Element,
+      pos: InsertPosition,
+      text: string
+    ): void {
+      origInsertAdjacentHTML.call(this, pos, sanitizeFrameHtml(text));
+    };
+    if ('append' in elCtor.prototype) {
+      const origAppend = elCtor.prototype.append;
+      elCtor.prototype.append = function (...nodes: (Node | string)[]): void {
+        for (const n of nodes) {
+          if (typeof n !== 'string' && isBlockedNode(n)) {
+            throw new DOMException(
+              'Node insertion blocked: frame element',
+              'SecurityError'
+            );
+          }
+        }
+        origAppend.apply(this, nodes);
+      };
+    }
+
+    if ('prepend' in elCtor.prototype) {
+      const origPrepend = elCtor.prototype.prepend;
+      elCtor.prototype.prepend = function (...nodes: (Node | string)[]): void {
+        for (const n of nodes) {
+          if (typeof n !== 'string' && isBlockedNode(n)) {
+            throw new DOMException(
+              'Node insertion blocked: frame element',
+              'SecurityError'
+            );
+          }
+        }
+        origPrepend.apply(this, nodes);
+      };
+    }
+
+    if ('replaceChildren' in elCtor.prototype) {
+      const origReplaceChildren = elCtor.prototype.replaceChildren;
+      elCtor.prototype.replaceChildren = function (
+        ...nodes: (Node | string)[]
+      ): void {
+        for (const n of nodes) {
+          if (typeof n !== 'string' && isBlockedNode(n)) {
+            throw new DOMException(
+              'Node insertion blocked: frame element',
+              'SecurityError'
+            );
+          }
+        }
+        origReplaceChildren.apply(this, nodes);
+      };
+    }
+
+    if ('insertAdjacentElement' in elCtor.prototype) {
+      const origInsertAdjElem = elCtor.prototype.insertAdjacentElement;
+      elCtor.prototype.insertAdjacentElement = function (
+        where: InsertPosition,
+        element: Element
+      ): Element | null {
+        if (isBlockedNode(element)) {
+          throw new DOMException(
+            'Node insertion blocked: frame element',
+            'SecurityError'
+          );
+        }
+        return origInsertAdjElem.call(this, where, element);
+      };
+    }
+  }
+
+  const rangeCtor = winRecord['Range'] as { prototype: Range } | undefined;
+  if (rangeCtor?.prototype) {
+    const origContextualFrag = rangeCtor.prototype.createContextualFragment;
+    rangeCtor.prototype.createContextualFragment = function (
+      this: Range,
+      fragment: string
+    ): DocumentFragment {
+      return origContextualFrag.call(this, sanitizeFrameHtml(fragment));
+    };
+  }
+
+  if (nodeCtor?.prototype) {
+    const origAppendChild = nodeCtor.prototype.appendChild;
+    nodeCtor.prototype.appendChild = function <T extends Node>(
+      this: Node,
+      child: T
+    ): T {
+      if (isBlockedNode(child)) {
+        throw new DOMException('Node insertion blocked', 'SecurityError');
+      }
+      return origAppendChild.call(this, child) as T;
+    };
+
+    const origInsertBefore = nodeCtor.prototype.insertBefore;
+    nodeCtor.prototype.insertBefore = function <T extends Node>(
+      this: Node,
+      newNode: T,
+      refNode: Node | null
+    ): T {
+      if (isBlockedNode(newNode)) {
+        throw new DOMException('Node insertion blocked', 'SecurityError');
+      }
+      return origInsertBefore.call(this, newNode, refNode) as T;
+    };
+
+    const origReplaceChild = nodeCtor.prototype.replaceChild;
+    nodeCtor.prototype.replaceChild = function <T extends Node>(
+      this: Node,
+      newChild: Node,
+      oldChild: T
+    ): T {
+      if (isBlockedNode(newChild)) {
+        throw new DOMException('Node insertion blocked', 'SecurityError');
+      }
+      return origReplaceChild.call(this, newChild, oldChild) as T;
+    };
+  }
+}
+
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  installSandboxContainment(window, document);
   let interaction: FrameInteraction | undefined;
 
   function initInteraction(): void {
@@ -1405,11 +1881,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const handle = createSandboxHandler(
     (html) => {
       document.open();
+      installSandboxContainment(window, document);
       // Install the capture listener before authored inline scripts execute
       // during document.write. A script-triggered anchor click must never win
       // the race and replace the rendered relic before interaction is wired.
       initInteraction();
-      document.write(html);
+      document.write(sanitizeFrameHtml(html));
       document.close();
       listen();
       scheduleReport();

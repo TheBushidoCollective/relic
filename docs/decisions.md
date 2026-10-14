@@ -482,6 +482,34 @@ them; trusting a malformed digest fails the fifth.
 **The disclosed cost and risk:**
 Running script on `/` puts first-party code onto the origin where local storage holds decryption keys. The original objection in §6.7 remains true: a static page with nothing to execute is the easiest to keep honest. What keeps the list in the browser is the script we serve, which is the same trust a reader already extends to the viewer that holds the key. The CSP's missing `connect-src` refuses request APIs, but CSP does not govern top-level navigation, and `img-src 'self'` still permits a same-origin image request whose URL could carry data to our own server. The script makes no requests, and tests pin that behaviour; the rest is operator intent in the code we author.
 
+## 2026-10-13: WebRTC STUN egress containment in the sandboxed frame
+
+`packages/relic-server/src/app.ts` served `sandbox.html` with CSP `webrtc 'block'`, and documentation asserted closed egress for HTML and JSX relics.
+
+**The finding:**
+Empirical measurement against Chrome 155 with a loopback UDP collector proved that Chrome does not recognize or enforce `webrtc 'block'`. Authored HTML or JSX in a relic could instantiate `RTCPeerConnection`, configure an attacker-controlled STUN server, and transmit UDP Binding Requests, leaking the reader's IP address.
+
+**Evaluated options:**
+1. **CSP directives (`frame-src 'none'`, `child-src 'none'`):** Measured in Chrome 155. Chrome permits `about:blank`, `about:srcdoc`, and script-created frames even under `frame-src 'none'`. CSP alone does not block nested browsing contexts.
+2. **Permissions-Policy:** Chrome 155 exposes no feature policy or permissions policy token for WebRTC or ICE gathering.
+3. **Regex HTML sanitizing:** The previous WIP used regex to strip frame tags. Regex sanitizing is brittle and bypassable, but more importantly, it does not stop author JavaScript from calling `document.createElement('iframe')`.
+4. **Synchronous prototype and constructor containment in the frame:** Neutralizing `RTCPeerConnection`, `webkitRTCPeerConnection`, and related transport constructors on `window`, `Window.prototype`, and `globalThis`, overriding `contentWindow` and `contentDocument` getters on frame prototypes to return null, and intercepting element creation (`createElement`, `createElementNS`) and insertion (`appendChild`, `insertBefore`, `replaceChild`, `append`, `prepend`, `replaceChildren`, `insertAdjacentElement`) to deny frame elements (`iframe`, `frame`, `object`, `embed`, `portal`). For markup in HTML relics, `DOMParser` parses and strips any frame tags before `document.write`.
+
+**The decision:**
+Active frame containment is adopted:
+- `RTCPeerConnection`, `webkitRTCPeerConnection`, and transport constructors (`RTCIceGatherer`, `RTCIceTransport`, `RTCDtlsTransport`, `RTCSctpTransport`, `RTCSessionDescription`, `RTCIceCandidate`, `RTCDataChannel`, `RTCRtpSender`, `RTCRtpReceiver`, `RTCPeerConnectionIceEvent`) are deleted and locked to `undefined` across the entire prototype chain of `window`, `Window.prototype`, and `globalThis`. Their interface prototype methods (`createOffer`, `setLocalDescription`, `createDataChannel`, `addIceCandidate`) are neutralized defensively.
+- `Worker` and `SharedWorker` constructors are locked to `undefined` in the frame realm (backed by CSP `worker-src 'none'`).
+- `HTMLIFrameElement`, `HTMLFrameElement`, and `HTMLObjectElement` prototypes have `contentWindow` and `contentDocument` getters returning null. `HTMLEmbedElement.prototype.getSVGDocument` returns null.
+- Programmatic creation (`createElement`, `createElementNS`) and DOM insertion (`appendChild`, `insertBefore`, `replaceChild`, `append`, `prepend`, `replaceChildren`, `insertAdjacentElement`, `adoptNode`, `importNode`) of nested frame elements (`iframe`, `frame`, `object`, `embed`, `portal`) throw a `SecurityError` `DOMException`.
+- `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `Range.prototype.createContextualFragment`, and post-load `document.write` / `document.writeln` strip frame markup elements.
+- Incoming author HTML in `sandbox.ts` strips frame markup elements before the initial `document.write`.
+
+**The real security posture and accepted costs:**
+Containment is a tested runtime deny-list inside the frame's JavaScript realm, not an architectural impossibility. CSP and the opaque sandbox remain defense in depth. Future browser platform APIs, unpatched global properties, or novel parser entry points could reopen egress channels before we patch them. The containment trades capability for confinement: nested frames and web workers in HTML and JSX relics are denied. Egress is guarded by measurement rather than guaranteed by browser boundary.
+
+**The guard against recurrence:**
+`packages/relic-viewer/test/frame-webrtc-egress.test.ts` runs headless Chrome against a real UDP collector across 14 vectors: direct, alias, saved reference, global prototype chain walking, nested script iframe, markup srcdoc iframe, createElement, createElementNS, createHTMLDocument adopt/append, innerHTML, post-load document.write, window.open, workers, and JSX relics. It asserts that the probe executed and that zero UDP packets arrive.
+
 ## 2026-10-13: Per-relic cover images on the unfurl card
 
 The rule that `og:image` is one constant raster across all relics and that the
