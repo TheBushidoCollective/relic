@@ -17,4 +17,5 @@ export * from './id.ts';
 export * from './mnemonic.ts';
 export * from './renderer-class.ts';
 export * from './rfc8188.ts';
+export * from './share.ts';
 export * from './title.ts';
