@@ -763,3 +763,37 @@ The sharer's address is not stored on the `ShareRow` (only `sharedBy: 'publisher
 - Comment reply notifications have no stop link because comments are individual conversations between verified participants.
 - Rate limits are in-memory and per Cloud Run instance (up to 4 instances), so limits apply per instance.
 - A server crash during delivery drops remaining notices rather than re-sending, avoiding duplicate emails.
+
+## 2026-10-15: Comment notifications to all participants, shared rate limits, and a unified stop link
+
+Authorised by Jason Waldrip on 2026-10-15.
+
+**The expansion.** When a new comment is posted on a relic, Relic emails everyone involved in it. This builds on the list change notices use: every verified commenter (`listComments`), every shared address (`listShares`), and the relic's registered owner address (`row.ownerEmail`), minus the comment's author (case-insensitive), minus anyone with a stop record for that relic (`isOptedOut`). A publisher comment (author `'publisher'`, posted using the publish token) emails everyone except the owner address.
+
+**Attribution and privacy in comment notices.** The email names the commenter (their verified email address, or "The publisher" for comments posted with the publish token). Because the server holds only ciphertext and never holds the decryption key, the email cannot quote the comment body and contains no decryption key fragment. It links to the unfragmented relic URL (`${serviceOrigin}/${relicId}`). Everyone on the list, including third-party shared addresses registered without prior verification, sees the commenter's verified email address.
+
+**Wording per recipient role.**
+- The relic's owner keeps owner wording: "commented on your relic" (or "left a comment on <title>"), with "Open the link you hold for this relic to read and answer the comment."
+- An answered commenter (whose comment id was targeted by `addresses` on the new comment) keeps reply wording: "answered your comment on <title>", with "Open the link you hold for this relic to read the reply."
+- Everyone else following the relic gets "commented on <title>" with a reason line explaining why they are receiving the email: "you commented on this relic", "the person who published this relic shared it with you", "someone with this relic's link shared it with you", or "you are its owner".
+
+**Burst limiter and spend fuse.** Comment notices and change notices share the same rate limits:
+- Per-recipient limiter: at most one email per recipient per relic per 10 minutes on the same limiter key change notices and replies use (`notify ${relicId} ${address}`). Later comments in the window are dropped, and the email tells the reader to open the thread to read new comments. A comment arriving right after a change notice is collapsed by the same limiter.
+- Global fuse: comment notices count against the existing all-relics fuse `config.changeNoticeRateLimit` (key `change-notice`). The name is preserved; it bounds total outbound notification spend across both change notices and comment notifications.
+
+**One stop link covers every email about that relic.** Every email (comment notification, reply notification, owner alert, and change notice) carries an unauthenticated stop link (`/api/relics/{id}/unsubscribe?addr={hash}&token={sig}`) and RFC 8058 `List-Unsubscribe` / `List-Unsubscribe-Post: List-Unsubscribe=One-Click` headers. Following the stop link stops all emails about that relic for that address. This supersedes the 2026-10-14 residual that reply notifications had no stop link. The stop page copy now states that it stops all emails about that relic, not only change emails.
+
+**Lifecycle guards and exclusions.**
+- Tombstoned relics send nothing.
+- Expired relics send nothing.
+- Download-cap-exhausted relics (`mintsUsed >= config.downloadCap`) send nothing.
+- Comment edits and comment resolutions send nothing.
+
+**Batch delivery with per-email headers.** When the mailer supports batch sending (`sendBatch`), notifications go out in batches of up to 100 via Resend's batch endpoint (`POST /emails/batch`), with each email carrying its own recipient, subject, HTML, text, and `List-Unsubscribe` headers. Opt-outs are re-checked immediately before each batch chunk or individual send so a stop that answered 200 is never followed by an email.
+
+**One shared fan-out implementation.** A single shared helper (`fanOutNotifications`) in the server implementation handles both version announcements (`announceVersion`) and comment notifications (`dispatchCommentNotifications`), guaranteeing consistent rate limiting, opt-out enforcement, lifecycle guards, and failure log scrubbing.
+
+**Residuals:**
+- Unsubscribe stops emails per relic only, not globally across all relics.
+- Comment edits and resolutions produce no emails.
+- If a server crashes mid-delivery, remaining unsent emails in the batch are dropped rather than retried to prevent duplicate deliveries.

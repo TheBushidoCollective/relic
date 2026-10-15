@@ -98,19 +98,24 @@ replace or clear the cover image, and an optional `notify` flag to control chang
 notices, defaulting to true); the publish token is never an argument and
 never printed, because the client stored it beside the relic's key at first
 publish and reads it back from there. Each new version emails a change notice to
-commenters and shared addresses unless `notify: false` is passed. The server
-issued that token once and keeps only its hash, so the machine that published is
-the only machine that can republish: lose that state and nobody, the operator
+commenters and shared addresses unless `notify: false` is passed. At most one
+email per person per relic per 10 minutes is sent, and one stop link stops
+every email about that relic. The server issued that token once and keeps only
+its hash, so the machine that published is the only machine that can
+republish: lose that state and nobody, the operator
 included, can authorize another version. Opening the link always serves the
 current version, and the download cap is shared across all versions. A relic
 taken down for abuse refuses every future version whatever token is presented,
 because a takedown an abuser could out-publish would not be a takedown.
 
 `relic_share` sends a relic this machine published to named people. It registers
-up to 20 email addresses with the service for change notices on future versions,
+up to 20 email addresses with the service for change and comment notices,
 and returns a ready share email and mailto link to draft in the sharer's own
 mailbox so the key never leaves the client. Addresses are stored in the clear by
-the service, linked to the relic id. Readers holding the link can also share from
+the service, linked to the relic id. A new comment emails everyone on the list
+except the author, naming the commenter's address (or 'The publisher'). At most
+one email per person per relic per 10 minutes, and one stop link stops every
+email about that relic. Readers holding the link can also share from
 the viewer once the relic was published or republished by this client version.
 
 `relic_list` and `relic_show` are how a publisher finds a relic again. Lookup
@@ -135,7 +140,12 @@ publishing machine under a key derived from that relic's key, so the service
 stores comment ciphertext it cannot read, and both tools work only on that
 machine for the same reason republish does. An agent has no mailbox to verify,
 so its comments are authorized by the publish token and attributed as
-`publisher` rather than as an email address. What the service does learn is
+`publisher` rather than as an email address. Posting with `relic_comment` emails
+everyone following the relic, naming "The publisher". A new comment on a relic
+emails everyone on its list (commenters, shared addresses, and the owner address)
+except the comment's author, naming the commenter's address (or "The publisher").
+At most one email per person per relic per 10 minutes is sent, and one stop link
+stops every email about that relic. What the service does learn is
 who commented on which relic and when; now also whether a comment was
 edited, the `edited_at` stamp, and whether it was settled and by which
 address. There is no edit history, because the service holds one ciphertext

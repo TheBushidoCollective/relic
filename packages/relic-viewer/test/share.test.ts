@@ -536,7 +536,7 @@ describe('the share panel', () => {
 
     const text = textOf(panel);
     expect(text).toContain(
-      'Added to this relic\u2019s change emails: 2 new, 0 already there. ' +
+      'Added to this relic\u2019s emails about new comments and versions: 2 new, 0 already there. ' +
         'Its list holds 7 of 50. Relic has emailed nobody.'
     );
     // Addressed as the service normalized them, titled as it has the relic.
@@ -545,7 +545,9 @@ describe('the share panel', () => {
     expect(textOf(head)).toContain('Shared with you: Quarterly field notes');
     const letter = only(panel, 'share-email-body').textContent;
     expect(letter).toContain(view().shareUrl);
-    expect(letter).toContain('When a new version is published');
+    expect(letter).toContain(
+      'When someone comments or a new version is published'
+    );
 
     const mailto = only(panel, 'share-mailto');
     expect(

@@ -445,7 +445,7 @@ Version moved into the taskbar, then Comments did, and the row had already overf
 9. **Waiting on a link.** The request endpoint answers 202 whether or not anything was sent, so it cannot be used to find out who has commented before, and **the copy must not undo that**: it says that if the address can receive mail a link is on its way, and it never confirms the address exists.
 10. **Verified**, where the composer names the address it will attribute the comment to, before anything is typed.
 
-**The disclosure is at the point of commenting, not only on the policy page.** A reader learns, above the fields and at reading size rather than as fine print, that their verified address is shown with their comment to anyone holding the link, that commenting signs the address up for an email whenever a new version is published, each with a stop link, that Relic can see which address commented on which relic, and that a display name sits beside the address rather than instead of it. A second line, at the address field, says that sending the link means handling the address in plain text and that it cannot be done any other way. Both are `frame.md`'s prices, stated where they are actionable. A person should learn this before they submit, not after.
+**The disclosure is at the point of commenting, not only on the policy page.** A reader learns, above the fields and at reading size rather than as fine print, that their verified address is shown with their comment and in emails to people following the relic, that commenting signs the address up for an email whenever someone comments or a new version is published, each with a stop link, that Relic can see which address commented on which relic, and that a display name sits beside the address rather than instead of it. A second line, at the address field, says that sending the link means handling the address in plain text and that it cannot be done any other way. Both are `frame.md`'s prices, stated where they are actionable. A person should learn this before they submit, not after.
 
 **The display name is untrusted display text and gets §1.9 rule 2's treatment.** It is chosen by whoever holds the link and rendered on the origin that holds the fragment, which is the filename's situation exactly, so the bidirectional formatting characters are stripped rather than escaped. The author runs through the same filter: the server verified that a mailbox answered, which says nothing about how the string draws.
 
@@ -492,7 +492,7 @@ A reader holding the link and decryption key can share a relic from the viewer.
 **The disclosure is at the point of sharing.** Before submitting addresses and when reviewing the composed email, the share panel states prominently:
 - Relic never sends this email.
 - The link in it carries the key.
-- Relic stores these addresses in the clear to email them when a new version is published, each with a stop link.
+- Relic stores these addresses in the clear to email them when someone comments or a new version is published, each with a stop link.
 
 **Composed email handoff.** After the server accepts the addresses, the viewer displays the composed message produced by `composeShareEmail({ sender: 'reader', ... })` from `@relic/format`, offering "Open in your mail app" (`shareMailtoUrl`) and "Copy message". The reader sends the email from their own mail client, so the full URL containing the decryption key never touches the server.
 

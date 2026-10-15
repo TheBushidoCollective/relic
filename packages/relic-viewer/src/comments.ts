@@ -184,8 +184,9 @@ export function utf8Bytes(text: string): number {
  * would be the overclaim `viewer.md` 6.3 already bans on the load screen.
  */
 export const IDENTITY_DISCLOSURE =
-  'Your address is shown with your comment, and Relic sees who commented ' +
-  'on what. When a new version is published, Relic emails you, with a link ' +
+  'Your address is shown with your comment and in emails to people ' +
+  'following the relic, and Relic sees who commented on what. When someone ' +
+  'comments or a new version is published, Relic emails you, with a link ' +
   'to stop.';
 
 /** Said at the point of asking for an address, before one is typed. */

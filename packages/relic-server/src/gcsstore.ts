@@ -30,6 +30,7 @@ import {
   type CommentPatch,
   type CommentRow,
   type DedupEntry,
+  looksLikeEmail,
   type MintLogEntry,
   type OptOutRow,
   type RelicCover,
@@ -569,8 +570,21 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
     // make one of them lose their words rather than merely retry.
     async putComment(row: CommentRow): Promise<void> {
       await put(key('comment', row.relicId, `${row.id}.json`), commentDoc(row));
+      if (row.author !== 'publisher' && looksLikeEmail(row.author)) {
+        try {
+          const normalized = row.author.trim().toLowerCase();
+          const authorHash = await sha256Hex(normalized);
+          const commenterKey = key(
+            'commenter',
+            row.relicId,
+            `${authorHash}.json`
+          );
+          await put(commenterKey, { address: normalized }, '0');
+        } catch (error) {
+          console.error('Failed to update commenter index in GCS', error);
+        }
+      }
 
-      // Maintain a per-author index so listing an author's commented relics
       // does not require an unbounded bucket scan. A failed index write must
       // not lose the comment, which has already landed above.
       try {
@@ -645,9 +659,68 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         const authorKey = await sha256Hex(author);
         await remove(key('author_relic', authorKey, `${relicId}.json`));
       }
+      const commenterPrefix = `${key('commenter', relicId)}/`;
+      const commenterNames = await listObjectNames(commenterPrefix);
+      for (const name of commenterNames) {
+        await remove(name);
+      }
       return rows.length;
     },
 
+    async listCommenters(relicId: string): Promise<readonly string[]> {
+      const markerName = key('commenter', relicId, '_complete.json');
+      const marker = await get(markerName);
+      if (marker === undefined) {
+        const comments = await this.listComments(relicId);
+        for (const comment of comments) {
+          if (
+            comment.author !== 'publisher' &&
+            looksLikeEmail(comment.author)
+          ) {
+            try {
+              const normalized = comment.author.trim().toLowerCase();
+              const authorHash = await sha256Hex(normalized);
+              const commenterKey = key(
+                'commenter',
+                relicId,
+                `${authorHash}.json`
+              );
+              await put(commenterKey, { address: normalized }, '0');
+            } catch (error) {
+              console.error('Failed to backfill commenter in GCS', error);
+            }
+          }
+        }
+        try {
+          await put(markerName, { completedAt: Date.now() });
+        } catch (error) {
+          console.error(
+            'Failed to write commenter completion marker in GCS',
+            error
+          );
+        }
+      }
+
+      const prefixUnder = `${key('commenter', relicId)}/`;
+      const names = (await listObjectNames(prefixUnder)).filter(
+        (name) => !name.slice(prefixUnder.length).startsWith('_')
+      );
+      const docs = await Promise.all(
+        names.map((name) => get<{ address: string }>(name))
+      );
+      const addresses = docs
+        .filter(
+          (d): d is Versioned<{ address: string }> =>
+            d !== undefined && typeof d.value?.address === 'string'
+        )
+        .map((d) => d.value.address);
+      return addresses.sort();
+    },
+
+    async deleteCommenter(relicId: string, author: string): Promise<void> {
+      const authorHash = await sha256Hex(author.trim().toLowerCase());
+      await remove(key('commenter', relicId, `${authorHash}.json`));
+    },
     async listCommentedRelics(
       author: string
     ): Promise<readonly CommentedRelic[]> {

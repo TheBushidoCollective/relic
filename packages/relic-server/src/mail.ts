@@ -9,10 +9,10 @@
  * mailer it returns throws, loudly and with the provider's own reason
  * attached, and the caller decides what a failed send costs the response.
  */
-import type { Mailer } from './app.ts';
+import type { BatchMailItem, Mailer } from './app.ts';
 
 const ENDPOINT = 'https://api.resend.com/emails';
-
+const BATCH_ENDPOINT = 'https://api.resend.com/emails/batch';
 /**
  * Resend refuses a request with no `User-Agent` outright, with a 403 rather
  * than a validation error, which reads exactly like a bad key. Stated in their
@@ -90,59 +90,238 @@ export function signInMail(link: string): OutboundMail {
  * message names the relic title and who commented, but cannot quote the comment
  * or provide a direct decryption link.
  */
+export interface CommentNotificationMailOptions {
+  readonly title: string | undefined;
+  readonly commenter: string;
+  readonly relicUrl?: string | undefined;
+  readonly stopUrl?: string | undefined;
+}
+
 export function commentNotificationMail(
-  title: string | undefined,
-  commenter: string
+  titleOrOptions: string | undefined | CommentNotificationMailOptions,
+  rawCommenter?: string,
+  rawRelicUrl?: string,
+  rawStopUrl?: string
 ): OutboundMail {
+  let title: string | undefined;
+  let commenter: string;
+  let relicUrl: string | undefined;
+  let stopUrl: string | undefined;
+
+  if (typeof titleOrOptions === 'object' && titleOrOptions !== null) {
+    title = titleOrOptions.title;
+    commenter = titleOrOptions.commenter;
+    relicUrl = titleOrOptions.relicUrl;
+    stopUrl = titleOrOptions.stopUrl;
+  } else {
+    title = titleOrOptions;
+    commenter = rawCommenter ?? '';
+    relicUrl = rawRelicUrl;
+    stopUrl = rawStopUrl;
+  }
+
   const subject = title
     ? `New comment on "${title}"`
     : 'New comment on your relic';
+
   const text = [
     title
       ? `${commenter} left a comment on "${title}".`
       : `${commenter} left a comment on your relic.`,
     '',
-    'Open the link you hold for this relic to read and answer the comment.',
+    ...(relicUrl !== undefined
+      ? [
+          'Open the link you hold for this relic to read and answer the comment. If you have opened the relic in this browser before, this link works too:',
+          relicUrl,
+        ]
+      : [
+          'Open the link you hold for this relic to read and answer the comment.',
+        ]),
     '',
     'Relic does not store the decryption key on its servers, so comments cannot be read from this email.',
+    ...(stopUrl !== undefined
+      ? ['', 'To stop emails about this relic, open:', stopUrl]
+      : []),
   ].join('\n');
+
   const safeCommenter = escapeHtml(commenter);
   const safeTitle = title ? escapeHtml(title) : undefined;
+  const safeRelicUrl = relicUrl ? escapeHtml(relicUrl) : undefined;
+  const safeStopUrl = stopUrl ? escapeHtml(stopUrl) : undefined;
+
   const html = [
     `<p>${safeCommenter} left a comment on ${safeTitle ? `<strong>${safeTitle}</strong>` : 'your relic'}.</p>`,
-    '<p>Open the link you hold for this relic to read and answer the comment.</p>',
+    relicUrl !== undefined
+      ? `<p>Open the link you hold for this relic to read and answer the comment. If you have opened the relic in this browser before, this link works too:</p><p><a href="${safeRelicUrl}">${safeRelicUrl}</a></p>`
+      : '<p>Open the link you hold for this relic to read and answer the comment.</p>',
     '<p>Relic does not store the decryption key on its servers, so comments cannot be read from this email.</p>',
+    stopUrl !== undefined
+      ? `<p>To stop emails about this relic, open:</p><p><a href="${safeStopUrl}">${safeStopUrl}</a></p>`
+      : '',
   ].join('');
-  return { subject, text, html };
+
+  return {
+    subject,
+    text,
+    html,
+    headers:
+      stopUrl !== undefined
+        ? {
+            'List-Unsubscribe': `<${stopUrl}>`,
+            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          }
+        : undefined,
+  };
 }
 
 /**
  * Notification sent to a commenter when their comment is answered.
  */
+export interface ReplyNotificationMailOptions {
+  readonly title: string | undefined;
+  readonly replier: string;
+  readonly relicUrl?: string | undefined;
+  readonly stopUrl?: string | undefined;
+}
+
 export function replyNotificationMail(
-  title: string | undefined,
-  replier: string
+  titleOrOptions: string | undefined | ReplyNotificationMailOptions,
+  rawReplier?: string,
+  rawRelicUrl?: string,
+  rawStopUrl?: string
 ): OutboundMail {
+  let title: string | undefined;
+  let replier: string;
+  let relicUrl: string | undefined;
+  let stopUrl: string | undefined;
+
+  if (typeof titleOrOptions === 'object' && titleOrOptions !== null) {
+    title = titleOrOptions.title;
+    replier = titleOrOptions.replier;
+    relicUrl = titleOrOptions.relicUrl;
+    stopUrl = titleOrOptions.stopUrl;
+  } else {
+    title = titleOrOptions;
+    replier = rawReplier ?? '';
+    relicUrl = rawRelicUrl;
+    stopUrl = rawStopUrl;
+  }
+
   const subject = title
     ? `Your comment on "${title}" was answered`
     : 'Your comment on a relic was answered';
+
   const text = [
     title
       ? `${replier} answered your comment on "${title}".`
       : `${replier} answered your comment on a relic.`,
     '',
-    'Open the link you hold for this relic to read the reply.',
+    ...(relicUrl !== undefined
+      ? [
+          'Open the link you hold for this relic to read the reply. If you have opened the relic in this browser before, this link works too:',
+          relicUrl,
+        ]
+      : ['Open the link you hold for this relic to read the reply.']),
     '',
     'Relic does not store the decryption key on its servers, so comments cannot be read from this email.',
+    ...(stopUrl !== undefined
+      ? ['', 'To stop emails about this relic, open:', stopUrl]
+      : []),
   ].join('\n');
+
   const safeReplier = escapeHtml(replier);
   const safeTitle = title ? escapeHtml(title) : undefined;
+  const safeRelicUrl = relicUrl ? escapeHtml(relicUrl) : undefined;
+  const safeStopUrl = stopUrl ? escapeHtml(stopUrl) : undefined;
+
   const html = [
     `<p>${safeReplier} answered your comment on ${safeTitle ? `<strong>${safeTitle}</strong>` : 'a relic'}.</p>`,
-    '<p>Open the link you hold for this relic to read the reply.</p>',
+    relicUrl !== undefined
+      ? `<p>Open the link you hold for this relic to read the reply. If you have opened the relic in this browser before, this link works too:</p><p><a href="${safeRelicUrl}">${safeRelicUrl}</a></p>`
+      : '<p>Open the link you hold for this relic to read the reply.</p>',
     '<p>Relic does not store the decryption key on its servers, so comments cannot be read from this email.</p>',
+    stopUrl !== undefined
+      ? `<p>To stop emails about this relic, open:</p><p><a href="${safeStopUrl}">${safeStopUrl}</a></p>`
+      : '',
   ].join('');
-  return { subject, text, html };
+
+  return {
+    subject,
+    text,
+    html,
+    headers:
+      stopUrl !== undefined
+        ? {
+            'List-Unsubscribe': `<${stopUrl}>`,
+            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          }
+        : undefined,
+  };
+}
+
+/**
+ * Notification sent to followers of a relic when someone leaves a comment.
+ */
+export interface CommentNoticeMailParams {
+  readonly title: string | undefined;
+  readonly commenter: string;
+  readonly relicUrl: string;
+  readonly stopUrl: string;
+  readonly reason: 'commented' | 'shared' | 'owner';
+  readonly sharedBy?: 'publisher' | 'reader' | undefined;
+}
+
+export function commentNoticeMail(p: CommentNoticeMailParams): OutboundMail {
+  const subject = p.title
+    ? `New comment on "${p.title}"`
+    : 'New comment on a relic';
+
+  let reasonText: string;
+  if (p.reason === 'commented') {
+    reasonText = 'you commented on this relic';
+  } else if (p.reason === 'owner') {
+    reasonText = 'you are its owner';
+  } else if (p.sharedBy === 'reader') {
+    reasonText = "someone with this relic's link shared it with you";
+  } else {
+    reasonText = 'the person who published this relic shared it with you';
+  }
+
+  const titleText = p.title ? `"${p.title}"` : 'a relic';
+  const text = [
+    `${p.commenter} left a comment on ${titleText}.`,
+    '',
+    'Open the link you were given for this relic to read the thread. If you have opened the relic in this browser before, this link works too:',
+    p.relicUrl,
+    '',
+    'Relic never has the key that decrypts it, so this email cannot include it. If you no longer have your link, ask the person who shared it.',
+    '',
+    `You are getting this because ${reasonText}. To stop emails about this relic, open:`,
+    p.stopUrl,
+  ].join('\n');
+
+  const safeCommenter = escapeHtml(p.commenter);
+  const safeTitle = p.title ? `"${escapeHtml(p.title)}"` : 'a relic';
+  const safeRelicUrl = escapeHtml(p.relicUrl);
+  const safeStopUrl = escapeHtml(p.stopUrl);
+  const html = [
+    `<p>${safeCommenter} left a comment on ${safeTitle}.</p>`,
+    '<p>Open the link you were given for this relic to read the thread. If you have opened the relic in this browser before, this link works too:</p>',
+    `<p><a href="${safeRelicUrl}">${safeRelicUrl}</a></p>`,
+    '<p>Relic never has the key that decrypts it, so this email cannot include it. If you no longer have your link, ask the person who shared it.</p>',
+    `<p>You are getting this because ${escapeHtml(reasonText)}. To stop emails about this relic, open:</p>`,
+    `<p><a href="${safeStopUrl}">${safeStopUrl}</a></p>`,
+  ].join('');
+
+  return {
+    subject,
+    text,
+    html,
+    headers: {
+      'List-Unsubscribe': `<${p.stopUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    },
+  };
 }
 
 /**
@@ -157,7 +336,8 @@ export function changeNoticeMail(p: {
     | 'commented'
     | 'shared'
     | 'shared_by_publisher'
-    | 'shared_by_reader';
+    | 'shared_by_reader'
+    | 'owner';
   readonly sharedBy?: 'publisher' | 'reader' | undefined;
 }): OutboundMail {
   const subject = p.title
@@ -167,6 +347,8 @@ export function changeNoticeMail(p: {
   let reasonText: string;
   if (p.reason === 'commented') {
     reasonText = 'you commented on this relic';
+  } else if (p.reason === 'owner') {
+    reasonText = 'you are its owner';
   } else if (p.sharedBy === 'reader' || p.reason === 'shared_by_reader') {
     reasonText = "someone with this relic's link shared it with you";
   } else {
@@ -311,12 +493,63 @@ export function resendMailer(options: ResendMailerOptions): Mailer {
     throw new MailRefusedError(response.status, code, detail);
   }
 
+  // Resend batch endpoint: https://resend.com/docs/api-reference/emails/send-batch-emails
+  // Up to 100 emails per call, supporting per-email custom headers (List-Unsubscribe).
+  async function postBatch(items: readonly BatchMailItem[]): Promise<void> {
+    if (items.length === 0) return;
+    const MAX_BATCH = 100;
+    for (let i = 0; i < items.length; i += MAX_BATCH) {
+      const slice = items.slice(i, i + MAX_BATCH);
+      const payload = slice.map((item) => ({
+        from: options.from,
+        to: [item.email],
+        subject: item.mail.subject,
+        text: item.mail.text,
+        html: item.mail.html,
+        ...(item.mail.headers !== undefined
+          ? { headers: item.mail.headers }
+          : {}),
+      }));
+
+      const response = await call(BATCH_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${options.apiKey}`,
+          'user-agent': USER_AGENT,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        const warning = quotaWarning(response.headers);
+        if (warning !== undefined) (options.log ?? console.error)(warning);
+        continue;
+      }
+
+      let code = 'unknown';
+      let detail = '';
+      try {
+        const body = (await response.json()) as Record<string, unknown>;
+        if (typeof body['name'] === 'string') code = body['name'];
+        else if (typeof body['code'] === 'string') code = body['code'];
+        if (typeof body['message'] === 'string') detail = body['message'];
+      } catch {
+        // A refusal with an unreadable body is still a refusal.
+      }
+      throw new MailRefusedError(response.status, code, detail);
+    }
+  }
+
   return {
     async send(email: string, link: string): Promise<void> {
       return post(email, signInMail(link));
     },
     async sendMail(email: string, mail: OutboundMail): Promise<void> {
       return post(email, mail);
+    },
+    async sendBatch(items: readonly BatchMailItem[]): Promise<void> {
+      return postBatch(items);
     },
   };
 }

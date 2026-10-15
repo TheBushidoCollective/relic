@@ -42,7 +42,7 @@ export const SHARE_FACT_SENDING =
 /** The other half of the disclosure: what the service keeps, and why. */
 export const SHARE_FACT_STORING =
   'Relic stores the addresses you add in the clear, linked to this relic, ' +
-  'to email them when a new version is published. Each of those emails has ' +
+  'to email them when someone comments or a new version is published. Each of those emails has ' +
   'a link to stop them.';
 
 /** Why sharing asks for the comment sign-in, said where it asks. */
@@ -191,7 +191,7 @@ export function shareRefusal(
           'This relic was published before sharing existed. Its publisher ' +
           'can republish it to turn sharing on. Until then you can copy the ' +
           'link and send it yourself, but Relic will not email those people ' +
-          'when it changes. Nothing was added.',
+          'about new comments or versions. Nothing was added.',
         retryable: false,
       };
     case 'invalid_share_proof':
@@ -222,17 +222,17 @@ export function shareRefusal(
       const count = extensions.shared_count;
       let detail =
         'It holds as many shared addresses as Relic allows. Nothing was ' +
-        'added. The people on the list still get change emails.';
+        'added. The people on the list still get emails about new comments and versions.';
       if (limit !== undefined && count !== undefined) {
         detail =
           count >= limit
             ? `It already holds all ${limit} shared addresses Relic allows. ` +
-              'Nothing was added. The people on the list still get change ' +
-              'emails, and you can still copy the link and send it yourself.'
+              'Nothing was added. The people on the list still get emails ' +
+              'about new comments and versions, and you can still copy the link and send it yourself.'
             : `It holds ${count} of the ${limit} shared addresses Relic ` +
               'allows, and these would take it past that. Nothing was added. ' +
               'Remove some and try again; the people already on the list ' +
-              'still get change emails.';
+              'still get emails about new comments and versions.';
       }
       return {
         code,
@@ -268,7 +268,7 @@ export function shareRefusal(
         code,
         headline: 'This relic has expired',
         detail:
-          'Its lifetime ran out, so Relic sends no more change emails about ' +
+          'Its lifetime ran out, so Relic sends no more emails about ' +
           'it and takes no new addresses.',
         retryable: false,
       };
@@ -277,7 +277,7 @@ export function shareRefusal(
         code,
         headline: 'This relic has been opened as often as it allows',
         detail:
-          'It reached its download cap, so Relic sends no more change emails ' +
+          'It reached its download cap, so Relic sends no more emails ' +
           'about it and takes no new addresses.',
         retryable: false,
       };
@@ -516,7 +516,7 @@ export async function requestShare(
 export function sharedSummary(shared: Shared): string {
   const already = Math.max(0, shared.emails.length - shared.added);
   return (
-    `Added to this relic\u2019s change emails: ${shared.added} new, ` +
+    `Added to this relic\u2019s emails about new comments and versions: ${shared.added} new, ` +
     `${already} already there. Its list holds ${shared.sharedCount} of ` +
     `${shared.shareLimit}. Relic has emailed nobody.`
   );

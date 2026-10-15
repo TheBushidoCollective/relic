@@ -10,7 +10,11 @@
 
 import type { RendererClass } from '@relic/format';
 import type { CoverKind, CoverType } from '@relic/format/cover';
+import { sha256Hex } from './gcs.ts';
 
+export function looksLikeEmail(value: string): boolean {
+  return value.length <= 320 && /^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(value);
+}
 /** Why a relic was removed. Private; the public code is always the same. */
 export type ReasonClass =
   | 'abuse'
@@ -408,6 +412,8 @@ export interface RelicStore {
   listCommentedRelics(author: string): Promise<readonly CommentedRelic[]>;
 
   putAuthLink(row: AuthLinkRow): Promise<void>;
+  listCommenters(relicId: string): Promise<readonly string[]>;
+  deleteCommenter(relicId: string, author: string): Promise<void>;
   /** Single use: reading it consumes it, whether or not it had expired. */
   consumeAuthLink(tokenHash: string): Promise<AuthLinkRow | undefined>;
   putSession(row: SessionRow): Promise<void>;
@@ -435,11 +441,12 @@ export class MemoryStore implements RelicStore {
   private readonly shares = new Map<string, Map<string, ShareRow>>();
   private readonly optOuts = new Map<string, Map<string, OptOutRow>>();
   private unsubscribeSecret: Uint8Array | undefined;
+  private readonly commenters = new Map<string, Map<string, string>>();
+  private readonly commenterMarkers = new Set<string>();
 
   async getRelic(id: string): Promise<RelicRow | undefined> {
     return this.relics.get(id);
   }
-
   async beginVersion(
     id: string,
     rendererClass: RendererClass,
@@ -752,6 +759,19 @@ export class MemoryStore implements RelicStore {
       version: typeof row.version === 'number' ? row.version : undefined,
     });
     this.comments.set(row.relicId, thread);
+
+    if (row.author !== 'publisher' && looksLikeEmail(row.author)) {
+      const normalized = row.author.trim().toLowerCase();
+      const hash = await sha256Hex(normalized);
+      let map = this.commenters.get(row.relicId);
+      if (map === undefined) {
+        map = new Map();
+        this.commenters.set(row.relicId, map);
+      }
+      if (!map.has(hash)) {
+        map.set(hash, normalized);
+      }
+    }
   }
 
   async getComment(
@@ -760,7 +780,6 @@ export class MemoryStore implements RelicStore {
   ): Promise<CommentRow | undefined> {
     return this.comments.get(relicId)?.find((c) => c.id === commentId);
   }
-
   async listComments(relicId: string): Promise<readonly CommentRow[]> {
     // Sorted rather than trusting insertion order, because a real store
     // returns rows in whatever order it likes and the thread's contract is
@@ -797,7 +816,38 @@ export class MemoryStore implements RelicStore {
   async deleteCommentsForRelic(relicId: string): Promise<number> {
     const removed = this.comments.get(relicId)?.length ?? 0;
     this.comments.delete(relicId);
+    this.commenters.delete(relicId);
+    this.commenterMarkers.delete(relicId);
     return removed;
+  }
+
+  async listCommenters(relicId: string): Promise<readonly string[]> {
+    if (!this.commenterMarkers.has(relicId)) {
+      const thread = this.comments.get(relicId) ?? [];
+      let map = this.commenters.get(relicId);
+      if (map === undefined) {
+        map = new Map();
+        this.commenters.set(relicId, map);
+      }
+      for (const comment of thread) {
+        if (comment.author !== 'publisher' && looksLikeEmail(comment.author)) {
+          const normalized = comment.author.trim().toLowerCase();
+          const hash = await sha256Hex(normalized);
+          if (!map.has(hash)) {
+            map.set(hash, normalized);
+          }
+        }
+      }
+      this.commenterMarkers.add(relicId);
+    }
+    const map = this.commenters.get(relicId);
+    if (map === undefined) return [];
+    return [...map.values()].sort();
+  }
+
+  async deleteCommenter(relicId: string, author: string): Promise<void> {
+    const hash = await sha256Hex(author.trim().toLowerCase());
+    this.commenters.get(relicId)?.delete(hash);
   }
 
   async listCommentedRelics(

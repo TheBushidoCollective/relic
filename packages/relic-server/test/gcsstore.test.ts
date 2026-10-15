@@ -1214,5 +1214,80 @@ describe('gcsStore', () => {
       expect(storedSecret).toBeDefined();
       expect(storedSecret?.generation).toBe(1);
     });
+
+    test('legacy relics backfill commenter index once and write completion marker', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+
+      // Simulate legacy comments existing before the commenter index was introduced
+      const email = 'legacy-author@example.com';
+      const emailHash = await sha256Hex(email);
+      gcs.objects.set('m/comment/r_legacy/c1.json', {
+        body: JSON.stringify({
+          id: 'c1',
+          relicId: 'r_legacy',
+          author: email,
+          createdAt: 1000,
+          ciphertext: 'dGVzdA',
+        }),
+        generation: 1,
+      });
+
+      expect(gcs.objects.has('m/commenter/r_legacy/_complete.json')).toBe(
+        false
+      );
+      expect(gcs.objects.has(`m/commenter/r_legacy/${emailHash}.json`)).toBe(
+        false
+      );
+
+      // First call backfills and writes marker
+      const first = await store.listCommenters('r_legacy');
+      expect(first).toEqual([email]);
+      expect(gcs.objects.has('m/commenter/r_legacy/_complete.json')).toBe(true);
+      expect(gcs.objects.has(`m/commenter/r_legacy/${emailHash}.json`)).toBe(
+        true
+      );
+
+      // Second call reads index without backfilling (marker remains generation 1)
+      const markerGenBefore = gcs.objects.get(
+        'm/commenter/r_legacy/_complete.json'
+      )?.generation;
+      const second = await store.listCommenters('r_legacy');
+      expect(second).toEqual([email]);
+      const markerGenAfter = gcs.objects.get(
+        'm/commenter/r_legacy/_complete.json'
+      )?.generation;
+      expect(markerGenAfter).toBe(markerGenBefore);
+    });
+
+    test('deleteCommentsForRelic sweeps the commenter index and marker', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+
+      await store.putComment({
+        id: 'c1',
+        relicId: 'r_sweep',
+        author: 'reader@example.com',
+        createdAt: 1000,
+        ciphertext: 'dGVzdA',
+      });
+
+      // Initialize and complete commenter index
+      await store.listCommenters('r_sweep');
+
+      const authorHash = await sha256Hex('reader@example.com');
+      expect(gcs.objects.has(`m/commenter/r_sweep/${authorHash}.json`)).toBe(
+        true
+      );
+      expect(gcs.objects.has('m/commenter/r_sweep/_complete.json')).toBe(true);
+
+      await store.deleteCommentsForRelic('r_sweep');
+
+      expect(gcs.objects.has(`m/commenter/r_sweep/${authorHash}.json`)).toBe(
+        false
+      );
+      expect(gcs.objects.has('m/commenter/r_sweep/_complete.json')).toBe(false);
+      expect(await store.listCommenters('r_sweep')).toEqual([]);
+    });
   });
 });

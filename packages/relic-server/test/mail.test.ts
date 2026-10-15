@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   changeNoticeMail,
+  commentNoticeMail,
   commentNotificationMail,
   MailRefusedError,
   mailerFromEnv,
@@ -165,6 +166,26 @@ describe('the comment notification mail', () => {
     expect(mail.html).not.toContain('#');
     expect(mail.text).not.toContain('comment_id');
     expect(mail.html).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+
+  test('carries relic link, stop link, and List-Unsubscribe headers when provided', () => {
+    const stopUrl =
+      'https://relic.example/api/relics/r1/unsubscribe?addr=h&token=t';
+    const mail = commentNotificationMail({
+      title: 'Notes',
+      commenter: 'ada@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl,
+    });
+    expect(mail.text).toContain('https://relic.example/r1');
+    expect(mail.text).toContain(stopUrl);
+    expect(mail.html).toContain('https://relic.example/r1');
+    expect(mail.html).toContain(stopUrl.replace('&', '&amp;'));
+    expect(mail.headers).toEqual({
+      'List-Unsubscribe': `<${stopUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
   });
 });
 
@@ -209,6 +230,118 @@ describe('the reply notification mail', () => {
     expect(mail.html).not.toContain('#');
     expect(mail.text).not.toContain('comment_id');
     expect(mail.html).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+
+  test('carries relic link, stop link, and List-Unsubscribe headers when provided', () => {
+    const stopUrl =
+      'https://relic.example/api/relics/r1/unsubscribe?addr=h&token=t';
+    const mail = replyNotificationMail({
+      title: 'Notes',
+      replier: 'The publisher',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl,
+    });
+    expect(mail.text).toContain('The publisher answered your comment');
+    expect(mail.text).toContain('https://relic.example/r1');
+    expect(mail.text).toContain(stopUrl);
+    expect(mail.headers).toEqual({
+      'List-Unsubscribe': `<${stopUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
+  });
+});
+
+describe('the comment notice mail', () => {
+  test('copy with and without a title, for each reason and commenter', () => {
+    const withTitleCommented = commentNoticeMail({
+      title: 'Quarterly Plan',
+      commenter: 'alice@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop1',
+      reason: 'commented',
+    });
+    expect(withTitleCommented.subject).toBe('New comment on "Quarterly Plan"');
+    expect(withTitleCommented.text).toContain(
+      'alice@example.com left a comment on "Quarterly Plan".'
+    );
+    expect(withTitleCommented.text).toContain(
+      'You are getting this because you commented on this relic.'
+    );
+    expect(withTitleCommented.html).toContain(
+      '<p>alice@example.com left a comment on "Quarterly Plan".</p>'
+    );
+    expect(withTitleCommented.html).toContain(
+      '<a href="https://relic.example/r1">https://relic.example/r1</a>'
+    );
+    expect(withTitleCommented.headers).toEqual({
+      'List-Unsubscribe': '<https://relic.example/stop1>',
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
+
+    const untitledPublisher = commentNoticeMail({
+      title: undefined,
+      commenter: 'The publisher',
+      relicUrl: 'https://relic.example/r2',
+      stopUrl: 'https://relic.example/stop2',
+      reason: 'shared',
+      sharedBy: 'publisher',
+    });
+    expect(untitledPublisher.subject).toBe('New comment on a relic');
+    expect(untitledPublisher.text).toContain(
+      'The publisher left a comment on a relic.'
+    );
+    expect(untitledPublisher.text).toContain(
+      'the person who published this relic shared it with you'
+    );
+
+    const sharedReader = commentNoticeMail({
+      title: 'Project',
+      commenter: 'bob@example.com',
+      relicUrl: 'https://relic.example/r3',
+      stopUrl: 'https://relic.example/stop3',
+      reason: 'shared',
+      sharedBy: 'reader',
+    });
+    expect(sharedReader.text).toContain(
+      "someone with this relic's link shared it with you"
+    );
+
+    const ownerReason = commentNoticeMail({
+      title: 'Project',
+      commenter: 'carol@example.com',
+      relicUrl: 'https://relic.example/r4',
+      stopUrl: 'https://relic.example/stop4',
+      reason: 'owner',
+    });
+    expect(ownerReason.text).toContain('you are its owner');
+  });
+
+  test('carries no comment body, no fragment, and no key', () => {
+    const mail = commentNoticeMail({
+      title: 'Secret Spec',
+      commenter: 'alice@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop',
+      reason: 'commented',
+    });
+    expect(mail.text).not.toContain('#');
+    expect(mail.html).not.toContain('#');
+    expect(mail.text).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+
+  test('escapes HTML in title and commenter', () => {
+    const mail = commentNoticeMail({
+      title: '<script>alert("x")</script>',
+      commenter: 'user"name<x>@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop',
+      reason: 'commented',
+    });
+    expect(mail.html).not.toContain('<script>');
+    expect(mail.html).toContain('&lt;script&gt;');
+    expect(mail.html).toContain('&quot;');
   });
 });
 
@@ -283,6 +416,19 @@ describe('the change notice mail', () => {
     );
     expect(withTitleSharedReader.html).toContain(
       "You are getting this because someone with this relic's link shared it with you."
+    );
+    const withTitleOwner = changeNoticeMail({
+      title: 'Quarterly Numbers',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/api/relics/r1/unsubscribe?addr=a&token=t',
+      reason: 'owner',
+    });
+    expect(withTitleOwner.text).toContain(
+      'You are getting this because you are its owner.'
+    );
+    expect(withTitleOwner.html).toContain(
+      'You are getting this because you are its owner.'
     );
   });
 
@@ -463,6 +609,76 @@ describe('sending through Resend', () => {
       String(wireWithoutHeaders.calls[0]?.init.body)
     ) as Record<string, unknown>;
     expect('headers' in bodyWithoutHeaders).toBe(false);
+  });
+
+  test('sendBatch posts up to 100 items to Resend batch endpoint with custom headers', async () => {
+    const wire = recorder(accepted());
+    const mailer = resendMailer({
+      apiKey: 're_test_key',
+      from: 'Relic <no-reply@relik.link>',
+      fetch: wire.fetch,
+    });
+    const mail1 = commentNotificationMail({
+      title: 'Doc 1',
+      commenter: 'ada@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop1',
+    });
+    const mail2 = replyNotificationMail({
+      title: 'Doc 2',
+      replier: 'The publisher',
+      relicUrl: 'https://relic.example/r2',
+      stopUrl: 'https://relic.example/stop2',
+    });
+    await mailer.sendBatch?.([
+      { email: 'user1@example.com', mail: mail1 },
+      { email: 'user2@example.com', mail: mail2 },
+    ]);
+
+    expect(wire.calls).toHaveLength(1);
+    const call = wire.calls[0];
+    if (call === undefined) throw new Error('nothing sent');
+    expect(call.url).toBe('https://api.resend.com/emails/batch');
+    const payload = JSON.parse(String(call.init.body)) as Array<
+      Record<string, unknown>
+    >;
+    expect(payload).toHaveLength(2);
+    expect(payload[0]?.['from']).toBe('Relic <no-reply@relik.link>');
+    expect(payload[0]?.['to']).toEqual(['user1@example.com']);
+    expect(payload[0]?.['subject']).toBe('New comment on "Doc 1"');
+    expect(payload[0]?.['headers']).toEqual({
+      'List-Unsubscribe': '<https://relic.example/stop1>',
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
+    expect(payload[1]?.['to']).toEqual(['user2@example.com']);
+    expect(payload[1]?.['subject']).toBe(
+      'Your comment on "Doc 2" was answered'
+    );
+  });
+
+  test('sendBatch handles batch API refusal', async () => {
+    const wire = recorder(
+      new Response(
+        JSON.stringify({
+          name: 'validation_error',
+          message: 'The domain is not verified',
+        }),
+        { status: 403, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    const mailer = resendMailer({
+      apiKey: 're_test_key',
+      from: 'Relic <no-reply@relik.link>',
+      fetch: wire.fetch,
+    });
+    const mail = commentNotificationMail('Doc', 'ada@example.com');
+    const send = mailer.sendBatch?.([{ email: 'user@example.com', mail }]);
+    await expect(send).rejects.toBeInstanceOf(MailRefusedError);
+    await send?.catch((error: MailRefusedError) => {
+      expect(error.status).toBe(403);
+      expect(error.code).toBe('validation_error');
+      expect(error.message).toContain('not verified');
+    });
   });
 });
 

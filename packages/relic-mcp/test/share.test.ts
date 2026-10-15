@@ -371,7 +371,9 @@ describe('relic_share tool and shareRelic', () => {
       `I've shared "Test Document" with you on Relic. Open it here:`
     );
     expect(structured.email.text).toContain(expectedUrl);
-    expect(structured.email.text).toContain('When I publish a new version');
+    expect(structured.email.text).toContain(
+      'When someone comments or I publish a new version'
+    );
     expect(structured.email.text).toContain(
       'Relic keeps your address for that.'
     );
@@ -504,7 +506,7 @@ describe('republish notify parameter and share_verifier', () => {
     expect(defaultStruct.notify).toBe(true);
     const defaultText = defaultRes.result?.content?.[0]?.text ?? '';
     expect(defaultText).toContain(
-      'Relic sends a change notice for version 2 to everyone following this relic'
+      'Relic sends a change notice for version 2 to each address that commented on this relic or was added with relic_share'
     );
     // notify: false sent on wire
     await writeFile(filePath, '# Version 3 content\n');

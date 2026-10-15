@@ -378,6 +378,68 @@ try {
 
   console.log(`NOTIFY_FALSE version=4 recipients=${mails.length}`);
 
+  // 7b. Eleven minutes on, a second reader comments. Everyone on the list
+  //     hears about it except the author and the address that used its stop
+  //     link: the first commenter and the shared address still following.
+  fakeNow += 11 * 60 * 1000;
+  mails.length = 0;
+  const linCookie = await createSession('lin@example.test');
+  const linComment = await fetch(`${origin}/api/relics/${relicId}/comments`, {
+    method: 'POST',
+    headers: {
+      cookie: linCookie,
+      'content-type': 'application/json',
+      'x-forwarded-for': '198.51.100.13',
+    },
+    body: JSON.stringify({
+      ciphertext: await encryptComment(commentKey, {
+        body: 'Second reader comment',
+        display_name: null,
+        anchor: null,
+      }),
+    }),
+  });
+  assert.equal(linComment.status, 201, 'second comment failed');
+  const commentRecipients = mails.map((m) => m.to).sort();
+  assert.deepEqual(commentRecipients, [
+    'grace@example.test',
+    'reader@example.test',
+  ]);
+  const namesCommenter = mails.every((m) =>
+    m.mail.text.includes('lin@example.test')
+  );
+  assert.ok(namesCommenter, 'comment email did not name the commenter');
+  const commentKeyless = mails.every(
+    (m) => !m.mail.text.includes('#') && !m.mail.html.includes('#')
+  );
+  assert.ok(commentKeyless, 'comment email contained # key fragment');
+  assert.ok(
+    mails.every((m) => Boolean(m.mail.headers?.['List-Unsubscribe'])),
+    'comment email had no List-Unsubscribe header'
+  );
+  console.log(
+    `COMMENT_NOTICES recipients=${mails.length} names_commenter=${namesCommenter} keyless=${commentKeyless}`
+  );
+
+  // 7c. The publisher answers at once through relic_comment. The two people
+  //     emailed a moment ago are inside their 10-minute window and hear
+  //     nothing more; the second reader, who was the author last time, gets
+  //     one email naming the publisher.
+  mails.length = 0;
+  await callMcp('relic_comment', {
+    relic_id: relicId,
+    body: 'Publisher answer on the notify path doc',
+  });
+  assert.deepEqual(
+    mails.map((m) => m.to),
+    ['lin@example.test']
+  );
+  assert.ok(
+    mails[0]?.mail.text.includes('The publisher'),
+    'publisher comment email did not name the publisher'
+  );
+  console.log(`PUBLISHER_COMMENT recipients=${mails.length} collapsed=2`);
+
   // 8. Start a raw HTTP republish with no upload; completion answers 409
   mails.length = 0;
   const rawRepubRes = await fetch(`${origin}/api/relics/${relicId}/republish`, {

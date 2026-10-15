@@ -9,7 +9,8 @@ import {
 } from '@relic/format';
 import { createApp, type Mailer, type RelicApp } from '../src/app.ts';
 import { sha256Hex } from '../src/gcs.ts';
-import type { OutboundMail } from '../src/mail.ts';
+import { MailRefusedError, type OutboundMail } from '../src/mail.ts';
+import { RateLimiter } from '../src/ratelimit.ts';
 import { MemoryStorage } from '../src/storage.ts';
 import { MemoryStore } from '../src/store.ts';
 
@@ -206,9 +207,9 @@ describe('change notices and relic_share', () => {
       })
     );
 
-    // Clear initial comment notification to owner
+    // Advance clock past the notification rate limit window
+    now += 15 * 60 * 1000;
     sentMails = [];
-
     // Republish v2
     const repub = await republish(id, token);
     expect(repub.status).toBe(200);
@@ -716,7 +717,8 @@ describe('change notices and relic_share', () => {
     );
     expect(getRes.status).toBe(200);
     const getHtml = await getRes.text();
-    expect(getHtml).toContain('Stop change emails');
+    expect(getHtml).toContain('Stop emails');
+    expect(getHtml).toContain("Only this relic's emails stop.");
     expect(getHtml).toContain('<form method="POST"');
     expect(getHtml).toContain('Stop these emails');
 
@@ -1629,6 +1631,862 @@ describe('change notices and relic_share', () => {
       } finally {
         console.error = origError;
       }
+    });
+  });
+  describe('comment notifications to relic participants', () => {
+    test('a reader comment emails every other commenter, every shared address and the owner exactly once, never the author', async () => {
+      const { id, grant } = await publish({
+        title: 'Project Roadmap',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Share with two addresses
+      const shareRes = await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: ['share1@example.com', 'share2@example.com'],
+          }),
+        })
+      );
+      expect(shareRes.status).toBe(200);
+
+      // Alice comments
+      const aliceSession = await createSession('alice@example.com');
+      const aliceRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2U' }),
+        })
+      );
+      expect(aliceRes.status).toBe(201);
+
+      // Advance clock past the 10-minute rate limit window
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Bob comments
+      const bobSession = await createSession('bob@example.com');
+      const bobRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: bobSession },
+          body: JSON.stringify({ ciphertext: 'Ym9i' }),
+        })
+      );
+      expect(bobRes.status).toBe(201);
+
+      // Bob's comment must notify:
+      // - owner@example.com (owner wording)
+      // - alice@example.com (commenter wording)
+      // - share1@example.com (shared wording)
+      // - share2@example.com (shared wording)
+      // Never bob@example.com
+      const recipientEmails = sentMails.map((m) => m.email).sort();
+      expect(recipientEmails).toEqual([
+        'alice@example.com',
+        'owner@example.com',
+        'share1@example.com',
+        'share2@example.com',
+      ]);
+    });
+
+    test('answered commenter gets reply wording and owner gets owner wording, once each', async () => {
+      const { id } = await publish({
+        title: 'Project Roadmap',
+        ownerEmail: 'owner@example.com',
+      });
+
+      // Alice comments
+      const aliceSession = await createSession('alice@example.com');
+      const aliceRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2U' }),
+        })
+      );
+      expect(aliceRes.status).toBe(201);
+      const { comment_id: aliceCommentId } = (await aliceRes.json()) as {
+        comment_id: string;
+      };
+
+      // Advance clock past the 10-minute rate limit window
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Bob answers Alice's comment
+      const bobSession = await createSession('bob@example.com');
+      const bobRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: bobSession },
+          body: JSON.stringify({
+            ciphertext: 'Ym9i',
+            addresses: aliceCommentId,
+          }),
+        })
+      );
+      expect(bobRes.status).toBe(201);
+
+      expect(sentMails).toHaveLength(2);
+      const aliceMail = sentMails.find((m) => m.email === 'alice@example.com');
+      const ownerMail = sentMails.find((m) => m.email === 'owner@example.com');
+      expect(aliceMail).toBeDefined();
+      expect(ownerMail).toBeDefined();
+
+      expect(aliceMail?.mail.subject).toBe(
+        'Your comment on "Project Roadmap" was answered'
+      );
+      expect(aliceMail?.mail.text).toContain(
+        'bob@example.com answered your comment on "Project Roadmap".'
+      );
+      expect(aliceMail?.mail.text).toContain(
+        'Open the link you hold for this relic to read the reply.'
+      );
+
+      expect(ownerMail?.mail.subject).toBe('New comment on "Project Roadmap"');
+      expect(ownerMail?.mail.text).toContain(
+        'bob@example.com left a comment on "Project Roadmap".'
+      );
+      expect(ownerMail?.mail.text).toContain(
+        'Open the link you hold for this relic to read and answer the comment.'
+      );
+    });
+
+    test("a publisher comment emails everyone except the owner address and names 'The publisher'", async () => {
+      const { id, grant } = await publish({
+        title: 'Q4 Budget',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Alice comments
+      const aliceSession = await createSession('alice@example.com');
+      await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2U' }),
+        })
+      );
+
+      // Share with Carol
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: ['carol@example.com'],
+          }),
+        })
+      );
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Publisher comments using publish_token
+      const pubRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            ciphertext: 'cHVibGlzaGVyIGNvbW1lbnQ',
+          }),
+        })
+      );
+      expect(pubRes.status).toBe(201);
+
+      const recipients = sentMails.map((m) => m.email).sort();
+      expect(recipients).toEqual(['alice@example.com', 'carol@example.com']);
+      expect(recipients).not.toContain('owner@example.com');
+
+      for (const m of sentMails) {
+        expect(m.mail.text).toContain('The publisher left a comment');
+      }
+    });
+
+    test('a stop record suppresses comment emails', async () => {
+      const { id, grant } = await publish({
+        title: 'Team Notes',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Share with Bob
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: ['bob@example.com'],
+          }),
+        })
+      );
+
+      // Alice comments so Bob gets an email containing his stop link
+      const aliceSession = await createSession('alice@example.com');
+      await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2U' }),
+        })
+      );
+
+      const bobMail = sentMails.find((m) => m.email === 'bob@example.com');
+      expect(bobMail).toBeDefined();
+      const rawStopUrl = bobMail?.mail.headers?.['List-Unsubscribe'];
+      expect(rawStopUrl).toBeDefined();
+      if (rawStopUrl === undefined) throw new Error('missing stop url');
+      const stopUrl = rawStopUrl.slice(1, -1);
+      const parsedStop = new URL(stopUrl);
+
+      // Bob clicks stop link
+      const stopRes = await app.fetch(
+        req(parsedStop.pathname + parsedStop.search, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: 'List-Unsubscribe=One-Click',
+        })
+      );
+      expect(stopRes.status).toBe(200);
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Carol comments
+      const carolSession = await createSession('carol@example.com');
+      const carolRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: carolSession },
+          body: JSON.stringify({ ciphertext: 'Y2Fyb2w' }),
+        })
+      );
+      expect(carolRes.status).toBe(201);
+
+      // Bob must not receive email, only Alice and Owner
+      const recipients = sentMails.map((m) => m.email).sort();
+      expect(recipients).toEqual(['alice@example.com', 'owner@example.com']);
+      expect(recipients).not.toContain('bob@example.com');
+    });
+
+    test('every comment/reply/owner email has a keyless relic link, a working stop link and both List-Unsubscribe headers', async () => {
+      const { id, grant } = await publish({
+        title: 'Design Document',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Share with Carol
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: ['carol@example.com'],
+          }),
+        })
+      );
+
+      // Alice comments (C1)
+      const aliceSession = await createSession('alice@example.com');
+      const aliceRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2U' }),
+        })
+      );
+      const { comment_id: c1Id } = (await aliceRes.json()) as {
+        comment_id: string;
+      };
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Bob replies to Alice (C2)
+      const bobSession = await createSession('bob@example.com');
+      await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: bobSession },
+          body: JSON.stringify({ ciphertext: 'Ym9i', addresses: c1Id }),
+        })
+      );
+
+      // We have:
+      // - reply email (Alice)
+      // - owner email (Owner)
+      // - comment notice email (Carol)
+      expect(sentMails).toHaveLength(3);
+
+      for (const item of sentMails) {
+        // 1. Keyless relic link
+        expect(item.mail.text).toContain(`https://relic.example/${id}`);
+        expect(item.mail.text).not.toContain('#');
+        expect(item.mail.html).toContain(`https://relic.example/${id}`);
+        expect(item.mail.html).not.toContain('#');
+
+        // 2. Both List-Unsubscribe headers
+        const listUnsub = item.mail.headers?.['List-Unsubscribe'];
+        const listUnsubPost = item.mail.headers?.['List-Unsubscribe-Post'];
+        expect(listUnsub).toBeDefined();
+        expect(listUnsubPost).toBe('List-Unsubscribe=One-Click');
+        if (listUnsub === undefined) throw new Error('missing listUnsub');
+        const stopUrl = listUnsub.slice(1, -1);
+        const parsed = new URL(stopUrl);
+
+        // GET shows form
+        const getRes = await app.fetch(req(parsed.pathname + parsed.search));
+        expect(getRes.status).toBe(200);
+        const getHtml = await getRes.text();
+        expect(getHtml).toContain('Stop emails');
+        expect(getHtml).toContain("Only this relic's emails stop.");
+
+        // POST stops emails
+        const postRes = await app.fetch(
+          req(parsed.pathname + parsed.search, {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: 'List-Unsubscribe=One-Click',
+          })
+        );
+        expect(postRes.status).toBe(200);
+        const postHtml = await postRes.text();
+        expect(postHtml).toContain('Stopped');
+      }
+    });
+
+    test('a second comment within 10 minutes sends nothing to the same people, and a comment right after a change notice is collapsed', async () => {
+      const { id, key, grant } = await publish({
+        title: 'Speed Run',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Alice comments -> Owner receives 1 email
+      const aliceSession = await createSession('alice@example.com');
+      await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'Y29tbWVudDE' }),
+        })
+      );
+      expect(sentMails).toHaveLength(1);
+      expect(sentMails[0]?.email).toBe('owner@example.com');
+
+      // 2 minutes later: Alice comments again
+      now += 2 * 60 * 1000;
+      sentMails = [];
+
+      await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'Y29tbWVudDI' }),
+        })
+      );
+      // Owner was notified 2 minutes ago, so within 10-minute window, sends nothing
+      expect(sentMails).toHaveLength(0);
+
+      // Advance clock past the window
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Republish version 2
+      await republish(id, token);
+      storage.put(
+        `${id}/v2`,
+        await encryptRelic({
+          content: new TextEncoder().encode('v2 content'),
+          filename: 'notes.md',
+          mimetype: 'text/markdown',
+          key,
+        })
+      );
+      await app.fetch(req(`/api/relics/${id}/complete`, { method: 'POST' }));
+      // Change notice sent to Alice (ownerEmail is not mailed version notices)
+      expect(sentMails).toHaveLength(1);
+      expect(sentMails[0]?.email).toBe('alice@example.com');
+
+      // 1 minute later: Bob comments
+      now += 60 * 1000;
+      sentMails = [];
+
+      const bobSession = await createSession('bob@example.com');
+      await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: bobSession },
+          body: JSON.stringify({ ciphertext: 'Ym9iIGNvbW1lbnQ' }),
+        })
+      );
+      // Alice received change notice 1 minute ago, so her notify limiter key is consumed.
+      // Owner receives email because 15m elapsed since owner's last comment notice.
+      const recipients = sentMails.map((m) => m.email);
+      expect(recipients).toContain('owner@example.com');
+      expect(recipients).not.toContain('alice@example.com');
+    });
+
+    test('tombstoned/expired/cap-exhausted relics send nothing', async () => {
+      // 1. Expired relic
+      const { id: expiredId } = await publish({
+        title: 'Short Lived',
+        ownerEmail: 'owner@example.com',
+        ttlDays: 1,
+      });
+      now += 2 * 86400 * 1000;
+      sentMails = [];
+
+      const session1 = await createSession('reader1@example.com');
+      await app.fetch(
+        req(`/api/relics/${expiredId}/comments`, {
+          method: 'POST',
+          headers: { cookie: session1 },
+          body: JSON.stringify({ ciphertext: 'ZXhwaXJlZA' }),
+        })
+      );
+      expect(sentMails).toHaveLength(0);
+
+      // 2. Cap exhausted relic
+      now = Date.parse('2026-08-02T12:00:00.000Z');
+      const { id: capId } = await publish({
+        title: 'Cap Doc',
+        ownerEmail: 'owner@example.com',
+      });
+      const row = await store.getRelic(capId);
+      if (row) {
+        await store.putRelic({ ...row, mintsUsed: app.config.downloadCap });
+      }
+      sentMails = [];
+
+      const session2 = await createSession('reader2@example.com');
+      await app.fetch(
+        req(`/api/relics/${capId}/comments`, {
+          method: 'POST',
+          headers: { cookie: session2 },
+          body: JSON.stringify({ ciphertext: 'Y2Fw' }),
+        })
+      );
+      expect(sentMails).toHaveLength(0);
+
+      // 3. Tombstoned relic
+      const { id: tombId } = await publish({
+        title: 'Tombstone Doc',
+        ownerEmail: 'owner@example.com',
+      });
+      await app.fetch(
+        req(`/api/relics/${tombId}?reason=abuse`, {
+          method: 'DELETE',
+          headers: { authorization: 'Bearer operator-secret' },
+        })
+      );
+      sentMails = [];
+
+      const session3 = await createSession('reader3@example.com');
+      const tombRes = await app.fetch(
+        req(`/api/relics/${tombId}/comments`, {
+          method: 'POST',
+          headers: { cookie: session3 },
+          body: JSON.stringify({ ciphertext: 'dG9tYg' }),
+        })
+      );
+      expect(tombRes.status).toBe(410);
+      expect(sentMails).toHaveLength(0);
+    });
+
+    test('30+ recipients go out via one batch call (or bounded concurrency) and the POST still answers 201', async () => {
+      const { id, grant } = await publish({
+        title: 'Wide Audience',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Share with 35 recipients (20 in call 1, 15 in call 2)
+      const list1 = Array.from(
+        { length: 20 },
+        (_, i) => `user${i + 1}@example.com`
+      );
+      const list2 = Array.from(
+        { length: 15 },
+        (_, i) => `user${i + 21}@example.com`
+      );
+
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({ publish_token: token, emails: list1 }),
+        })
+      );
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({ publish_token: token, emails: list2 }),
+        })
+      );
+
+      const batchCalls: Array<
+        readonly { email: string; mail: OutboundMail }[]
+      > = [];
+      const batchMailer: Mailer = {
+        async send(email, link) {
+          sentMails.push({
+            email,
+            mail: { subject: 'link', text: link, html: link },
+          });
+        },
+        async sendMail(email, mail) {
+          sentMails.push({ email, mail });
+        },
+        async sendBatch(items) {
+          batchCalls.push(items);
+          for (const item of items) {
+            sentMails.push(item);
+          }
+        },
+      };
+
+      const batchApp = build({ mailer: batchMailer });
+
+      // Alice comments
+      const aliceSession = await createSession('alice@example.com');
+      const commentRes = await batchApp.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YmF0Y2hjb21tZW50' }),
+        })
+      );
+
+      expect(commentRes.status).toBe(201);
+      const jsonBody = (await commentRes.json()) as {
+        comment_id: string;
+        author: string;
+      };
+      expect(jsonBody.author).toBe('alice@example.com');
+
+      // All 35 shared users + 1 owner = 36 recipients go out in exactly 1 batch call
+      expect(batchCalls).toHaveLength(1);
+      expect(batchCalls[0]).toHaveLength(36);
+    });
+
+    test('edits and resolutions send nothing', async () => {
+      const { id, grant } = await publish({
+        title: 'Spec Review',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Alice comments (C1)
+      const aliceSession = await createSession('alice@example.com');
+      const commentRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'b3JpZ2luYWw' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+      const { comment_id: cId } = (await commentRes.json()) as {
+        comment_id: string;
+      };
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Alice edits her comment
+      const editRes = await app.fetch(
+        req(`/api/relics/${id}/comments/${cId}`, {
+          method: 'PATCH',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'ZWRpdGVk' }),
+        })
+      );
+      expect(editRes.status).toBe(200);
+      expect(sentMails).toHaveLength(0);
+
+      // Publisher resolves comment
+      const resolveRes = await app.fetch(
+        req(`/api/relics/${id}/comments/${cId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            publish_token: token,
+            resolved: true,
+          }),
+        })
+      );
+      expect(resolveRes.status).toBe(200);
+      expect(sentMails).toHaveLength(0);
+    });
+    test('with no mailer configured, a comment consumes no limiter credit', async () => {
+      const sharedLimiter = new RateLimiter();
+      const { id } = await publish({
+        title: 'Doc with owner',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const unconfiguredApp = build({
+        mailer: undefined,
+        limiter: sharedLimiter,
+      });
+      const aliceSession = await createSession('alice@example.com');
+
+      const commentRes = await unconfiguredApp.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'dGVzdA' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+
+      const verdict = sharedLimiter.check(
+        `notify ${id} owner@example.com`,
+        { limit: 1, windowSeconds: 600 },
+        now
+      );
+      expect(verdict.allowed).toBe(true);
+    });
+    test('interleaving: tombstone or opt-out between preparation and dispatch spends no limiter or fuse credits', async () => {
+      const sharedLimiter = new RateLimiter();
+      const { id } = await publish({
+        title: 'Doc with owner',
+        ownerEmail: 'owner@example.com',
+      });
+
+      let tombstoneChecks = 0;
+      const origGetTombstone = store.getTombstone.bind(store);
+      store.getTombstone = async (relicId) => {
+        tombstoneChecks++;
+        if (tombstoneChecks > 2) {
+          return {
+            id: relicId,
+            publishIp: '198.51.100.10',
+            publishedAt: now,
+            publishingClient: 'test',
+            rendererClass: 'html',
+            ciphertextHash: 'hash',
+            deletedAt: now,
+            operator: 'admin',
+            reasonClass: 'operator_error',
+            reportReference: undefined,
+          };
+        }
+        return origGetTombstone(relicId);
+      };
+
+      const customApp = build({
+        limiter: sharedLimiter,
+      });
+      const aliceSession = await createSession('alice@example.com');
+
+      const commentRes = await customApp.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'dGVzdA' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+      expect(sentMails).toHaveLength(0);
+
+      const recipientVerdict = sharedLimiter.check(
+        `notify ${id} owner@example.com`,
+        { limit: 1, windowSeconds: 600 },
+        now
+      );
+      expect(recipientVerdict.allowed).toBe(true);
+
+      const fuseVerdict = sharedLimiter.check(
+        'change-notice',
+        { limit: 1, windowSeconds: 600 },
+        now
+      );
+      expect(fuseVerdict.allowed).toBe(true);
+    });
+
+    test('batch failure logs log only controlled fields and never provider message text containing other or non-ASCII addresses', async () => {
+      const { id } = await publish({
+        title: 'SecretDoc',
+        ownerEmail: 'owner-secret@example.com',
+      });
+
+      const loggedErrors: string[] = [];
+      const origError = console.error;
+      console.error = (...args: unknown[]) => {
+        loggedErrors.push(args.map(String).join(' '));
+      };
+
+      try {
+        const error = new MailRefusedError(
+          403,
+          'validation_error',
+          'invalid recipient josé@example.com'
+        );
+
+        const failingBatchMailer: Mailer = {
+          async send() {},
+          async sendMail() {},
+          async sendBatch() {
+            throw error;
+          },
+        };
+
+        const batchApp = build({ mailer: failingBatchMailer });
+        const session = await createSession('commenter@example.com');
+        await batchApp.fetch(
+          req(`/api/relics/${id}/comments`, {
+            method: 'POST',
+            headers: { cookie: session },
+            body: JSON.stringify({ ciphertext: 'dGVzdA' }),
+          })
+        );
+
+        expect(loggedErrors.length).toBeGreaterThan(0);
+        const combinedLog = loggedErrors.join('\n');
+        expect(combinedLog).not.toContain('josé@example.com');
+        expect(combinedLog).not.toContain('invalid recipient');
+        expect(combinedLog).toContain('403');
+        expect(combinedLog).toContain('validation_error');
+        const ownerHash = await sha256Hex('owner-secret@example.com');
+        expect(combinedLog).toContain(ownerHash);
+      } finally {
+        console.error = origError;
+      }
+    });
+    test('a mint reaching the download cap between comment read and dispatch suppresses notification dispatch', async () => {
+      const { id } = await publish({
+        title: 'Capped Relic',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const existingRow = await store.getRelic(id);
+      expect(existingRow).toBeDefined();
+      if (existingRow) {
+        await store.putRelic({
+          ...existingRow,
+          mintsUsed: app.config.downloadCap - 1,
+        });
+      }
+
+      const origPutComment = store.putComment.bind(store);
+      store.putComment = async (cRow) => {
+        await origPutComment(cRow);
+        await store.consumeMint(id);
+      };
+
+      const session = await createSession('commenter@example.com');
+      const commentRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: session },
+          body: JSON.stringify({ ciphertext: 'dGVzdA' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+
+      expect(sentMails).toHaveLength(0);
+    });
+    test('a fan-out after N comments by few authors performs no full-thread read', async () => {
+      const { id } = await publish({
+        title: 'Roadmap with many comments',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const aliceSession = await createSession('alice@example.com');
+      const bobSession = await createSession('bob@example.com');
+
+      for (let i = 0; i < 5; i++) {
+        await app.fetch(
+          req(`/api/relics/${id}/comments`, {
+            method: 'POST',
+            headers: { cookie: aliceSession },
+            body: JSON.stringify({ ciphertext: `YWxpY2Ut${i}` }),
+          })
+        );
+        await app.fetch(
+          req(`/api/relics/${id}/comments`, {
+            method: 'POST',
+            headers: { cookie: bobSession },
+            body: JSON.stringify({ ciphertext: `Ym9iLSR{i}` }),
+          })
+        );
+      }
+
+      let listCommentsCalls = 0;
+      const origListComments = store.listComments.bind(store);
+      store.listComments = async (rId) => {
+        listCommentsCalls++;
+        return origListComments(rId);
+      };
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      const res = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2UtbmV3' }),
+        })
+      );
+      expect(res.status).toBe(201);
+
+      expect(listCommentsCalls).toBe(0);
+    });
+    test('a deleted-last-comment author stops receiving comment notifications', async () => {
+      const { id } = await publish({
+        title: 'Roadmap with deletions',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const aliceSession = await createSession('alice@example.com');
+      const bobSession = await createSession('bob@example.com');
+
+      const commentRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2UtMQ' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+      const { comment_id: commentId } = (await commentRes.json()) as {
+        comment_id: string;
+      };
+
+      const delRes = await app.fetch(
+        req(`/api/relics/${id}/comments/${commentId}`, {
+          method: 'DELETE',
+          headers: { cookie: aliceSession },
+        })
+      );
+      expect(delRes.status).toBe(204);
+
+      const commenters = await store.listCommenters(id);
+      expect(commenters).not.toContain('alice@example.com');
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      const bobRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: bobSession },
+          body: JSON.stringify({ ciphertext: 'Ym9iLTE' }),
+        })
+      );
+      expect(bobRes.status).toBe(201);
+
+      const recipients = sentMails.map((m) => m.email);
+      expect(recipients).toContain('owner@example.com');
+      expect(recipients).not.toContain('alice@example.com');
     });
   });
 });
