@@ -72,6 +72,28 @@ export interface RelicRow {
    */
   ownerEmail?: string | undefined;
   cover?: RelicCover | undefined;
+  /**
+   * True from a republish that asked for change notices (the default) until
+   * claimVersionNotice consumes it. Absent on version 1, legacy rows, and after notify: false.
+   */
+  readonly noticePending?: boolean | undefined;
+  /** SHA-256 of the share proof, lowercase hex. Optional, registered on publish or republish. */
+  readonly shareVerifier?: string | undefined;
+}
+
+export interface ShareRow {
+  readonly relicId: string;
+  /** trimmed, lowercased */
+  readonly email: string;
+  readonly addedAt: number;
+  readonly sharedBy: 'publisher' | 'reader';
+}
+
+export interface OptOutRow {
+  readonly relicId: string;
+  /** sha256 hex of the normalized address */
+  readonly addressHash: string;
+  readonly at: number;
 }
 
 export interface Tombstone {
@@ -307,8 +329,21 @@ export interface RelicStore {
     rendererClass: RendererClass,
     declaredSizeBytes: number,
     titleUpdate?: { readonly title: string | undefined },
-    ownerUpdate?: { readonly ownerEmail: string | undefined }
+    ownerUpdate?: { readonly ownerEmail: string | undefined },
+    noticePending?: boolean,
+    shareVerifierUpdate?: { readonly shareVerifier: string }
   ): Promise<RelicRow | undefined>;
+  claimVersionNotice(
+    id: string,
+    version: number
+  ): Promise<RelicRow | undefined>;
+  putShare(row: ShareRow): Promise<boolean>;
+  listShares(relicId: string): Promise<readonly ShareRow[]>;
+  deleteSharesForRelic(relicId: string): Promise<number>;
+  putOptOut(row: OptOutRow): Promise<void>;
+  listOptOuts(relicId: string): Promise<readonly string[]>;
+  deleteOptOutsForRelic(relicId: string): Promise<number>;
+  unsubscribeKey(): Promise<Uint8Array>;
 
   getTombstone(id: string): Promise<Tombstone | undefined>;
   putTombstone(stone: Tombstone): Promise<void>;
@@ -387,6 +422,9 @@ export class MemoryStore implements RelicStore {
     string,
     Map<string, { bytes: Uint8Array; type: CoverType }>
   >();
+  private readonly shares = new Map<string, Map<string, ShareRow>>();
+  private readonly optOuts = new Map<string, Map<string, OptOutRow>>();
+  private unsubscribeSecret: Uint8Array | undefined;
 
   async getRelic(id: string): Promise<RelicRow | undefined> {
     return this.relics.get(id);
@@ -397,15 +435,22 @@ export class MemoryStore implements RelicStore {
     rendererClass: RendererClass,
     declaredSizeBytes: number,
     titleUpdate?: { readonly title: string | undefined },
-    ownerUpdate?: { readonly ownerEmail: string | undefined }
+    ownerUpdate?: { readonly ownerEmail: string | undefined },
+    noticePending?: boolean,
+    shareVerifierUpdate?: { readonly shareVerifier: string }
   ): Promise<RelicRow | undefined> {
     const row = this.relics.get(id);
     if (row === undefined) return undefined;
     const nextTitle = titleUpdate !== undefined ? titleUpdate.title : row.title;
     const nextOwnerEmail =
       ownerUpdate !== undefined ? ownerUpdate.ownerEmail : row.ownerEmail;
+    const nextShareVerifier =
+      shareVerifierUpdate !== undefined
+        ? shareVerifierUpdate.shareVerifier
+        : row.shareVerifier;
+    const { noticePending: _priorPending, ...restRow } = row;
     const next: RelicRow = {
-      ...row,
+      ...restRow,
       version: row.version + 1,
       rendererClass,
       declaredSizeBytes,
@@ -415,9 +460,83 @@ export class MemoryStore implements RelicStore {
       cover: undefined,
       title: nextTitle,
       ownerEmail: nextOwnerEmail,
+      shareVerifier: nextShareVerifier,
+      ...(noticePending === true ? { noticePending: true } : {}),
     };
     this.relics.set(id, next);
     return next;
+  }
+
+  async claimVersionNotice(
+    id: string,
+    version: number
+  ): Promise<RelicRow | undefined> {
+    const row = this.relics.get(id);
+    if (row === undefined) return undefined;
+    if (row.version !== version || row.noticePending !== true) return undefined;
+    const { noticePending: _pending, ...restRow } = row;
+    const next: RelicRow = {
+      ...restRow,
+    };
+    this.relics.set(id, next);
+    return next;
+  }
+
+  async putShare(row: ShareRow): Promise<boolean> {
+    let map = this.shares.get(row.relicId);
+    if (map === undefined) {
+      map = new Map();
+      this.shares.set(row.relicId, map);
+    }
+    if (map.has(row.email)) return false;
+    map.set(row.email, row);
+    return true;
+  }
+
+  async listShares(relicId: string): Promise<readonly ShareRow[]> {
+    const map = this.shares.get(relicId);
+    if (map === undefined) return [];
+    return [...map.values()].sort(
+      (a, b) => a.addedAt - b.addedAt || a.email.localeCompare(b.email)
+    );
+  }
+
+  async deleteSharesForRelic(relicId: string): Promise<number> {
+    const count = this.shares.get(relicId)?.size ?? 0;
+    this.shares.delete(relicId);
+    return count;
+  }
+
+  async putOptOut(row: OptOutRow): Promise<void> {
+    let map = this.optOuts.get(row.relicId);
+    if (map === undefined) {
+      map = new Map();
+      this.optOuts.set(row.relicId, map);
+    }
+    if (!map.has(row.addressHash)) {
+      map.set(row.addressHash, row);
+    }
+  }
+
+  async listOptOuts(relicId: string): Promise<readonly string[]> {
+    const map = this.optOuts.get(relicId);
+    if (map === undefined) return [];
+    return [...map.keys()];
+  }
+
+  async deleteOptOutsForRelic(relicId: string): Promise<number> {
+    const count = this.optOuts.get(relicId)?.size ?? 0;
+    this.optOuts.delete(relicId);
+    return count;
+  }
+
+  async unsubscribeKey(): Promise<Uint8Array> {
+    if (this.unsubscribeSecret === undefined) {
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      this.unsubscribeSecret = bytes;
+    }
+    return new Uint8Array(this.unsubscribeSecret);
   }
 
   async putRelic(row: RelicRow): Promise<void> {

@@ -31,10 +31,12 @@ import {
   type CommentRow,
   type DedupEntry,
   type MintLogEntry,
+  type OptOutRow,
   type RelicCover,
   type RelicRow,
   type RelicStore,
   type SessionRow,
+  type ShareRow,
   type Tombstone,
 } from './store.ts';
 
@@ -397,21 +399,58 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
       rendererClass: RendererClass,
       declaredSizeBytes: number,
       titleUpdate?: { readonly title: string | undefined },
-      ownerUpdate?: { readonly ownerEmail: string | undefined }
+      ownerUpdate?: { readonly ownerEmail: string | undefined },
+      noticePending?: boolean,
+      shareVerifierUpdate?: { readonly shareVerifier: string }
     ): Promise<RelicRow | undefined> {
-      return mutateRelic(id, (row) => ({
-        ...row,
-        version: row.version + 1,
-        rendererClass,
-        declaredSizeBytes,
-        publishedAt: undefined,
-        objectLength: undefined,
-        objectCrc32c: undefined,
-        cover: undefined,
-        title: titleUpdate !== undefined ? titleUpdate.title : row.title,
-        ownerEmail:
-          ownerUpdate !== undefined ? ownerUpdate.ownerEmail : row.ownerEmail,
-      }));
+      return mutateRelic(id, (row) => {
+        const { noticePending: _priorPending, ...restRow } = row;
+        return {
+          ...restRow,
+          version: row.version + 1,
+          rendererClass,
+          declaredSizeBytes,
+          publishedAt: undefined,
+          objectLength: undefined,
+          objectCrc32c: undefined,
+          cover: undefined,
+          title: titleUpdate !== undefined ? titleUpdate.title : row.title,
+          ownerEmail:
+            ownerUpdate !== undefined ? ownerUpdate.ownerEmail : row.ownerEmail,
+          shareVerifier:
+            shareVerifierUpdate !== undefined
+              ? shareVerifierUpdate.shareVerifier
+              : row.shareVerifier,
+          ...(noticePending === true ? { noticePending: true } : {}),
+        };
+      });
+    },
+
+    async claimVersionNotice(
+      id: string,
+      version: number
+    ): Promise<RelicRow | undefined> {
+      const rowName = key('relic', `${id}.json`);
+      for (let attempt = 0; attempt < casAttempts; attempt++) {
+        const current = await get<RelicRow>(rowName);
+        if (current === undefined) return undefined;
+        if (
+          current.value.version !== version ||
+          current.value.noticePending !== true
+        ) {
+          return undefined;
+        }
+        const { noticePending: _pending, ...restRow } = current.value;
+        const next: RelicRow = {
+          ...restRow,
+        };
+        if (await put(rowName, next, current.generation)) {
+          return next;
+        }
+      }
+      throw new Error(
+        `gcs relic ${id} lost ${casAttempts} compare-and-swap races; refusing to claim version notice`
+      );
     },
 
     /**
@@ -601,6 +640,11 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
       for (const row of rows) {
         await remove(key('comment', relicId, `${row.id}.json`));
       }
+      const authors = new Set(rows.map((row) => row.author));
+      for (const author of authors) {
+        const authorKey = await sha256Hex(author);
+        await remove(key('author_relic', authorKey, `${relicId}.json`));
+      }
       return rows.length;
     },
 
@@ -669,6 +713,81 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
         key('verified_identity', `${emailKey}.json`)
       );
       return res !== undefined;
+    },
+
+    async putShare(row: ShareRow): Promise<boolean> {
+      const emailHash = await sha256Hex(row.email);
+      const name = key('share', row.relicId, `${emailHash}.json`);
+      return put(name, row, '0');
+    },
+
+    async listShares(relicId: string): Promise<readonly ShareRow[]> {
+      const rows = await list<ShareRow>(`${key('share', relicId)}/`);
+      return [...rows].sort(
+        (a, b) => a.addedAt - b.addedAt || a.email.localeCompare(b.email)
+      );
+    },
+
+    async deleteSharesForRelic(relicId: string): Promise<number> {
+      const prefixUnder = `${key('share', relicId)}/`;
+      const names = await listObjectNames(prefixUnder);
+      for (const name of names) {
+        await remove(name);
+      }
+      return names.length;
+    },
+
+    async putOptOut(row: OptOutRow): Promise<void> {
+      const name = key('optout', row.relicId, `${row.addressHash}.json`);
+      await put(name, row, '0');
+    },
+
+    async listOptOuts(relicId: string): Promise<readonly string[]> {
+      const prefixUnder = `${key('optout', relicId)}/`;
+      const names = await listObjectNames(prefixUnder);
+      return names.map((name) => {
+        const file = name.slice(prefixUnder.length);
+        return file.endsWith('.json') ? file.slice(0, -5) : file;
+      });
+    },
+
+    async deleteOptOutsForRelic(relicId: string): Promise<number> {
+      const prefixUnder = `${key('optout', relicId)}/`;
+      const names = await listObjectNames(prefixUnder);
+      for (const name of names) {
+        await remove(name);
+      }
+      return names.length;
+    },
+
+    async unsubscribeKey(): Promise<Uint8Array> {
+      const secretName = key('secret', 'unsubscribe-key.json');
+      const existing = await get<{ key: string; createdAt: number }>(
+        secretName
+      );
+      if (existing !== undefined) {
+        return new Uint8Array(Buffer.from(existing.value.key, 'base64url'));
+      }
+      const random = new Uint8Array(32);
+      crypto.getRandomValues(random);
+      const encoded = Buffer.from(random).toString('base64url');
+      const stored = await put(
+        secretName,
+        { key: encoded, createdAt: Date.now() },
+        '0'
+      );
+      if (stored) {
+        return random;
+      }
+      const readBack = await get<{ key: string; createdAt: number }>(
+        secretName
+      );
+      if (readBack === undefined) {
+        throw new Error(
+          'gcs unsubscribe key could not be written or read back'
+        );
+      }
+      return new Uint8Array(Buffer.from(readBack.value.key, 'base64url'));
     },
   };
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { sha256Hex } from '../src/gcs.ts';
 import { gcsStore } from '../src/gcsstore.ts';
 import type { RelicRow } from '../src/store.ts';
 
@@ -927,6 +928,205 @@ describe('gcsStore', () => {
       expect(v2?.version).toBe(2);
       expect(v2?.cover).toBeUndefined();
       expect((await store.getRelic('r4'))?.cover).toBeUndefined();
+    });
+  });
+
+  test('deleteCommentsForRelic removes the author_relic entries', async () => {
+    const store = storeOn(fakeGcs());
+    await store.putComment({
+      id: 'c1',
+      relicId: 'r1',
+      author: 'reader@example.com',
+      createdAt: 1000,
+      ciphertext: 'YWJjZA',
+    });
+    await store.putComment({
+      id: 'c2',
+      relicId: 'r2',
+      author: 'reader@example.com',
+      createdAt: 2000,
+      ciphertext: 'YWJjZA',
+    });
+
+    const before = await store.listCommentedRelics('reader@example.com');
+    expect(before).toHaveLength(2);
+
+    await store.deleteCommentsForRelic('r1');
+
+    const after = await store.listCommentedRelics('reader@example.com');
+    expect(after).toEqual([{ relicId: 'r2', lastCommentAt: 2000 }]);
+  });
+
+  describe('change notices, sharing, and opt-outs', () => {
+    test('putShare is create-only, and the object key is a sha256, not the address', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      const email = 'alice@example.com';
+      const emailHash = await sha256Hex(email);
+
+      const first = await store.putShare({
+        relicId: 'r1',
+        email,
+        addedAt: 1000,
+        sharedBy: 'publisher',
+      });
+      expect(first).toBe(true);
+
+      const expectedKey = `m/share/r1/${emailHash}.json`;
+      expect(gcs.objects.has(expectedKey)).toBe(true);
+      for (const key of gcs.objects.keys()) {
+        expect(key).not.toContain(email);
+      }
+
+      const second = await store.putShare({
+        relicId: 'r1',
+        email,
+        addedAt: 2000,
+        sharedBy: 'reader',
+      });
+      expect(second).toBe(false);
+      const rawStored = gcs.objects.get(expectedKey);
+      expect(rawStored).toBeDefined();
+      const stored = JSON.parse(rawStored?.body ?? '{}');
+      expect(stored.addedAt).toBe(1000);
+      expect(stored.sharedBy).toBe('publisher');
+    });
+
+    test('listShares and deleteSharesForRelic work', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      await store.putShare({
+        relicId: 'r1',
+        email: 'bob@example.com',
+        addedAt: 2000,
+        sharedBy: 'reader',
+      });
+      await store.putShare({
+        relicId: 'r1',
+        email: 'alice@example.com',
+        addedAt: 1000,
+        sharedBy: 'publisher',
+      });
+
+      const shares = await store.listShares('r1');
+      expect(shares).toEqual([
+        {
+          relicId: 'r1',
+          email: 'alice@example.com',
+          addedAt: 1000,
+          sharedBy: 'publisher',
+        },
+        {
+          relicId: 'r1',
+          email: 'bob@example.com',
+          addedAt: 2000,
+          sharedBy: 'reader',
+        },
+      ]);
+
+      const deleted = await store.deleteSharesForRelic('r1');
+      expect(deleted).toBe(2);
+      expect(await store.listShares('r1')).toEqual([]);
+    });
+
+    test('putOptOut keeps the first record; listOptOuts reads names only; deleteOptOutsForRelic works', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      await store.putOptOut({ relicId: 'r1', addressHash: 'hash1', at: 1000 });
+      await store.putOptOut({ relicId: 'r1', addressHash: 'hash1', at: 2000 });
+      const rawOptOut = gcs.objects.get('m/optout/r1/hash1.json');
+      expect(rawOptOut).toBeDefined();
+      const stored = JSON.parse(rawOptOut?.body ?? '{}');
+      expect(stored.at).toBe(1000);
+      await store.putOptOut({ relicId: 'r1', addressHash: 'hash2', at: 3000 });
+      const optOuts = await store.listOptOuts('r1');
+      expect([...optOuts].sort()).toEqual(['hash1', 'hash2']);
+
+      const deleted = await store.deleteOptOutsForRelic('r1');
+      expect(deleted).toBe(2);
+      expect(await store.listOptOuts('r1')).toEqual([]);
+    });
+
+    test('claimVersionNotice: claims once, returns undefined on a version mismatch, retries a lost race, and throws under hopeless contention', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      const r = row({ id: 'r1', version: 2, noticePending: true });
+      await store.putRelic(r);
+
+      expect(await store.claimVersionNotice('r1', 1)).toBeUndefined();
+      expect((await store.getRelic('r1'))?.noticePending).toBe(true);
+
+      const claimed = await store.claimVersionNotice('r1', 2);
+      expect(claimed?.version).toBe(2);
+      expect(claimed?.noticePending).toBeUndefined();
+      expect((await store.getRelic('r1'))?.noticePending).toBeUndefined();
+
+      expect(await store.claimVersionNotice('r1', 2)).toBeUndefined();
+
+      await store.putRelic(row({ id: 'r2', version: 3, noticePending: true }));
+      gcs.contendOn('m/relic/r2.json', 1);
+      const claimedAfterRace = await store.claimVersionNotice('r2', 3);
+      expect(claimedAfterRace?.version).toBe(3);
+      expect(claimedAfterRace?.noticePending).toBeUndefined();
+
+      await store.putRelic(row({ id: 'r3', version: 4, noticePending: true }));
+      gcs.contendOn('m/relic/r3.json', -1);
+      await expect(store.claimVersionNotice('r3', 4)).rejects.toThrow(
+        'lost 5 compare-and-swap races'
+      );
+    });
+
+    test('beginVersion sets and clears noticePending, and a legacy row without the key reads back as undefined', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      await store.putRelic(row({ id: 'r1', version: 1 }));
+
+      const v2 = await store.beginVersion(
+        'r1',
+        'code',
+        100,
+        undefined,
+        undefined,
+        true
+      );
+      expect(v2?.noticePending).toBe(true);
+      expect((await store.getRelic('r1'))?.noticePending).toBe(true);
+
+      const v3 = await store.beginVersion(
+        'r1',
+        'code',
+        100,
+        undefined,
+        undefined,
+        false
+      );
+      expect(v3?.noticePending).toBeUndefined();
+      expect((await store.getRelic('r1'))?.noticePending).toBeUndefined();
+
+      const legacyRow = row({ id: 'legacy', version: 1 });
+      const { noticePending: _p, ...withoutPending } = legacyRow;
+      gcs.objects.set('m/relic/legacy.json', {
+        body: JSON.stringify(withoutPending),
+        generation: 1,
+      });
+      const readLegacy = await store.getRelic('legacy');
+      expect(readLegacy?.noticePending).toBeUndefined();
+    });
+
+    test('unsubscribeKey returns the same bytes from two stores on one bucket, and the second store never overwrites it', async () => {
+      const gcs = fakeGcs();
+      const store1 = storeOn(gcs);
+      const store2 = storeOn(gcs);
+
+      const key1 = await store1.unsubscribeKey();
+      expect(key1.byteLength).toBe(32);
+
+      const key2 = await store2.unsubscribeKey();
+      expect(key2).toEqual(key1);
+
+      const storedSecret = gcs.objects.get('m/secret/unsubscribe-key.json');
+      expect(storedSecret).toBeDefined();
+      expect(storedSecret?.generation).toBe(1);
     });
   });
 });

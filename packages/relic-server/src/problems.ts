@@ -55,7 +55,13 @@ export type ProblemCode =
   | 'invalid_session'
   | 'auth_rate_limited'
   | 'invalid_cover'
-  | 'cover_version_stale';
+  | 'cover_version_stale'
+  | 'share_rate_limited'
+  | 'invalid_share'
+  | 'share_limit_reached'
+  | 'share_unavailable'
+  | 'invalid_share_proof'
+  | 'sign_in_required';
 
 const STATUS: Readonly<Record<ProblemCode, number>> = {
   relic_not_found: 404,
@@ -83,6 +89,12 @@ const STATUS: Readonly<Record<ProblemCode, number>> = {
   auth_rate_limited: 429,
   invalid_cover: 400,
   cover_version_stale: 409,
+  share_rate_limited: 429,
+  invalid_share: 400,
+  share_limit_reached: 409,
+  share_unavailable: 409,
+  invalid_share_proof: 403,
+  sign_in_required: 401,
 };
 
 /** `title` SHOULD NOT change from occurrence to occurrence, per RFC 9457. */
@@ -112,6 +124,12 @@ const TITLE: Readonly<Record<ProblemCode, string>> = {
   auth_rate_limited: 'Too many sign-in requests',
   invalid_cover: 'Invalid cover image',
   cover_version_stale: 'Cover is for a version that is no longer current',
+  share_rate_limited: 'Too many share requests',
+  invalid_share: 'Invalid share request',
+  share_limit_reached: 'Share list is full',
+  share_unavailable: 'Share unavailable',
+  invalid_share_proof: 'Invalid share proof',
+  sign_in_required: 'Sign-in required',
 };
 
 export interface ProblemExtensions {
@@ -126,6 +144,9 @@ export interface ProblemExtensions {
   readonly comment_id?: string;
   readonly cover_validation_failure?: CoverValidationFailure;
   readonly current_version?: number;
+  readonly share_limit?: number;
+  readonly shared_count?: number;
+  readonly share_max_per_call?: number;
 }
 
 export interface ProblemOptions extends ProblemExtensions {
