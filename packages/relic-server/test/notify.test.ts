@@ -10,9 +10,10 @@ import {
 import { createApp, type Mailer, type RelicApp } from '../src/app.ts';
 import { sha256Hex } from '../src/gcs.ts';
 import { MailRefusedError, type OutboundMail } from '../src/mail.ts';
+import { RateLimiter } from '../src/ratelimit.ts';
 import { MemoryStorage } from '../src/storage.ts';
 import { MemoryStore } from '../src/store.ts';
-import { RateLimiter } from '../src/ratelimit.ts';
+
 const OPERATOR = new Map([['jason', 'operator-secret']]);
 
 let now = Date.parse('2026-08-02T12:00:00.000Z');
@@ -2391,6 +2392,101 @@ describe('change notices and relic_share', () => {
       expect(commentRes.status).toBe(201);
 
       expect(sentMails).toHaveLength(0);
+    });
+    test('a fan-out after N comments by few authors performs no full-thread read', async () => {
+      const { id } = await publish({
+        title: 'Roadmap with many comments',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const aliceSession = await createSession('alice@example.com');
+      const bobSession = await createSession('bob@example.com');
+
+      for (let i = 0; i < 5; i++) {
+        await app.fetch(
+          req(`/api/relics/${id}/comments`, {
+            method: 'POST',
+            headers: { cookie: aliceSession },
+            body: JSON.stringify({ ciphertext: `YWxpY2Ut${i}` }),
+          })
+        );
+        await app.fetch(
+          req(`/api/relics/${id}/comments`, {
+            method: 'POST',
+            headers: { cookie: bobSession },
+            body: JSON.stringify({ ciphertext: `Ym9iLSR{i}` }),
+          })
+        );
+      }
+
+      let listCommentsCalls = 0;
+      const origListComments = store.listComments.bind(store);
+      store.listComments = async (rId) => {
+        listCommentsCalls++;
+        return origListComments(rId);
+      };
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      const res = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2UtbmV3' }),
+        })
+      );
+      expect(res.status).toBe(201);
+
+      expect(listCommentsCalls).toBe(0);
+    });
+    test('a deleted-last-comment author stops receiving comment notifications', async () => {
+      const { id } = await publish({
+        title: 'Roadmap with deletions',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const aliceSession = await createSession('alice@example.com');
+      const bobSession = await createSession('bob@example.com');
+
+      const commentRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2UtMQ' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+      const { comment_id: commentId } = (await commentRes.json()) as {
+        comment_id: string;
+      };
+
+      const delRes = await app.fetch(
+        req(`/api/relics/${id}/comments/${commentId}`, {
+          method: 'DELETE',
+          headers: { cookie: aliceSession },
+        })
+      );
+      expect(delRes.status).toBe(204);
+
+      const commenters = await store.listCommenters(id);
+      expect(commenters).not.toContain('alice@example.com');
+
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      const bobRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: bobSession },
+          body: JSON.stringify({ ciphertext: 'Ym9iLTE' }),
+        })
+      );
+      expect(bobRes.status).toBe(201);
+
+      const recipients = sentMails.map((m) => m.email);
+      expect(recipients).toContain('owner@example.com');
+      expect(recipients).not.toContain('alice@example.com');
     });
   });
 });

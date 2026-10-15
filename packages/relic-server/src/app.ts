@@ -108,8 +108,8 @@ export interface AppOptions {
   /** Where the viewer shell's static files come from. */
   readonly assets?: AssetSource;
   /** Where a magic link goes. Defaults to sending nothing at all. */
-  readonly mailer?: Mailer;
-  readonly limiter?: RateLimiter;
+  readonly mailer?: Mailer | undefined;
+  readonly limiter?: RateLimiter | undefined;
 }
 
 export interface RelicApp {
@@ -119,7 +119,6 @@ export interface RelicApp {
   readonly limiter: RateLimiter;
   fetch(request: Request): Promise<Response>;
 }
-
 
 export function createApp(options: AppOptions = {}): RelicApp {
   const config: RelicConfig = { ...DEFAULT_CONFIG, ...options.config };
@@ -1509,9 +1508,18 @@ export function createApp(options: AppOptions = {}): RelicApp {
       console.error(`relic: ${noticeKind} mailer unavailable`);
       return;
     }
+    const fuseCheck = limiter.peek(
+      'change-notice',
+      config.changeNoticeRateLimit,
+      now
+    );
+    if (!fuseCheck.allowed) {
+      console.error('relic: change notice rate limit reached');
+      return;
+    }
 
-    const [comments, shares, optOuts, unsubKey] = await Promise.all([
-      store.listComments(relicId),
+    const [commenters, shares, optOuts, unsubKey] = await Promise.all([
+      store.listCommenters(relicId),
       store.listShares(relicId),
       store.listOptOuts(relicId),
       store.unsubscribeKey(),
@@ -1534,11 +1542,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
 
     const recipients = new Map<string, RecipientMeta>();
 
-    for (const comment of comments) {
-      if (comment.author !== 'publisher' && looksLikeEmail(comment.author)) {
-        const addr = comment.author.trim().toLowerCase();
-        recipients.set(addr, { reason: 'commented' });
-      }
+    for (const commenter of commenters) {
+      recipients.set(commenter, { reason: 'commented' });
     }
 
     for (const share of shares) {
@@ -1670,7 +1675,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
         if (
           dispatchRow === undefined ||
           (await store.getTombstone(relicId)) !== undefined ||
-          (dispatchRow.expiresAt !== undefined && dispatchRow.expiresAt <= now) ||
+          (dispatchRow.expiresAt !== undefined &&
+            dispatchRow.expiresAt <= now) ||
           dispatchRow.mintsUsed >= config.downloadCap
         ) {
           break;
@@ -1708,11 +1714,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
             config.notificationRateLimit,
             now
           );
-          limiter.check(
-            'change-notice',
-            config.changeNoticeRateLimit,
-            now
-          );
+          limiter.check('change-notice', config.changeNoticeRateLimit, now);
 
           activeChunk.push({
             email: item.address,
@@ -1761,7 +1763,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
         if (
           dispatchRow === undefined ||
           (await store.getTombstone(relicId)) !== undefined ||
-          (dispatchRow.expiresAt !== undefined && dispatchRow.expiresAt <= now) ||
+          (dispatchRow.expiresAt !== undefined &&
+            dispatchRow.expiresAt <= now) ||
           dispatchRow.mintsUsed >= config.downloadCap
         ) {
           break;
@@ -1791,11 +1794,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
           config.notificationRateLimit,
           now
         );
-        limiter.check(
-          'change-notice',
-          config.changeNoticeRateLimit,
-          now
-        );
+        limiter.check('change-notice', config.changeNoticeRateLimit, now);
         try {
           await mailer.sendMail(item.address, item.mail);
         } catch (error) {
@@ -1810,7 +1809,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
         if (
           dispatchRow === undefined ||
           (await store.getTombstone(relicId)) !== undefined ||
-          (dispatchRow.expiresAt !== undefined && dispatchRow.expiresAt <= now) ||
+          (dispatchRow.expiresAt !== undefined &&
+            dispatchRow.expiresAt <= now) ||
           dispatchRow.mintsUsed >= config.downloadCap
         ) {
           break;
@@ -1840,11 +1840,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
           config.notificationRateLimit,
           now
         );
-        limiter.check(
-          'change-notice',
-          config.changeNoticeRateLimit,
-          now
-        );
+        limiter.check('change-notice', config.changeNoticeRateLimit, now);
         try {
           await mailer.send(item.address, item.mail.text);
         } catch (error) {
@@ -2750,9 +2746,18 @@ export function createApp(options: AppOptions = {}): RelicApp {
     }
 
     await store.deleteComment(relicId, commentId);
+    if (author !== 'publisher' && looksLikeEmail(author)) {
+      const normalized = author.trim().toLowerCase();
+      const remaining = await store.listComments(relicId);
+      const stillCommented = remaining.some(
+        (c) => c.author.trim().toLowerCase() === normalized
+      );
+      if (!stillCommented) {
+        await store.deleteCommenter(relicId, normalized);
+      }
+    }
     return new Response(null, { status: 204 });
   }
-
   /**
    * The one thing this server can check about a comment body, for both
    * write paths. The plaintext caps live in `@relic/format` ahead of
