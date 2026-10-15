@@ -714,3 +714,52 @@ in the browser: the fill against the unplayed rail is 12.73:1 on the page
 and 11.13:1 in the fullscreen stage, and the ring against the played bar is
 6.06:1 and 6.89:1. The fill alone against the played bar is 2.82:1 and
 2.06:1, which is why the ring is there.
+
+## 2026-10-14: Change notices on republish, and addresses a publisher shares with
+
+Authorised by Jason Waldrip on 2026-10-14.
+
+**The reversal.** Relic originally sent no outbound notifications beyond optional comment alerts to a verified owner, and held no third-party email addresses. That non-goal is reversed: when a relic is republished, the service sends change notices announcing the new version to everyone who commented on the relic and every address registered via deliberate sharing, unless `notify: false` was set on republish or the recipient opted out. Sharing is supported on two surfaces: the MCP `relic_share` tool (publisher authority, publish token) and a Share action in the web viewer for any reader holding the link and key (reader authority, key-derived proof and verified sign-in).
+
+**Why the notify list is derived, not stored as a group.** There is no "team" or "subscriber group" entity. A relic's notify list is derived at send time: commenters are pulled from `listComments(relicId)`, shared addresses from `listShares(relicId)`, subtracting the normalized publisher owner address (`ownerEmail`) and addresses whose SHA-256 hash is in `listOptOuts(relicId)`. Storing a subscriber group would create group management, permissions, and team state, violating the non-goal against team features. A notify list grants no access and carries no permissions.
+
+**The trigger and the claim.** Change notices fire on the first observation of the new version's object in storage: either upon upload completion (`POST /api/relics/{id}/complete`) or during lazy discovery at the first mint (`POST /api/relics/{id}/mint`). A compare-and-swap on `noticePending` in the store (`claimVersionNotice`) guarantees notices are announced at most once per version. Notices never fire for version 1 (initial publish), never when republish carried `notify: false`, and never for expired, tombstoned, or download-cap-exhausted relics. A crash during sending drops remaining notices rather than risking duplicate sends to recipients.
+
+**The rate limits and their reasons:**
+- `shareMaxPerCall: 20`: 20 addresses per share call represents the recipient set of a single conversation or working group.
+- `shareMaxPerRelic: 50`: 50 total shares per relic sits comfortably above the 40-person list that the download cap and egress budget were priced for in `service.md` §2.3.
+- `shareRateLimit: {limit: 30, windowSeconds: 3600}`: 30 shares per IP per hour matches `commentRateLimit` for abuse posture.
+- `unsubscribeRateLimit: {limit: 60, windowSeconds: 3600}`: 60 unsubscribes per IP per hour accommodates provider one-click prefetch and automated header checks without blocking human clicks.
+- `readerShareRateLimit: {limit: 10, windowSeconds: 3600}`: 10 reader shares per session per hour bounds sharing from the web viewer to prevent automated spam loops.
+- `changeNoticeRateLimit: {limit: 300, windowSeconds: 3600}`: Resend is paid (upgraded by Jason before server deployment). This global fuse permits batch delivery while bounding spend against runaway notice storms.
+- `notificationRateLimit: {limit: 5, windowSeconds: 86400}`: Reused across comment alerts, reply notifications, and change notices per (relic, address) pair.
+
+**The stop link and rejected alternatives.** Every change notice carries an unauthenticated stop link (`/api/relics/{id}/unsubscribe?addr={64 hex}&token={base64url}`) with an HMAC-SHA256 token signed by `store.unsubscribeKey()`. Following the link allows the recipient to opt out of future change emails for this relic. Two alternatives were rejected:
+1. *Sign-in to unsubscribe:* Requiring a recipient who never signed up to complete a magic-link sign-in just to stop emails is hostile and forces further interaction with the service.
+2. *Global unsubscribe:* A global opt-out across all relics would mean opting out of one relic cancels notices from unrelated publishers across independent documents, which requires either an account preference system or uncoordinated cross-relic suppression.
+Stopping mail works even when the egress kill switch is engaged (`503 service_paused`). The unsubscribe key is generated once and stored permanently in the key vault, and must never be deleted.
+
+**RFC 8058 one-click unsubscribe.** Outbound change notice emails include `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click` headers, enabling mail user agents to offer native unsubscribe buttons without visiting the web page.
+
+**The share email is composed on the sharer's machine.** Relic never sends the share email itself. The share email is composed on the publisher's machine (via client tools) or in the web viewer, and sent from the sharer's own email client (`shareMailtoUrl`). This ensures the full relic URL with the decryption key fragment never touches the server. The server only learns the recipient addresses so it can notify them on future republishes.
+
+**Web share authority and key proof.** Authorised by Jason Waldrip on 2026-10-14. A reader holding the link and key can share from the viewer. The reader share endpoint `POST /api/relics/{id}/share` requires two gates:
+1. *Key-derived proof:* HKDF-SHA256, zero-length salt, info `relic/share-proof/v1`, 32 bytes (`deriveShareProof`). The publisher registers `share_verifier = sha256Hex(proof)` (64 lowercase hex chars) on publish or republish. The reader presents `share_proof` (base64url unpadded). The server verifies `timingSafeEqual(sha256Hex(proof), row.shareVerifier)`. If the relic predates sharing, it refuses with `409 share_unavailable`. If the proof is invalid, it refuses with `403 invalid_share_proof`.
+2. *Verified sign-in:* The reader must present an active `relic_session` cookie (reusing the session from comments). Missing session refuses with `401 sign_in_required`.
+The sharer's address is not stored on the `ShareRow` (only `sharedBy: 'publisher' | 'reader'`). Attribution is not kept beyond the in-memory rate limiter. The change notice reason reflects the source: "the person who published this relic shared it with you" for publisher shares, or "someone with this relic's link shared it with you" for reader shares.
+
+
+**Atomic share capacity reservation.** The 50-per-relic cap is enforced atomically via compare-and-swap on the relic row (`sharesCount`), counting only actual new inserts against `shareMaxPerRelic`. Concurrent share requests cannot exceed 50 total shares. Unneeded reservations (from duplicate inserts or failed writes) are released.
+
+**Immediate opt-out re-check.** Fan-out re-checks the recipient's opt-out state immediately before each individual send via a single-key store read (`isOptedOut`). Once a stop POST answers 200, no later send to that address on that relic can begin.
+
+**Idempotent delete sweep resumption.** Operator deletion of an already-tombstoned relic idempotently resumes every sweep (ciphertext, covers, comments, author index, shares, opt-outs) to completion and returns the counts of removed items. Late share or opt-out writes racing deletion are re-checked against the tombstone and purged so they cannot survive deletion.
+
+**Failure log privacy.** Notice and comment-notification failure logs never record recipient email addresses in the clear. An address hash or opaque identifier is logged instead, and mail provider error text is sanitized to redact recipient addresses.
+**Residuals:**
+- The transactional mail quota is shared between sign-in magic links and change notices.
+- Unsubscribe stops emails per relic only, not globally across the service.
+- There is no "unshare" operation: once an address is registered for a relic, only an opt-out from the recipient or relic deletion stops notices.
+- Comment reply notifications have no stop link because comments are individual conversations between verified participants.
+- Rate limits are in-memory and per Cloud Run instance (up to 4 instances), so limits apply per instance.
+- A server crash during delivery drops remaining notices rather than re-sending, avoiding duplicate emails.

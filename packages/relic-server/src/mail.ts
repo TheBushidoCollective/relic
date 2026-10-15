@@ -46,6 +46,7 @@ export interface OutboundMail {
   readonly subject: string;
   readonly text: string;
   readonly html: string;
+  readonly headers?: Readonly<Record<string, string>> | undefined;
 }
 
 /**
@@ -143,6 +144,70 @@ export function replyNotificationMail(
   ].join('');
   return { subject, text, html };
 }
+
+/**
+ * Notification sent to followers of a relic when a new version is published.
+ */
+export function changeNoticeMail(p: {
+  readonly title: string | undefined;
+  readonly version: number;
+  readonly relicUrl: string;
+  readonly stopUrl: string;
+  readonly reason:
+    | 'commented'
+    | 'shared'
+    | 'shared_by_publisher'
+    | 'shared_by_reader';
+  readonly sharedBy?: 'publisher' | 'reader' | undefined;
+}): OutboundMail {
+  const subject = p.title
+    ? `New version of "${p.title}"`
+    : 'New version of a relic';
+
+  let reasonText: string;
+  if (p.reason === 'commented') {
+    reasonText = 'you commented on this relic';
+  } else if (p.sharedBy === 'reader' || p.reason === 'shared_by_reader') {
+    reasonText = "someone with this relic's link shared it with you";
+  } else {
+    reasonText = 'the person who published this relic shared it with you';
+  }
+
+  const titleText = p.title ? `"${p.title}"` : 'A relic';
+  const text = [
+    `${titleText} has a new version: version ${p.version}.`,
+    '',
+    'Open the link you were given for this relic to read it. If you have opened the relic in this browser before, this link works too:',
+    p.relicUrl,
+    '',
+    'Relic never has the key that decrypts it, so this email cannot include it. If you no longer have your link, ask the person who shared it.',
+    '',
+    `You are getting this because ${reasonText}. To stop emails about this relic, open:`,
+    p.stopUrl,
+  ].join('\n');
+
+  const safeTitle = p.title ? `"${escapeHtml(p.title)}"` : 'A relic';
+  const safeRelicUrl = escapeHtml(p.relicUrl);
+  const safeStopUrl = escapeHtml(p.stopUrl);
+  const html = [
+    `<p>${safeTitle} has a new version: version ${p.version}.</p>`,
+    '<p>Open the link you were given for this relic to read it. If you have opened the relic in this browser before, this link works too:</p>',
+    `<p><a href="${safeRelicUrl}">${safeRelicUrl}</a></p>`,
+    '<p>Relic never has the key that decrypts it, so this email cannot include it. If you no longer have your link, ask the person who shared it.</p>',
+    `<p>You are getting this because ${escapeHtml(reasonText)}. To stop emails about this relic, open:</p>`,
+    `<p><a href="${safeStopUrl}">${safeStopUrl}</a></p>`,
+  ].join('');
+
+  return {
+    subject,
+    text,
+    html,
+    headers: {
+      'List-Unsubscribe': `<${p.stopUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    },
+  };
+}
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -217,6 +282,7 @@ export function resendMailer(options: ResendMailerOptions): Mailer {
         subject: mail.subject,
         text: mail.text,
         html: mail.html,
+        ...(mail.headers !== undefined ? { headers: mail.headers } : {}),
       }),
     });
 

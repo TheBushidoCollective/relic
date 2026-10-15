@@ -61,10 +61,42 @@ export interface RelicConfig {
   /** Sign-in requests per IP. Each one can send mail, so it is the tightest. */
   readonly authRateLimit: RateLimitConfig;
   /**
-   * Comment notification sends per recipient per relic.
+   * Notification sends per recipient per relic. Shared across comments,
+   * replies, and change notices.
    * Collapses repeats inside the window and caps outbound mail volume.
    */
   readonly notificationRateLimit: RateLimitConfig;
+  /**
+   * Share registrations per IP. Lower than publishing, bounds spamming
+   * addresses on a relic.
+   * decisions.md
+   */
+  readonly shareRateLimit: RateLimitConfig;
+  /**
+   * Share registrations per signed-in reader per relic.
+   * decisions.md
+   */
+  readonly readerShareRateLimit: RateLimitConfig;
+  /**
+   * Maximum addresses accepted in one share request.
+   * decisions.md
+   */
+  readonly shareMaxPerCall: number;
+  /**
+   * Maximum distinct addresses that can be enrolled on a relic.
+   * decisions.md
+   */
+  readonly shareMaxPerRelic: number;
+  /**
+   * Stop link clicks per IP.
+   * decisions.md
+   */
+  readonly unsubscribeRateLimit: RateLimitConfig;
+  /**
+   * Change notice emails per window across all relics.
+   * decisions.md
+   */
+  readonly changeNoticeRateLimit: RateLimitConfig;
   /**
    * The longest comment ciphertext the server will store, in base64url
    * characters. It is a transport bound, not a plaintext one: the real caps
@@ -121,6 +153,12 @@ export const DEFAULT_CONFIG: RelicConfig = {
   commentRateLimit: { limit: 30, windowSeconds: 3600 },
   authRateLimit: { limit: 10, windowSeconds: 3600 },
   notificationRateLimit: { limit: 1, windowSeconds: 10 * 60 },
+  shareRateLimit: { limit: 30, windowSeconds: 3600 },
+  readerShareRateLimit: { limit: 10, windowSeconds: 3600 },
+  shareMaxPerCall: 20,
+  shareMaxPerRelic: 50,
+  unsubscribeRateLimit: { limit: 60, windowSeconds: 3600 },
+  changeNoticeRateLimit: { limit: 300, windowSeconds: 3600 },
   // 4096 plaintext bytes plus a 64-byte name, a 12-byte nonce and a 16-byte
   // tag, JSON framing, then base64url's 4-for-3 expansion, rounded up with
   // room to spare rather than computed to the byte.
@@ -172,5 +210,8 @@ export function assertConfig(config: RelicConfig): void {
     throw new Error(
       'the usercontent origin must be a distinct host from the service origin'
     );
+  }
+  if (config.shareMaxPerCall > config.shareMaxPerRelic) {
+    throw new Error('shareMaxPerCall cannot exceed shareMaxPerRelic');
   }
 }

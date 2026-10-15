@@ -18,6 +18,7 @@ import {
   type CommentAnchor,
   deriveCommentKey,
   parseFragment,
+  shareMailtoUrl,
 } from '@relic/format';
 import { registerBuiltInAnchorAdapters } from './anchor-adapters.ts';
 import {
@@ -152,6 +153,26 @@ import {
   type Mark,
   type TreeNode,
 } from './rendered-tree.ts';
+import {
+  addressCount,
+  addressProblem,
+  type ParsedAddresses,
+  parseAddresses,
+  readerShareEmail,
+  refusalEndsSharing,
+  requestShare,
+  SHARE_CHECKING_NOTE,
+  SHARE_COPIED_NOTE,
+  SHARE_FACT_SENDING,
+  SHARE_FACT_STORING,
+  SHARE_KEY_WARNING,
+  SHARE_MAX_PER_CALL,
+  SHARE_PROVING_NOTE,
+  SHARE_SIGN_IN_REASON,
+  type Shared,
+  sharedSummary,
+  shareRefusal,
+} from './share.ts';
 import { buildCodeTable, buildProse } from './text-views.ts';
 import {
   type DeadView,
@@ -236,6 +257,11 @@ const ICONS = {
   comment: 'M2 2h12v9H7.5L4 14v-3H2V2zm1 1v7h2v2.1L7.1 10H13V3H3z',
   // Four 3x3 tiles on a 16-unit grid representing a collection/catalogue of relics.
   grid: 'M2 2h4.5v4.5H2V2zm7.5 0H14v4.5H9.5V2zM2 9.5h4.5V14H2V9.5zm7.5 0H14V14H9.5V9.5z',
+  // An envelope, outline drawn with two holes like `copy`, because sharing
+  // here ends in an email the reader sends.
+  share: 'M1.5 3h13v10h-13zm1.3 1L8 7.6 13.2 4zM2.5 5.2V12h11V5.2L8 9z',
+  close:
+    'M4.2 3.5 8 7.3l3.8-3.8.7.7L8.7 8l3.8 3.8-.7.7L8 8.7l-3.8 3.8-.7-.7L7.3 8 3.5 4.2z',
 } as const;
 
 function icon(path: string): SVGSVGElement {
@@ -371,6 +397,13 @@ export interface BarOptions {
   readonly commentCount?: number;
   /** Offered only when there is more than one historical version to pick. */
   readonly onSelectVersion?: (version: number) => void;
+  /**
+   * Opens the share panel, handed the control that opened it so focus can go
+   * back there when the panel closes. Offered on every view that holds the
+   * key, including a download-only relic and an open comparison: sharing
+   * needs the key, never a rendered page.
+   */
+  readonly onShare?: (opener: HTMLElement) => void;
 }
 
 /**
@@ -715,6 +748,18 @@ export function buildBar(
       );
     })
   );
+
+  // Beside Copy link because it is the same errand done for somebody else:
+  // the link still goes out in the reader's own mail, and Relic only learns
+  // the addresses it should tell when a new version lands.
+  const onShare = options.onShare;
+  if (onShare !== undefined) {
+    const share = button('Share', ICONS.share, () => onShare(share));
+    share.classList.add('action-share');
+    share.setAttribute('aria-haspopup', 'dialog');
+    share.title = 'Share this relic with people by email';
+    actions.appendChild(share);
+  }
 
   actions.appendChild(
     button('Download', ICONS.download, () => downloadContent(view))
@@ -2867,6 +2912,9 @@ export function renderComparison(
       onCompare: onClose,
       comparisonOpen: true,
       selectedVersion: rightVersion,
+      onShare: (opener) => {
+        openSharePanel(current, relicId, deps, opener);
+      },
     }),
     diffRow
   );
@@ -2898,6 +2946,98 @@ function field(
   text.textContent = labelText;
   label.append(text, control);
   return label;
+}
+
+/** Said when the session could not be read, so the address is asked for. */
+const UNKNOWN_SESSION_NOTE =
+  'Relic could not tell whether this browser is already verified, so it is ' +
+  'asking. Entering an address you have used before costs nothing but the ' +
+  'email.';
+
+/** The policy page, linked beside each disclosure that summarises it. */
+function policyLink(): HTMLElement {
+  const link = document.createElement('a');
+  link.className = 'thread-policy';
+  link.href = `${SERVICE_ORIGIN}/policy`;
+  link.rel = 'noopener noreferrer';
+  link.textContent = 'What Relic knows';
+  return link;
+}
+
+/**
+ * The address step, for a reader this browser has not verified.
+ *
+ * One flow for the comment composer and the share panel, because both want
+ * the same session, and two copies of the magic-link round trip would drift
+ * on exactly the parts that matter: the fragment never goes in the request,
+ * and the reader is warned when following the link here would lose the key.
+ * `lead` is what each caller says above the field.
+ */
+function signInForm(
+  lead: readonly HTMLElement[],
+  options: {
+    readonly relicId: string;
+    readonly fragment: string;
+    readonly deps: ViewerDeps;
+    readonly outcome: HTMLElement;
+    readonly label: string;
+  }
+): { readonly form: HTMLFormElement; readonly email: HTMLInputElement } {
+  const { relicId, fragment, deps, outcome } = options;
+  const form = document.createElement('form');
+  form.append(...lead);
+
+  const email = document.createElement('input');
+  email.type = 'email';
+  email.required = true;
+  email.autocomplete = 'email';
+  email.className = 'compose-input';
+  email.placeholder = 'you@example.com';
+  form.appendChild(field(options.label, email));
+
+  form.appendChild(line('compose-fine', DELIVERY_DISCLOSURE));
+
+  const send = document.createElement('button');
+  send.type = 'submit';
+  send.className = 'action primary';
+  send.textContent = 'Send me a link';
+  form.appendChild(send);
+
+  form.addEventListener('submit', (event) => {
+    // The control. `form-action 'none'` in the shell's CSP is the backstop,
+    // and both are wanted: a submission that got past this would put the
+    // address in a query string on the one page whose URL must stay clean.
+    event.preventDefault();
+    const address = email.value.trim();
+    if (address.length === 0) return;
+    send.disabled = true;
+    outcome.replaceChildren(line('thread-note', 'Sending.'));
+    void requestMagicLink(relicId, address, deps).then((result) => {
+      send.disabled = false;
+      if (result.kind === 'refused') {
+        outcome.replaceChildren(threadRefusal(result.refusal, () => {}));
+        return;
+      }
+      // Deliberately does not confirm the address exists. The endpoint
+      // answers 202 either way so it cannot be used to find out who has
+      // commented before, and copy reading "we sent it" would hand back
+      // exactly what that 202 withholds.
+      const said = [
+        line(
+          'thread-note',
+          `If ${plainLabel(address)} can receive mail, a link is on its ` +
+            'way. Following it verifies the address and brings you back ' +
+            'here.'
+        ),
+      ];
+      if (!keySurvivesNavigation(relicId, fragment, deps)) {
+        said.push(line('compose-warning', KEY_AT_RISK_NOTE));
+      }
+      outcome.replaceChildren(...said);
+    });
+  });
+
+  return { form, email };
 }
 
 /**
@@ -5944,15 +6084,6 @@ export function buildThread(
     if (box !== undefined) openCard(entry, box, true);
   });
 
-  const policyLink = (): HTMLElement => {
-    const link = document.createElement('a');
-    link.className = 'thread-policy';
-    link.href = `${SERVICE_ORIGIN}/policy`;
-    link.rel = 'noopener noreferrer';
-    link.textContent = 'What Relic knows';
-    return link;
-  };
-
   const refresh = async (): Promise<void> => {
     if (typeof document === 'undefined') return;
     const opener = cipher;
@@ -6038,77 +6169,22 @@ export function buildThread(
 
   /** The address form, for a reader this browser has not verified. */
   const composeIdentity = (): HTMLElement => {
-    const form = document.createElement('form');
-    form.className = 'compose';
-
     const heading = document.createElement('h3');
     heading.className = 'compose-title';
     heading.textContent = 'Leave a comment';
-    form.append(heading, marks.chip);
-
-    if (session.kind === 'unknown') {
-      form.appendChild(
-        line(
-          'thread-note',
-          'Relic could not tell whether this browser is already verified, so ' +
-            'it is asking. Entering an address you have used before costs ' +
-            'nothing but the email.'
-        )
-      );
-    }
-
-    form.append(line('compose-note', IDENTITY_DISCLOSURE), policyLink());
-
-    const email = document.createElement('input');
-    email.type = 'email';
-    email.required = true;
-    email.autocomplete = 'email';
-    email.className = 'compose-input';
-    email.placeholder = 'you@example.com';
-    form.appendChild(field('Email address', email));
-
-    form.appendChild(line('compose-fine', DELIVERY_DISCLOSURE));
-
-    const send = document.createElement('button');
-    send.type = 'submit';
-    send.className = 'action primary';
-    send.textContent = 'Send me a link';
-    form.appendChild(send);
-
-    form.addEventListener('submit', (event) => {
-      // The control. `form-action 'none'` in the shell's CSP is the backstop,
-      // and both are wanted: a submission that got past this would put the
-      // address in a query string on the one page whose URL must stay clean.
-      event.preventDefault();
-      const address = email.value.trim();
-      if (address.length === 0) return;
-      send.disabled = true;
-      outcome.replaceChildren(line('thread-note', 'Sending.'));
-      void requestMagicLink(relicId, address, deps).then((result) => {
-        send.disabled = false;
-        if (result.kind === 'refused') {
-          outcome.replaceChildren(threadRefusal(result.refusal, () => {}));
-          return;
-        }
-        // Deliberately does not confirm the address exists. The endpoint
-        // answers 202 either way so it cannot be used to find out who has
-        // commented before, and copy reading "we sent it" would hand back
-        // exactly what that 202 withholds.
-        const said = [
-          line(
-            'thread-note',
-            `If ${plainLabel(address)} can receive mail, a link is on its ` +
-              'way. Following it verifies the address and brings you back ' +
-              'here.'
-          ),
-        ];
-        if (!keySurvivesNavigation(relicId, fragment, deps)) {
-          said.push(line('compose-warning', KEY_AT_RISK_NOTE));
-        }
-        outcome.replaceChildren(...said);
-      });
-    });
-
+    const { form } = signInForm(
+      [
+        heading,
+        marks.chip,
+        ...(session.kind === 'unknown'
+          ? [line('thread-note', UNKNOWN_SESSION_NOTE)]
+          : []),
+        line('compose-note', IDENTITY_DISCLOSURE),
+        policyLink(),
+      ],
+      { relicId, fragment, deps, outcome, label: 'Email address' }
+    );
+    form.className = 'compose';
     return form;
   };
 
@@ -6381,6 +6457,437 @@ export function buildRelicRow(
   return row;
 }
 
+/* ---------- the share panel ---------- */
+
+export interface SharePanelHandle {
+  readonly element: HTMLElement;
+  /** Settles when the session has been read and the first state painted. */
+  readonly ready: Promise<void>;
+  /**
+   * Settles when the share request in flight, if any, has painted its answer.
+   * Exposed for the same reason `ThreadHandle.ready` is: a caller that tears
+   * the page down mid-request leaves a continuation with nowhere to paint.
+   */
+  readonly idle: () => Promise<void>;
+  readonly close: () => void;
+}
+
+/**
+ * The Share action's sheet, for any reader holding the link and its key.
+ *
+ * It walks one errand: the comment sign-in when there is no session, the
+ * addresses, a request carrying a proof derived from the key (never the key),
+ * and then the email, composed here and sent from the reader's own mail. The
+ * two facts a sharer is owed, that Relic never sends that email and that it
+ * keeps the addresses in the clear to tell them about new versions, are said
+ * before anything is typed rather than after.
+ */
+export function openSharePanel(
+  view: ReadyView,
+  relicId: string,
+  deps: ViewerDeps,
+  opener?: HTMLElement
+): SharePanelHandle {
+  // The one place the in-memory fragment is already carried, as the thread
+  // reads it, so there is still exactly one copy of the key on the view.
+  const fragment = new URL(view.shareUrl).hash;
+
+  const dialog = document.createElement('dialog');
+  dialog.className = 'share-panel';
+  dialog.setAttribute('aria-labelledby', 'share-title');
+
+  const head = document.createElement('div');
+  head.className = 'share-head';
+  const title = document.createElement('h2');
+  title.className = 'share-title';
+  title.id = 'share-title';
+  title.tabIndex = -1;
+  title.textContent = 'Share this relic';
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'share-close';
+  dismiss.setAttribute('aria-label', 'Close');
+  dismiss.appendChild(icon(ICONS.close));
+  head.append(title, dismiss);
+
+  const body = document.createElement('div');
+  body.className = 'share-body';
+  dialog.append(head, body);
+
+  let session: SessionState = { kind: 'unknown' };
+  let checking = true;
+  let draft = '';
+  let shared: Shared | undefined;
+  /** A refusal about the relic itself, after which the form is not offered. */
+  let ended: Refusal | undefined;
+  /** Why the sign-in step is back, when a session lapsed mid-errand. */
+  let lapsed: Refusal | undefined;
+  let inFlight: Promise<void> = Promise.resolve();
+  let open = true;
+  let channel: BroadcastChannel | undefined;
+
+  const facts = (): HTMLElement[] => {
+    const box = document.createElement('div');
+    box.className = 'compose-note share-facts';
+    box.append(line('', SHARE_FACT_SENDING), line('', SHARE_FACT_STORING));
+    return [box, policyLink()];
+  };
+
+  const outcomeSlot = (): HTMLElement => {
+    const outcome = document.createElement('div');
+    outcome.className = 'share-outcome';
+    outcome.setAttribute('aria-live', 'polite');
+    return outcome;
+  };
+
+  /** The sign-in step, as the composer has it, with sharing's reason. */
+  const paintSignIn = (): HTMLElement => {
+    const outcome = outcomeSlot();
+    if (lapsed !== undefined) body.appendChild(threadRefusal(lapsed, () => {}));
+    body.appendChild(line('thread-note', SHARE_SIGN_IN_REASON));
+    if (session.kind === 'unknown') {
+      body.appendChild(line('thread-note', UNKNOWN_SESSION_NOTE));
+    }
+    body.append(...facts());
+    const { form, email } = signInForm([], {
+      relicId,
+      fragment,
+      deps,
+      outcome,
+      label: 'Your email address',
+    });
+    form.className = 'share-form';
+    body.append(form, outcome);
+    return email;
+  };
+
+  /** The addresses, for a reader this browser has verified. */
+  const paintAddresses = (email: string): HTMLElement => {
+    const identity = document.createElement('p');
+    identity.className = 'compose-identity';
+    const address = document.createElement('strong');
+    address.textContent = plainLabel(email);
+    identity.append(document.createTextNode('Sharing as '), address);
+    body.append(identity, ...facts());
+
+    const form = document.createElement('form');
+    form.className = 'share-form';
+    form.noValidate = true;
+
+    const box = document.createElement('textarea');
+    box.className = 'compose-input share-addresses';
+    box.id = 'share-addresses';
+    box.rows = 3;
+    box.autocomplete = 'off';
+    box.spellcheck = false;
+    box.placeholder = 'lin@example.com, sam@example.com';
+    box.value = draft;
+    box.setAttribute(
+      'aria-describedby',
+      'share-hint share-count share-problem'
+    );
+    form.appendChild(field('Their email addresses', box));
+
+    const hint = line(
+      'compose-fine',
+      `Separate them with commas or new lines. Up to ${SHARE_MAX_PER_CALL} ` +
+        'at a time.'
+    );
+    hint.id = 'share-hint';
+    form.appendChild(hint);
+
+    const problem = document.createElement('div');
+    problem.className = 'share-problem';
+    problem.id = 'share-problem';
+    problem.setAttribute('aria-live', 'polite');
+    form.appendChild(problem);
+
+    const foot = document.createElement('div');
+    foot.className = 'compose-foot';
+    const count = document.createElement('span');
+    count.className = 'compose-count';
+    count.id = 'share-count';
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.className = 'action primary';
+    submit.textContent = 'Add and write the email';
+    foot.append(count, submit);
+    form.appendChild(foot);
+
+    const outcome = outcomeSlot();
+
+    const paintCount = (): ParsedAddresses => {
+      const parsed = parseAddresses(box.value);
+      const n = addressCount(parsed);
+      count.textContent = `${n} of ${SHARE_MAX_PER_CALL} addresses`;
+      count.classList.toggle('over', n > SHARE_MAX_PER_CALL);
+      return parsed;
+    };
+    /** Says what is wrong with the list, and whether anything is. */
+    const judge = (final: boolean): string[] | undefined => {
+      const parsed = paintCount();
+      const said = addressProblem(parsed, final);
+      box.setAttribute('aria-invalid', said === undefined ? 'false' : 'true');
+      problem.replaceChildren(
+        ...(said === undefined ? [] : [line('compose-warning', said)])
+      );
+      return said === undefined ? [...parsed.addresses] : undefined;
+    };
+    paintCount();
+    if (draft.trim().length > 0) judge(false);
+
+    box.addEventListener('input', () => {
+      draft = box.value;
+      // Only clears a complaint already made, so a half-typed address is
+      // not called wrong while it is still being typed.
+      if (box.getAttribute('aria-invalid') === 'true') judge(false);
+      else paintCount();
+    });
+    box.addEventListener('blur', () => {
+      if (box.value.trim().length > 0) judge(false);
+    });
+
+    const attempt = (): void => {
+      const addresses = judge(true);
+      if (addresses === undefined) {
+        box.focus();
+        return;
+      }
+      let key: Uint8Array;
+      try {
+        key = parseFragment(fragment).key;
+      } catch {
+        // Unreachable from a ready view, which exists only because the
+        // fragment parsed. Caught so no error object holding it escapes.
+        ended = shareRefusal('no_share_key');
+        paint('title');
+        return;
+      }
+      submit.disabled = true;
+      box.readOnly = true;
+      outcome.replaceChildren(line('thread-note', SHARE_PROVING_NOTE));
+      inFlight = requestShare(relicId, key, addresses, deps).then((result) => {
+        if (!open) return;
+        submit.disabled = false;
+        box.readOnly = false;
+        if (result.kind === 'shared') {
+          shared = result;
+          draft = '';
+          paint('summary');
+          return;
+        }
+        const refusal = result.refusal;
+        if (refusal.code === 'invalid_session') {
+          session = { kind: 'anonymous' };
+          lapsed = refusal;
+          paint();
+          return;
+        }
+        if (refusalEndsSharing(refusal.code)) {
+          ended = refusal;
+          paint('title');
+          return;
+        }
+        outcome.replaceChildren(threadRefusal(refusal, attempt));
+      });
+    };
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      attempt();
+    });
+
+    body.append(form, outcome);
+    return box;
+  };
+
+  /** The email, ready to leave from the reader's own mail. */
+  const paintShared = (result: Shared): HTMLElement => {
+    const summary = line('share-done', sharedSummary(result));
+    summary.tabIndex = -1;
+
+    const heading = document.createElement('h3');
+    heading.className = 'compose-title';
+    heading.textContent = 'Now send it from your own mail';
+
+    const email = readerShareEmail(view.shareUrl, result);
+    const card = document.createElement('figure');
+    card.className = 'share-email';
+    card.setAttribute('aria-label', 'The email to send');
+    const meta = document.createElement('dl');
+    meta.className = 'share-email-head';
+    const term = (text: string): HTMLElement => {
+      const dt = document.createElement('dt');
+      dt.textContent = text;
+      return dt;
+    };
+    const value = (text: string): HTMLElement => {
+      const dd = document.createElement('dd');
+      dd.textContent = text;
+      return dd;
+    };
+    meta.append(
+      term('To'),
+      value(email.to.join(', ')),
+      term('Subject'),
+      value(email.subject)
+    );
+    const text = document.createElement('pre');
+    text.className = 'share-email-body';
+    text.textContent = email.text;
+    card.append(meta, text);
+
+    const outcome = outcomeSlot();
+    const send = document.createElement('div');
+    send.className = 'share-send';
+    const mail = document.createElement('a');
+    mail.className = 'action primary share-mailto';
+    mail.href = shareMailtoUrl(email);
+    mail.appendChild(icon(ICONS.share));
+    const mailText = document.createElement('span');
+    mailText.textContent = 'Open in your mail app';
+    mail.appendChild(mailText);
+    const copy = button('Copy message', ICONS.copy, () => {
+      void copyText(email.text).then((copied) => {
+        if (copied) {
+          // Said in the panel rather than as a toast: a modal dialog sits in
+          // the top layer, and a toast on the page would land under its
+          // backdrop.
+          outcome.replaceChildren(line('thread-note', SHARE_COPIED_NOTE));
+          return;
+        }
+        // Selected so the keyboard copy the note promises actually works.
+        const selection = window.getSelection?.();
+        if (selection && typeof document.createRange === 'function') {
+          const range = document.createRange();
+          range.selectNodeContents(text);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        outcome.replaceChildren(line('compose-warning', COPY_FAILED_NOTE));
+      });
+    });
+    send.append(mail, copy);
+
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.className = 'share-again';
+    again.textContent = 'Share with someone else';
+    again.addEventListener('click', () => {
+      shared = undefined;
+      paint();
+    });
+
+    body.append(
+      summary,
+      heading,
+      card,
+      line('compose-warning', SHARE_KEY_WARNING),
+      send,
+      outcome,
+      again
+    );
+    return summary;
+  };
+
+  const paint = (focus: 'field' | 'title' | 'summary' = 'field'): void => {
+    body.replaceChildren();
+    let target: HTMLElement = title;
+    if (checking) {
+      body.appendChild(line('thread-note', SHARE_CHECKING_NOTE));
+    } else if (ended !== undefined) {
+      body.append(
+        threadRefusal(ended, () => {}),
+        button('Close', ICONS.close, close)
+      );
+    } else if (shared !== undefined) {
+      target = paintShared(shared);
+    } else if (session.kind === 'verified') {
+      target = paintAddresses(session.email);
+    } else {
+      target = paintSignIn();
+    }
+    if (focus === 'title') title.focus();
+    else target.focus();
+  };
+
+  /**
+   * A link followed in another tab verifies this browser, not this panel, so
+   * the panel listens for the same bare marker the thread does.
+   */
+  const recheck = async (): Promise<void> => {
+    if (!open || checking) return;
+    const discovered = await readSession(deps);
+    if (!open || sessionSignature(discovered) === sessionSignature(session)) {
+      return;
+    }
+    session = discovered;
+    if (discovered.kind === 'verified') lapsed = undefined;
+    if (shared === undefined && ended === undefined) paint();
+  };
+  const onVisible = (): void => {
+    if (document.visibilityState === 'visible') void recheck();
+  };
+
+  const cleanUp = (): void => {
+    if (!open) return;
+    open = false;
+    channel?.close();
+    document.removeEventListener('visibilitychange', onVisible);
+    dialog.remove();
+    opener?.focus();
+  };
+  function close(): void {
+    if (typeof dialog.close === 'function' && dialog.open) dialog.close();
+    else cleanUp();
+  }
+
+  dismiss.addEventListener('click', close);
+  // Escape and the close button both arrive here, through the dialog's own
+  // `close` event, so there is one teardown however the panel was left.
+  dialog.addEventListener('close', cleanUp);
+  dialog.addEventListener('click', (event: Event) => {
+    // A press on the backdrop lands on the dialog itself.
+    if (event.target === dialog) close();
+  });
+
+  if (typeof BroadcastChannel === 'function') {
+    channel = new BroadcastChannel('relic:auth');
+    channel.addEventListener('message', () => {
+      void recheck();
+    });
+  }
+  document.addEventListener('visibilitychange', onVisible);
+
+  document.body.appendChild(dialog);
+  // Under the band as it is actually drawn: a two-line identity makes it
+  // taller than `--bar-height`, and the sheet must not cover its rule.
+  const bar = document.querySelector('.bar');
+  if (bar !== null && typeof bar.getBoundingClientRect === 'function') {
+    dialog.style.setProperty(
+      '--share-top',
+      `${Math.round(bar.getBoundingClientRect().bottom)}px`
+    );
+  }
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', '');
+  paint('title');
+
+  const ready = readSession(deps).then((discovered) => {
+    if (!open) return;
+    session = discovered;
+    checking = false;
+    paint();
+  });
+
+  return {
+    element: dialog,
+    ready,
+    idle: () => inFlight,
+    close,
+  };
+}
+
 export function renderReady(
   view: ReadyView,
   relicId: string,
@@ -6413,6 +6920,9 @@ export function renderReady(
           );
           showComparison(pair.left, pair.right);
         }
+      },
+      onShare: (opener) => {
+        openSharePanel(activeView, relicId, deps, opener);
       },
       ...(thread === undefined
         ? {}
