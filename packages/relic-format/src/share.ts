@@ -68,3 +68,61 @@ export async function shareVerifierFor(proof: Uint8Array): Promise<string> {
     b.toString(16).padStart(2, '0')
   ).join('');
 }
+
+/** Who is sending a share email, which changes one sentence in it. */
+export type ShareSender = 'publisher' | 'reader';
+
+/** A share email, composed on the sharer's side and sent from their mail. */
+export interface ShareEmail {
+  readonly to: readonly string[];
+  readonly subject: string;
+  readonly text: string;
+}
+
+/**
+ * Compose the email a sharer sends from their own mailbox.
+ *
+ * Composed here rather than by the service because it carries the whole link,
+ * key included, and the service must never hold the key. One definition for
+ * the publishing client and the viewer, so both say the same thing about what
+ * Relic does with the recipient's address.
+ */
+export function composeShareEmail(p: {
+  readonly url: string;
+  readonly title: string | null;
+  readonly to: readonly string[];
+  readonly sender: ShareSender;
+}): ShareEmail {
+  const thing = p.title === null ? 'a file' : `"${p.title}"`;
+  const subject =
+    p.title === null
+      ? 'A file shared with you on Relic'
+      : `Shared with you: ${p.title}`;
+  const next =
+    p.sender === 'publisher'
+      ? 'When I publish a new version'
+      : 'When a new version is published';
+  const text = [
+    `I've shared ${thing} with you on Relic. Open it here:`,
+    '',
+    p.url,
+    '',
+    'Anyone with this whole link can read it, including the part after the #, which is the key that decrypts it. Relic never receives that part.',
+    '',
+    `${next}, Relic will email you that it changed. That email never contains the key, and it has a link to stop those emails. Relic keeps your address for that.`,
+  ].join('\n');
+  return { to: [...p.to], subject, text };
+}
+
+/**
+ * A `mailto:` URL that opens the share email as a draft in the sharer's mail
+ * app. CRLF line endings, as RFC 6068 requires in a body, and `@` left
+ * readable in the recipient list.
+ */
+export function shareMailtoUrl(email: ShareEmail): string {
+  const to = email.to
+    .map((address) => encodeURIComponent(address).replace(/%40/g, '@'))
+    .join(',');
+  const body = encodeURIComponent(email.text.replace(/\r?\n/g, '\r\n'));
+  return `mailto:${to}?subject=${encodeURIComponent(email.subject)}&body=${body}`;
+}

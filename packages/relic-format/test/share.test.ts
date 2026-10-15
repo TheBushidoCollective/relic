@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { deriveShareProof, shareVerifierFor } from '../src/index.ts';
+import {
+  composeShareEmail,
+  deriveShareProof,
+  shareMailtoUrl,
+  shareVerifierFor,
+} from '../src/index.ts';
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
@@ -25,5 +30,32 @@ describe('share proof', () => {
     );
     const other = await deriveShareProof(new Uint8Array(16).fill(1));
     expect(await shareVerifierFor(other)).not.toBe(verifier);
+  });
+});
+
+describe('share email', () => {
+  // The fragment is the key. An unencoded `#` in a mailto body ends the URL
+  // there, so the draft would open with a link that decrypts nothing.
+  test('the mailto draft carries the whole link, fragment included', () => {
+    const url = 'https://relik.link/abc123#r1uKEYPART-_x';
+    const email = composeShareEmail({
+      url,
+      title: 'Q3 & Q4 plan',
+      to: ['ada@example.com', 'lin+relic@example.com'],
+      sender: 'reader',
+    });
+    const mailto = shareMailtoUrl(email);
+    expect(mailto.indexOf('#')).toBe(-1);
+    const parsed = new URL(mailto);
+    expect(decodeURIComponent(parsed.pathname)).toBe(
+      'ada@example.com,lin+relic@example.com'
+    );
+    expect(parsed.searchParams.get('subject')).toBe(
+      'Shared with you: Q3 & Q4 plan'
+    );
+    const body = parsed.searchParams.get('body') ?? '';
+    expect(body).toContain(url);
+    expect(body).toContain('\r\n');
+    expect(body).toContain('When a new version is published');
   });
 });
