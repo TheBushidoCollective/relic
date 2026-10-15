@@ -63,7 +63,7 @@ export interface OutboundMail {
 export function signInMail(link: string): OutboundMail {
   const subject = 'Your Relic sign-in link';
   const text = [
-    'Open this link to comment on the relic you were reading:',
+    'Open this link to sign in on the relic you were reading, so you can comment on it or share it:',
     '',
     link,
     '',
@@ -75,7 +75,7 @@ export function signInMail(link: string): OutboundMail {
   // a renderer like any other.
   const href = escapeHtml(link);
   const html = [
-    '<p>Open this link to comment on the relic you were reading:</p>',
+    '<p>Open this link to sign in on the relic you were reading, so you can comment on it or share it:</p>',
     `<p><a href="${href}">${href}</a></p>`,
     '<p>The link is single use and expires shortly. If you did not ask to ',
     'sign in, nothing has happened and you can ignore this message.</p>',
