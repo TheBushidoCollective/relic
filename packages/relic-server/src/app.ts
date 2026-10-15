@@ -1591,7 +1591,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
         continue;
       }
 
-      const recipientVerdict = limiter.check(
+      const recipientVerdict = limiter.peek(
         `notify ${relicId} ${address}`,
         config.notificationRateLimit,
         now
@@ -1600,7 +1600,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
         continue;
       }
 
-      const globalVerdict = limiter.check(
+      const globalVerdict = limiter.peek(
         'change-notice',
         config.changeNoticeRateLimit,
         now
@@ -1678,6 +1678,35 @@ export function createApp(options: AppOptions = {}): RelicApp {
           if (await store.isOptedOut(relicId, item.addressHash)) {
             continue;
           }
+          const recipientVerdict = limiter.peek(
+            `notify ${relicId} ${item.address}`,
+            config.notificationRateLimit,
+            now
+          );
+          if (!recipientVerdict.allowed) {
+            continue;
+          }
+          const globalVerdict = limiter.peek(
+            'change-notice',
+            config.changeNoticeRateLimit,
+            now
+          );
+          if (!globalVerdict.allowed) {
+            console.error('relic: change notice rate limit reached');
+            break;
+          }
+
+          limiter.check(
+            `notify ${relicId} ${item.address}`,
+            config.notificationRateLimit,
+            now
+          );
+          limiter.check(
+            'change-notice',
+            config.changeNoticeRateLimit,
+            now
+          );
+
           activeChunk.push({
             email: item.address,
             addressHash: item.addressHash,
@@ -1706,6 +1735,33 @@ export function createApp(options: AppOptions = {}): RelicApp {
         if (await store.isOptedOut(relicId, item.addressHash)) {
           continue;
         }
+        const recipientVerdict = limiter.peek(
+          `notify ${relicId} ${item.address}`,
+          config.notificationRateLimit,
+          now
+        );
+        if (!recipientVerdict.allowed) {
+          continue;
+        }
+        const globalVerdict = limiter.peek(
+          'change-notice',
+          config.changeNoticeRateLimit,
+          now
+        );
+        if (!globalVerdict.allowed) {
+          console.error('relic: change notice rate limit reached');
+          break;
+        }
+        limiter.check(
+          `notify ${relicId} ${item.address}`,
+          config.notificationRateLimit,
+          now
+        );
+        limiter.check(
+          'change-notice',
+          config.changeNoticeRateLimit,
+          now
+        );
         try {
           await mailer.sendMail(item.address, item.mail);
         } catch (error) {
@@ -1722,6 +1778,33 @@ export function createApp(options: AppOptions = {}): RelicApp {
         if (await store.isOptedOut(relicId, item.addressHash)) {
           continue;
         }
+        const recipientVerdict = limiter.peek(
+          `notify ${relicId} ${item.address}`,
+          config.notificationRateLimit,
+          now
+        );
+        if (!recipientVerdict.allowed) {
+          continue;
+        }
+        const globalVerdict = limiter.peek(
+          'change-notice',
+          config.changeNoticeRateLimit,
+          now
+        );
+        if (!globalVerdict.allowed) {
+          console.error('relic: change notice rate limit reached');
+          break;
+        }
+        limiter.check(
+          `notify ${relicId} ${item.address}`,
+          config.notificationRateLimit,
+          now
+        );
+        limiter.check(
+          'change-notice',
+          config.changeNoticeRateLimit,
+          now
+        );
         try {
           await mailer.send(item.address, item.mail.text);
         } catch (error) {

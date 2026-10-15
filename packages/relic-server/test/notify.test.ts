@@ -2252,6 +2252,63 @@ describe('change notices and relic_share', () => {
       );
       expect(verdict.allowed).toBe(true);
     });
+    test('interleaving: tombstone or opt-out between preparation and dispatch spends no limiter or fuse credits', async () => {
+      const sharedLimiter = new RateLimiter();
+      const { id } = await publish({
+        title: 'Doc with owner',
+        ownerEmail: 'owner@example.com',
+      });
+
+      let tombstoneChecks = 0;
+      const origGetTombstone = store.getTombstone.bind(store);
+      store.getTombstone = async (relicId) => {
+        tombstoneChecks++;
+        if (tombstoneChecks > 2) {
+          return {
+            id: relicId,
+            publishIp: '198.51.100.10',
+            publishedAt: now,
+            publishingClient: 'test',
+            rendererClass: 'html',
+            ciphertextHash: 'hash',
+            deletedAt: now,
+            operator: 'admin',
+            reasonClass: 'operator_error',
+            reportReference: undefined,
+          };
+        }
+        return origGetTombstone(relicId);
+      };
+
+      const customApp = build({
+        limiter: sharedLimiter,
+      });
+      const aliceSession = await createSession('alice@example.com');
+
+      const commentRes = await customApp.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'dGVzdA' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+      expect(sentMails).toHaveLength(0);
+
+      const recipientVerdict = sharedLimiter.check(
+        `notify ${id} owner@example.com`,
+        { limit: 1, windowSeconds: 600 },
+        now
+      );
+      expect(recipientVerdict.allowed).toBe(true);
+
+      const fuseVerdict = sharedLimiter.check(
+        'change-notice',
+        { limit: 1, windowSeconds: 600 },
+        now
+      );
+      expect(fuseVerdict.allowed).toBe(true);
+    });
 
     test('batch notice and comment-notification failure logs contain no recipient address and sanitize provider error text', async () => {
       const { id } = await publish({
