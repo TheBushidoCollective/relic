@@ -277,6 +277,24 @@ Comments are content, and a comment about content the operator cannot read, stor
 
 **`display_name` is decoration and never identity.** The identity of a commenter is the verified address the service holds (`docs/frame.md`), and the name is untrusted display text living inside the ciphertext where the service cannot read it. It aliases the attribution and never replaces it.
 
+### 3.14 Share proof
+
+A reader can enroll addresses in a relic's change notices from the web viewer, and only a holder of the key may do that. The service never sees the key, so it cannot check possession directly. What it can check is a value only a key holder can compute: the publisher's client registers the SHA-256 of a key-derived proof when it publishes or republishes, and a reader presents the proof itself when sharing. The service compares hashes and learns the proof, which decrypts nothing.
+
+**The derivation is HKDF-SHA256, zero salt, info `relic/share-proof/v1`, 32 bytes.** In code:
+`deriveShareProof(keyBytes)` imports the raw 16-byte fragment key as HKDF key material, passes a zero-length salt and the info string `relic/share-proof/v1`, and expands to 256 bits (32 bytes).
+
+**The verifier is the lowercase hex SHA-256 of the proof.** In code:
+`shareVerifierFor(proof)` hashes the 32 proof bytes with SHA-256 and formats the result as a 64-character lowercase hex string.
+
+**Verifier registration happens at publish and republish.** The publishing client computes `share_verifier = await shareVerifierFor(await deriveShareProof(key))` and sends it in the JSON request body of `POST /api/relics` and `POST /api/relics/{id}/republish`. The server stores `shareVerifier` on the relic row.
+
+**Reader sharing presents the proof.** A reader in the web viewer holding the fragment key derives `proof = await deriveShareProof(keyBytes)` and submits `share_proof: base64url(proof)` in `POST /api/relics/{id}/share` alongside their authenticated session cookie. The server checks that the base64url-decoded proof is exactly 32 bytes and verifies `timingSafeEqual(sha256Hex(proof), row.shareVerifier)`.
+
+**What the service learns:** the verifier at publish, the proof at share, and neither decrypts anything. The proof derivation uses a dedicated HKDF info label (`relic/share-proof/v1`), so the proof is cryptographically independent of the content-encryption key, the nonce, and the comment key (`relic/comments/v1`). Knowledge of the proof or its verifier yields no information about the relic's plaintext.
+
+**No format version bump is required.** Like the comment key in 3.13, this derivation adds no fields to the container header or fragment. The fragment continues to carry only the 16-byte key, and the proof is a separate derivation from material the URL already holds.
+
 ## 4. Routed to `shape`
 
 Six items, and only these six. Each names what `shape` picks and what becomes specifiable once it does. Constraints established above are cited here rather than restated.

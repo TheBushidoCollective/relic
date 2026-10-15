@@ -185,7 +185,8 @@ export function utf8Bytes(text: string): number {
  */
 export const IDENTITY_DISCLOSURE =
   'Your address is shown with your comment, and Relic sees who commented ' +
-  'on what.';
+  'on what. When a new version is published, Relic emails you, with a link ' +
+  'to stop.';
 
 /** Said at the point of asking for an address, before one is typed. */
 export const DELIVERY_DISCLOSURE =
