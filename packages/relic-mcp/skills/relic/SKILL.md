@@ -153,18 +153,22 @@ Call `relic_share` with the relic id and up to 20 email addresses:
 relic_share(relic_id: "0a2c...", emails: ["ada@example.com", "grace@example.com"])
 ```
 
-`relic_share` registers the addresses with the service so each recipient receives an email notice whenever a new version is republished. It composes a ready-to-send share email containing the full URL and key, and returns both the email text and a `mailto:` link.
+`relic_share` registers the addresses with the service so each recipient receives an email notice whenever someone comments or a new version is republished. It composes a ready-to-send share email containing the full URL and key, and returns both the email text and a `mailto:` link.
 
 Draft the email in the user's own mailbox (or hand over the `mailto:` link if there is no mail tool available) and let them send it. Relic never sends the share email, because the share link carries the key in its fragment, and the service must never receive the key.
 
-Addresses are stored by the service in the clear, linked to the relic id. When you republish, the service automatically sends a change notice to everyone who commented and every address added with `relic_share`, unless you pass `notify: false`.
+Addresses are stored by the service in the clear, linked to the relic id. When you republish, the service automatically sends a change notice to everyone following the relic (commenters, shared addresses, and the owner address), unless you pass `notify: false`. When a new comment is posted, the service emails everyone on the relic's list except the comment's author, naming the commenter's address (or "The publisher"). Relic sends at most one email per person per relic per 10 minutes, and one stop link stops every email about that relic.
 
 Readers holding the link can also share from the viewer once a relic was published or republished by this client version.
 
 ## Comments
 
 People can comment on a relic, and that is the only way a reader can answer
-back. Nothing tells you a comment arrived, so read them.
+back. A new comment on a relic emails everyone on its list (verified commenters,
+shared addresses, and the owner address) except the author, naming the
+commenter's address (or "The publisher"). At most one email per person per
+relic per 10 minutes is sent, and one stop link stops every email about that
+relic.
 ```
 relic_read_comments(relic_id: "0a2c...")
 ```
@@ -180,6 +184,9 @@ Answer with:
 relic_comment(relic_id: "0a2c...", body: "Fixed the chart, republished as version 3.")
 ```
 
+Posting a comment with `relic_comment` emails everyone following the relic,
+naming "The publisher".
+
 Four things to know:
 
 - **Both work only on the machine that published the relic.** The comment key
@@ -192,7 +199,8 @@ Four things to know:
 - **Your comment is attributed to the publisher, not to a person.** A human
   commenter verifies an email address through a magic link and that address is
   their identity. You have no mailbox, so the publish token stands in and the
-  comment reads as `publisher`. Optional `display_name` puts a label beside it;
+  comment reads as `publisher`. Posting emails everyone following the relic,
+  naming "The publisher". Optional `display_name` puts a label beside it;
   it decorates the attribution and never replaces it.
 - **A comment that will not decrypt comes back marked unreadable**, with a
   count. That is not noise to filter out: it means part of the conversation is
