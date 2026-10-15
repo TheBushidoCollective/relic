@@ -1519,6 +1519,12 @@ export function createApp(options: AppOptions = {}): RelicApp {
       if (optOutSet.has(addressHash)) {
         continue;
       }
+      if (await store.isOptedOut(relicId, addressHash)) {
+        continue;
+      }
+      if ((await store.getTombstone(relicId)) !== undefined) {
+        break;
+      }
 
       const recipientVerdict = limiter.check(
         `notify ${relicId} ${address}`,
@@ -1559,8 +1565,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
         await mailer.sendMail(address, mail);
       } catch (error) {
         console.error(
-          `relic: change notice send failed for ${address}:`,
-          error
+          `relic: change notice send failed for recipient ${addressHash}: ${sanitizeMailError(error, address)}`
         );
       }
     }
@@ -1765,30 +1770,72 @@ export function createApp(options: AppOptions = {}): RelicApp {
         }
       }
     }
+    if (newAddresses.length === 0) {
+      if ((await store.getTombstone(relicId)) !== undefined) {
+        return refuse('relic_removed', {
+          relic_id: relicId,
+          report_url: `${config.serviceOrigin}/abuse`,
+        });
+      }
+      return Response.json({
+        relic_id: relicId,
+        emails: normalizedDeduped,
+        added: 0,
+        shared_count: existingShares.length,
+        share_limit: config.shareMaxPerRelic,
+        title: row.title ?? null,
+      });
+    }
 
-    const totalCount = existingShares.length + newAddresses.length;
-    if (totalCount > config.shareMaxPerRelic) {
+    const reservation = await store.reserveShares(
+      relicId,
+      newAddresses.length,
+      config.shareMaxPerRelic
+    );
+    if (!reservation.allowed) {
       return refuse('share_limit_reached', {
         relic_id: relicId,
         share_limit: config.shareMaxPerRelic,
-        shared_count: existingShares.length,
+        shared_count: reservation.currentCount,
       });
     }
 
-    for (const email of newAddresses) {
-      await store.putShare({
-        relicId,
-        email,
-        addedAt: now,
-        sharedBy,
+    let actualInserts = 0;
+    try {
+      for (const email of newAddresses) {
+        const inserted = await store.putShare({
+          relicId,
+          email,
+          addedAt: now,
+          sharedBy,
+        });
+        if (inserted) {
+          actualInserts++;
+        }
+      }
+    } finally {
+      const unneeded = newAddresses.length - actualInserts;
+      if (unneeded > 0) {
+        await store.releaseShares(relicId, unneeded);
+      }
+    }
+
+    if ((await store.getTombstone(relicId)) !== undefined) {
+      await store.deleteSharesForRelic(relicId);
+      return refuse('relic_removed', {
+        relic_id: relicId,
+        report_url: `${config.serviceOrigin}/abuse`,
       });
     }
+
+    const finalSharedCount =
+      reservation.currentCount - (newAddresses.length - actualInserts);
 
     return Response.json({
       relic_id: relicId,
       emails: normalizedDeduped,
-      added: newAddresses.length,
-      shared_count: totalCount,
+      added: actualInserts,
+      shared_count: finalSharedCount,
       share_limit: config.shareMaxPerRelic,
       title: row.title ?? null,
     });
@@ -1917,6 +1964,16 @@ export function createApp(options: AppOptions = {}): RelicApp {
         addressHash: addr,
         at: now,
       });
+      if ((await store.getTombstone(relicId)) !== undefined) {
+        await store.deleteOptOutsForRelic(relicId);
+        return unsubscribeResponse(
+          200,
+          'Nothing to stop',
+          '<p>This relic is no longer available, so it sends no change emails.</p>',
+          undefined,
+          isHead
+        );
+      }
       return unsubscribeResponse(
         200,
         'Stopped',
@@ -1964,14 +2021,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
     }
 
     const existing = await store.getTombstone(relicId);
-    if (existing !== undefined) {
-      // Idempotent. Under a suspension clock, "already handled" and "wrong ID"
-      // have to be distinguishable at a glance.
-      return Response.json({ tombstone: existing, already_deleted: true });
-    }
-
     const row = await store.getRelic(relicId);
-    if (row === undefined) {
+    if (existing === undefined && row === undefined) {
       // On this endpoint 404 means one thing only: never issued.
       return new Response('No such relic id was ever issued', { status: 404 });
     }
@@ -1980,57 +2031,91 @@ export function createApp(options: AppOptions = {}): RelicApp {
       'abuse') as ReasonClass;
     const reference = url.searchParams.get('reference') ?? undefined;
 
-    // Hash before delete, every version. A delete that captures no hash
-    // permanently loses the ability to blocklist that payload, and a
-    // republished relic can carry a different payload per version, so
-    // hashing only the current one would hand the blocklist a gap exactly
-    // one republish wide.
-    const hashes: string[] = [];
-    for (let version = 1; version <= row.version; version++) {
-      const bytes = await storage.read(objectKey(relicId, version));
-      if (bytes !== undefined) hashes.push(await ciphertextHash(bytes));
-    }
-    // The tombstone's hash of record is the newest version that had bytes:
-    // the content the relic was serving when it was taken down. An empty
-    // list is the same refusal it always was.
-    const hash = hashes.at(-1);
-    if (hash === undefined) {
-      return new Response('Refused: no bytes to hash', { status: 409 });
+    let hash: string | undefined = existing?.ciphertextHash;
+
+    if (existing === undefined) {
+      if (row === undefined) {
+        return new Response('No such relic id was ever issued', {
+          status: 404,
+        });
+      }
+
+      // Hash before delete, every version. A delete that captures no hash
+      // permanently loses the ability to blocklist that payload, and a
+      // republished relic can carry a different payload per version, so
+      // hashing only the current one would hand the blocklist a gap exactly
+      // one republish wide.
+      const hashes: string[] = [];
+      for (let version = 1; version <= row.version; version++) {
+        const bytes = await storage.read(objectKey(relicId, version));
+        if (bytes !== undefined) hashes.push(await ciphertextHash(bytes));
+      }
+      // The tombstone's hash of record is the newest version that had bytes:
+      // the content the relic was serving when it was taken down. An empty
+      // list is the same refusal it always was.
+      hash = hashes.at(-1);
+      if (hash === undefined) {
+        return new Response('Refused: no bytes to hash', { status: 409 });
+      }
+
+      await store.putTombstone({
+        id: relicId,
+        publishIp: row.publishIp,
+        publishedAt: row.publishedAt,
+        publishingClient: row.publishingClient,
+        rendererClass: row.rendererClass,
+        ciphertextHash: hash,
+        deletedAt: now,
+        operator,
+        reasonClass,
+        reportReference: reference,
+      });
+
+      const override = url.searchParams.get('blocklist');
+      const automatic =
+        reasonClass === 'abuse' || reasonClass === 'blocklist_match';
+      const shouldBlocklist =
+        override === 'true' ? true : override === 'false' ? false : automatic;
+      if (shouldBlocklist) {
+        for (const versionHash of hashes) await store.blocklist(versionHash);
+      }
+    } else {
+      const override = url.searchParams.get('blocklist');
+      const automatic =
+        reasonClass === 'abuse' || reasonClass === 'blocklist_match';
+      const shouldBlocklist =
+        override === 'true' ? true : override === 'false' ? false : automatic;
+      if (shouldBlocklist && hash !== undefined) {
+        await store.blocklist(hash);
+      }
     }
 
-    for (let version = 1; version <= row.version; version++) {
+    // Resume every sweep idempotently, whether first run or retrying an existing tombstone
+    const maxVersion = row?.version ?? 1;
+    for (let version = 1; version <= maxVersion; version++) {
       await storage.delete(objectKey(relicId, version));
     }
     const coversRemoved = await store.deleteCovers(relicId);
-    await store.putTombstone({
-      id: relicId,
-      publishIp: row.publishIp,
-      publishedAt: row.publishedAt,
-      publishingClient: row.publishingClient,
-      rendererClass: row.rendererClass,
-      ciphertextHash: hash,
-      deletedAt: now,
-      operator,
-      reasonClass,
-      reportReference: reference,
-    });
-
-    // The thread goes with the relic. Comments discuss content the operator
-    // was just obliged to remove, and a readable discussion of a removed
-    // payload is the same disclosure by a longer route. Counted so the
-    // response can say what it took, because a silent cascade is the kind
-    // of deletion nobody can audit later.
     const commentsRemoved = await store.deleteCommentsForRelic(relicId);
     const sharesDeleted = await store.deleteSharesForRelic(relicId);
     const optOutsDeleted = await store.deleteOptOutsForRelic(relicId);
-    // Blocklist in the same call, because a second call gets forgotten at 3am.
+
     const override = url.searchParams.get('blocklist');
     const automatic =
       reasonClass === 'abuse' || reasonClass === 'blocklist_match';
     const shouldBlocklist =
       override === 'true' ? true : override === 'false' ? false : automatic;
-    if (shouldBlocklist) {
-      for (const versionHash of hashes) await store.blocklist(versionHash);
+
+    if (existing !== undefined) {
+      return Response.json({
+        tombstone: existing,
+        already_deleted: true,
+        ciphertext_hash: hash,
+        comments_deleted: commentsRemoved,
+        covers_deleted: coversRemoved,
+        shares_deleted: sharesDeleted,
+        opt_outs_deleted: optOutsDeleted,
+      });
     }
 
     return Response.json({
@@ -2271,7 +2356,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       });
     } catch (error) {
       console.error(
-        `relic: comment notification failed: ${(error as Error).message}`
+        `relic: comment notification failed: ${sanitizeMailError(error)}`
       );
     }
 
@@ -2314,10 +2399,19 @@ export function createApp(options: AppOptions = {}): RelicApp {
         );
         if (verdict.allowed) {
           const mail = replyNotificationMail(relicTitle, author);
-          if (mailer.sendMail) {
-            await mailer.sendMail(recipient, mail);
-          } else {
-            await mailer.send(recipient, mail.text);
+          try {
+            if (mailer.sendMail) {
+              await mailer.sendMail(recipient, mail);
+            } else {
+              await mailer.send(recipient, mail.text);
+            }
+          } catch (error) {
+            const recipientHash = await sha256Hex(
+              recipient.toLowerCase().trim()
+            );
+            console.error(
+              `relic: comment notification failed for recipient ${recipientHash}: ${sanitizeMailError(error, recipient)}`
+            );
           }
         }
       }
@@ -2337,13 +2431,40 @@ export function createApp(options: AppOptions = {}): RelicApp {
       );
       if (verdict.allowed) {
         const mail = commentNotificationMail(relicTitle, author);
-        if (mailer.sendMail) {
-          await mailer.sendMail(recipient, mail);
-        } else {
-          await mailer.send(recipient, mail.text);
+        try {
+          if (mailer.sendMail) {
+            await mailer.sendMail(recipient, mail);
+          } else {
+            await mailer.send(recipient, mail.text);
+          }
+        } catch (error) {
+          const recipientHash = await sha256Hex(recipient.toLowerCase().trim());
+          console.error(
+            `relic: comment notification failed for recipient ${recipientHash}: ${sanitizeMailError(error, recipient)}`
+          );
         }
       }
     }
+  }
+
+  function sanitizeMailError(error: unknown, recipient?: string): string {
+    let message =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+          ? error
+          : String(error);
+    if (recipient !== undefined && recipient.length > 0) {
+      const escaped = recipient.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      message = message.replace(
+        new RegExp(escaped, 'gi'),
+        '[redacted-recipient]'
+      );
+    }
+    return message.replace(
+      /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
+      '[redacted-email]'
+    );
   }
 
   /**

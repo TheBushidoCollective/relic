@@ -77,8 +77,12 @@ export interface RelicRow {
    * claimVersionNotice consumes it. Absent on version 1, legacy rows, and after notify: false.
    */
   readonly noticePending?: boolean | undefined;
-  /** SHA-256 of the share proof, lowercase hex. Optional, registered on publish or republish. */
   readonly shareVerifier?: string | undefined;
+  /**
+   * Number of enrolled share addresses reserved against the per-relic cap.
+   * Advanced atomically via compare-and-swap when reserving share capacity.
+   */
+  sharesCount?: number | undefined;
 }
 
 export interface ShareRow {
@@ -343,8 +347,14 @@ export interface RelicStore {
   putOptOut(row: OptOutRow): Promise<void>;
   listOptOuts(relicId: string): Promise<readonly string[]>;
   deleteOptOutsForRelic(relicId: string): Promise<number>;
+  isOptedOut(relicId: string, addressHash: string): Promise<boolean>;
+  reserveShares(
+    relicId: string,
+    count: number,
+    maxLimit: number
+  ): Promise<{ allowed: boolean; currentCount: number }>;
+  releaseShares(relicId: string, count: number): Promise<void>;
   unsubscribeKey(): Promise<Uint8Array>;
-
   getTombstone(id: string): Promise<Tombstone | undefined>;
   putTombstone(stone: Tombstone): Promise<void>;
 
@@ -504,7 +514,46 @@ export class MemoryStore implements RelicStore {
   async deleteSharesForRelic(relicId: string): Promise<number> {
     const count = this.shares.get(relicId)?.size ?? 0;
     this.shares.delete(relicId);
+    const row = this.relics.get(relicId);
+    if (row !== undefined) {
+      this.relics.set(relicId, {
+        ...row,
+        sharesCount: 0,
+      });
+    }
     return count;
+  }
+
+  async reserveShares(
+    relicId: string,
+    count: number,
+    maxLimit: number
+  ): Promise<{ allowed: boolean; currentCount: number }> {
+    const row = this.relics.get(relicId);
+    if (row === undefined) {
+      return { allowed: false, currentCount: 0 };
+    }
+    const currentCount = row.sharesCount ?? this.shares.get(relicId)?.size ?? 0;
+    if (currentCount + count > maxLimit) {
+      return { allowed: false, currentCount };
+    }
+    const next: RelicRow = {
+      ...row,
+      sharesCount: currentCount + count,
+    };
+    this.relics.set(relicId, next);
+    return { allowed: true, currentCount: currentCount + count };
+  }
+
+  async releaseShares(relicId: string, count: number): Promise<void> {
+    const row = this.relics.get(relicId);
+    if (row === undefined) return;
+    const currentCount = row.sharesCount ?? this.shares.get(relicId)?.size ?? 0;
+    const next: RelicRow = {
+      ...row,
+      sharesCount: Math.max(0, currentCount - count),
+    };
+    this.relics.set(relicId, next);
   }
 
   async putOptOut(row: OptOutRow): Promise<void> {
@@ -530,6 +579,10 @@ export class MemoryStore implements RelicStore {
     return count;
   }
 
+  async isOptedOut(relicId: string, addressHash: string): Promise<boolean> {
+    const map = this.optOuts.get(relicId);
+    return map?.has(addressHash) ?? false;
+  }
   async unsubscribeKey(): Promise<Uint8Array> {
     if (this.unsubscribeSecret === undefined) {
       const bytes = new Uint8Array(32);

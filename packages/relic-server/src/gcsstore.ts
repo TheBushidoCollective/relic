@@ -734,7 +734,65 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
       for (const name of names) {
         await remove(name);
       }
+      try {
+        await mutateRelic(relicId, (row) => ({
+          ...row,
+          sharesCount: 0,
+        }));
+      } catch {
+        // Relic might not exist or be tombstoned
+      }
       return names.length;
+    },
+
+    async reserveShares(
+      relicId: string,
+      count: number,
+      maxLimit: number
+    ): Promise<{ allowed: boolean; currentCount: number }> {
+      const name = key('relic', `${relicId}.json`);
+
+      for (let attempt = 0; attempt < casAttempts; attempt++) {
+        const current = await get<RelicRow>(name);
+        if (current === undefined) {
+          return { allowed: false, currentCount: 0 };
+        }
+
+        let currentCount = current.value.sharesCount;
+        if (currentCount === undefined) {
+          const existing = await this.listShares(relicId);
+          currentCount = existing.length;
+        }
+
+        if (currentCount + count > maxLimit) {
+          return { allowed: false, currentCount };
+        }
+
+        const next: RelicRow = {
+          ...current.value,
+          sharesCount: currentCount + count,
+        };
+
+        if (await put(name, next, current.generation)) {
+          return { allowed: true, currentCount: currentCount + count };
+        }
+      }
+
+      throw new Error(
+        `gcs relic ${relicId} lost ${casAttempts} compare-and-swap races; ` +
+          'refusing to write share reservation derived from stale state'
+      );
+    },
+
+    async releaseShares(relicId: string, count: number): Promise<void> {
+      try {
+        await mutateRelic(relicId, (row) => ({
+          ...row,
+          sharesCount: Math.max(0, (row.sharesCount ?? 0) - count),
+        }));
+      } catch {
+        // Ignore if relic is gone
+      }
     },
 
     async putOptOut(row: OptOutRow): Promise<void> {
@@ -760,6 +818,11 @@ export function gcsStore(options: GcsStoreOptions): RelicStore {
       return names.length;
     },
 
+    async isOptedOut(relicId: string, addressHash: string): Promise<boolean> {
+      const name = key('optout', relicId, `${addressHash}.json`);
+      const row = await get<OptOutRow>(name);
+      return row !== undefined;
+    },
     async unsubscribeKey(): Promise<Uint8Array> {
       const secretName = key('secret', 'unsubscribe-key.json');
       const existing = await get<{ key: string; createdAt: number }>(

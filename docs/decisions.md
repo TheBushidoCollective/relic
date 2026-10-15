@@ -748,6 +748,14 @@ Stopping mail works even when the egress kill switch is engaged (`503 service_pa
 2. *Verified sign-in:* The reader must present an active `relic_session` cookie (reusing the session from comments). Missing session refuses with `401 sign_in_required`.
 The sharer's address is not stored on the `ShareRow` (only `sharedBy: 'publisher' | 'reader'`). Attribution is not kept beyond the in-memory rate limiter. The change notice reason reflects the source: "the person who published this relic shared it with you" for publisher shares, or "someone with this relic's link shared it with you" for reader shares.
 
+
+**Atomic share capacity reservation.** The 50-per-relic cap is enforced atomically via compare-and-swap on the relic row (`sharesCount`), counting only actual new inserts against `shareMaxPerRelic`. Concurrent share requests cannot exceed 50 total shares. Unneeded reservations (from duplicate inserts or failed writes) are released.
+
+**Immediate opt-out re-check.** Fan-out re-checks the recipient's opt-out state immediately before each individual send via a single-key store read (`isOptedOut`). Once a stop POST answers 200, no later send to that address on that relic can begin.
+
+**Idempotent delete sweep resumption.** Operator deletion of an already-tombstoned relic idempotently resumes every sweep (ciphertext, covers, comments, author index, shares, opt-outs) to completion and returns the counts of removed items. Late share or opt-out writes racing deletion are re-checked against the tombstone and purged so they cannot survive deletion.
+
+**Failure log privacy.** Notice and comment-notification failure logs never record recipient email addresses in the clear. An address hash or opaque identifier is logged instead, and mail provider error text is sanitized to redact recipient addresses.
 **Residuals:**
 - The transactional mail quota is shared between sign-in magic links and change notices.
 - Unsubscribe stops emails per relic only, not globally across the service.

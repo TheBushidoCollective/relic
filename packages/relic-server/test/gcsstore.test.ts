@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { createApp } from '../src/app.ts';
 import { sha256Hex } from '../src/gcs.ts';
 import { gcsStore } from '../src/gcsstore.ts';
+import { MemoryStorage } from '../src/storage.ts';
 import type { RelicRow } from '../src/store.ts';
 
 /**
@@ -1028,6 +1030,59 @@ describe('gcsStore', () => {
       expect(deleted).toBe(2);
       expect(await store.listShares('r1')).toEqual([]);
     });
+    test('SHARE-001: concurrent authorized shares in gcsStore never exceed 50-per-relic cap', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      const storage = new MemoryStorage();
+      const token = 'pub-token-12345';
+      const tokenHash = await sha256Hex(token);
+      const relicId = 'gdk6rpv49hftg5216ev7dejesc';
+      await store.putRelic(
+        row({
+          id: relicId,
+          version: 1,
+          publishTokenHash: tokenHash,
+          expiresAt: undefined,
+        })
+      );
+      const app = createApp({ store, storage });
+
+      const batch1 = Array.from(
+        { length: 20 },
+        (_, i) => `g1_${i}@example.com`
+      );
+      const batch2 = Array.from(
+        { length: 20 },
+        (_, i) => `g2_${i}@example.com`
+      );
+      const batch3 = Array.from(
+        { length: 20 },
+        (_, i) => `g3_${i}@example.com`
+      );
+
+      const reqShare = (emails: string[]) =>
+        new Request(`https://relic.example/api/relics/${relicId}/share`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-forwarded-for': '198.51.100.10',
+          },
+          body: JSON.stringify({ publish_token: token, emails }),
+        });
+
+      const responses = await Promise.all([
+        app.fetch(reqShare(batch1)),
+        app.fetch(reqShare(batch2)),
+        app.fetch(reqShare(batch3)),
+      ]);
+
+      const statuses = responses.map((r) => r.status).sort();
+      expect(statuses).toEqual([200, 200, 409]);
+
+      const storedShares = await store.listShares(relicId);
+      expect(storedShares.length).toBeLessThanOrEqual(50);
+      expect(storedShares.length).toBe(40);
+    });
 
     test('putOptOut keeps the first record; listOptOuts reads names only; deleteOptOutsForRelic works', async () => {
       const gcs = fakeGcs();
@@ -1038,6 +1093,8 @@ describe('gcsStore', () => {
       expect(rawOptOut).toBeDefined();
       const stored = JSON.parse(rawOptOut?.body ?? '{}');
       expect(stored.at).toBe(1000);
+      expect(await store.isOptedOut('r1', 'hash1')).toBe(true);
+      expect(await store.isOptedOut('r1', 'nonexistent')).toBe(false);
       await store.putOptOut({ relicId: 'r1', addressHash: 'hash2', at: 3000 });
       const optOuts = await store.listOptOuts('r1');
       expect([...optOuts].sort()).toEqual(['hash1', 'hash2']);
@@ -1045,6 +1102,35 @@ describe('gcsStore', () => {
       const deleted = await store.deleteOptOutsForRelic('r1');
       expect(deleted).toBe(2);
       expect(await store.listOptOuts('r1')).toEqual([]);
+      expect(await store.isOptedOut('r1', 'hash1')).toBe(false);
+    });
+
+    test('reserveShares and releaseShares advance and release capacity with CAS', async () => {
+      const gcs = fakeGcs();
+      const store = storeOn(gcs);
+      await store.putRelic(
+        row({ id: 'r_cap', version: 1, expiresAt: undefined })
+      );
+
+      const res1 = await store.reserveShares('r_cap', 30, 50);
+      expect(res1.allowed).toBe(true);
+      expect(res1.currentCount).toBe(30);
+
+      const res2 = await store.reserveShares('r_cap', 25, 50);
+      expect(res2.allowed).toBe(false);
+      expect(res2.currentCount).toBe(30);
+
+      const res3 = await store.reserveShares('r_cap', 20, 50);
+      expect(res3.allowed).toBe(true);
+      expect(res3.currentCount).toBe(50);
+
+      await store.releaseShares('r_cap', 10);
+      const rowAfterRelease = await store.getRelic('r_cap');
+      expect(rowAfterRelease?.sharesCount).toBe(40);
+
+      await store.deleteSharesForRelic('r_cap');
+      const rowAfterDelete = await store.getRelic('r_cap');
+      expect(rowAfterDelete?.sharesCount).toBe(0);
     });
 
     test('claimVersionNotice: claims once, returns undefined on a version mismatch, retries a lost race, and throws under hopeless contention', async () => {
