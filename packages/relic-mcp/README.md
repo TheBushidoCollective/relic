@@ -42,7 +42,8 @@ For any client that takes a JSON config:
    this machine later. See [Republishing](#republishing). The service never
    receives the key or the token plaintext; it keeps only a SHA-256 of the
    token.
-
+7. Returns a shareable URL whose fragment holds the decryption key. Fragments
+   are never sent to a server by a browser.
 Call the `relic_describe_client` tool and it will tell you all of this itself,
 without reading a file or making a request.
 
@@ -179,7 +180,8 @@ relic plaintext leaves the machine during rendering.
 | `relic_lookup_source` | `path` | Reads local state to find whether this machine already published that file, and returns the exact `relic_republish` call. Calls no server. |
 | `relic_list` | optional `limit`, `include_expired`, `verify`, `refresh` | Every relic this machine published, newest first. The only tool that enumerates: lookup answers only from the file a relic came from. A name this machine never recorded is recovered by decrypting the relic's own envelope in one 64 KB range request, or comes back `null` with the reason. A relic the service will not serve is listed with which of removed, expired, exhausted, or unreachable it is. Each row carries the share URL, fragment included, so each row is a credential. Reaching the service spends one of a relic's finite opens; recovered names are cached, so a repeat listing spends none. |
 | `relic_show` | `relic_id`, optional `include_content` | One relic in detail, including how many versions the service holds against how many this machine recorded, and with `include_content` the current decrypted content. Read it before republishing anything you did not just write: republish replaces what the link serves, so without the read-back the edit is blind. Content that is not valid UTF-8 is reported as size and type rather than mangled text. |
-| `relic_republish` | `relic_id`, `path`, optional `filename`, `title`, `cover`, `ttl_days` | Publishes a new version under the same key, so the share URL is unchanged. Replaces the plaintext title (defaults to the new filename; pass `""` to remove it). Replaces the cover image with a newly rendered cover, or clears it if `cover: false` is passed. Works only on the machine holding that relic's key and publish token; a taken-down relic can never be revived. |
+| `relic_republish` | `relic_id`, `path`, optional `filename`, `title`, `cover`, `ttl_days`, `addresses`, `notify` | Publishes a new version under the same key, so the share URL is unchanged. Replaces the plaintext title (defaults to the new filename; pass `""` to remove it). Replaces the cover image with a newly rendered cover, or clears it if `cover: false` is passed. Sends a change notice email to everyone following the relic unless `notify: false` is passed. Works only on the machine holding that relic's key and publish token; a taken-down relic can never be revived. |
+| `relic_share` | `relic_id`, `emails` | Send a relic this machine published to named people. Registers up to 20 email addresses with the service for change notices on future versions, and returns a composed share email and mailto link to draft in the sharer's own mailbox. Addresses are stored in the clear by the service, linked to the relic id. Relic never sends the share email. Readers holding the link can also share from the viewer once this client version has published or republished the relic. |
 | `relic_read_comments` | `relic_id` | Returns the relic's comments oldest first, decrypted locally, with the author and a count of any that would not decrypt. Works only on the machine that published. |
 | `relic_comment` | `relic_id`, `body`, optional `display_name` | Leaves a comment, encrypted on this machine, authorized by the publish token and attributed as `publisher`. Body caps at 4096 bytes of UTF-8. |
 | `relic_describe_client` | none | Explains the encryption path. Reads nothing, sends nothing. |

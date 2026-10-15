@@ -16,8 +16,7 @@ The pin isn't housekeeping. Tool-result semantics are revision-dependent, so a d
 
 ### 1.1 The tool names
 
-**The workflow tools are named `relic_publish`, `relic_lookup_source`, `relic_republish`, `relic_read_comments`, and `relic_comment`.** Each name is stable across releases, and renaming one is a breaking change because saved agent instructions and project prompts reference it by string.
-
+**The tools are named `relic_publish`, `relic_list`, `relic_show`, `relic_lookup_source`, `relic_republish`, `relic_share`, `relic_read_comments`, `relic_comment`, `relic_edit_comment`, `relic_resolve_comment`, and `relic_describe_client`.** Each name is stable across releases, and renaming one is a breaking change because saved agent instructions and project prompts reference it by string.
 The spec allows a wide field: names run "between 1 and 128 characters in length (inclusive)", are case-sensitive, and are limited to ASCII letters, digits, underscore, hyphen, and dot ([MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)). Uniqueness is only guaranteed inside one server. The spec then names the hazard directly: clients that aggregate tools from multiple servers may hit collisions and should implement "a disambiguation strategy such as prefixing tool names with a server identifier", and the server's own `name` "is not guaranteed to be unique across servers" so it can't be leaned on for that.
 
 A bare `publish` collides with incumbent publishing MCP servers, and the consequence is a security outcome produced by a naming decision. The model asks for `publish`, the client disambiguates to whichever server it prefers, and the file lands on a service with different encryption or none. The publisher sees a URL come back and has no way to tell which service produced it. Prefixing with the product name makes that collision essentially impossible, and it's the spec's own remedy taken literally rather than a house convention: a prefix is the leading segment, so "prefixing tool names with a server identifier" puts the identifier first, which is what `relic_publish` spells. Putting the product first also groups every Relic tool together in an aggregated list, which is what a human scanning `/mcp` actually reads.
@@ -99,7 +98,7 @@ The success schema stays strict instead of making `url` nullable for errors. A c
 
 The alternatives are worse in ways that matter. A permissive schema with a nullable `url` throws away validation on the success path, which is the path a caller depends on, and it invites a client to hand the model a typed object whose URL is null. A conforming object with a null URL is a lie in a typed field. Omitting `outputSchema` entirely loses typing everywhere to buy uniformity on the error path.
 
-Success returns a publisher-readable text content block, followed by the standalone version-history sentence from 1.3. The MCP result defines `content` as a `ContentBlock[]` and `structuredContent` separately ([MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)), so the second text block is additive: the ten-member publish `structuredContent`, the nine-member republish `structuredContent`, and both strict `outputSchema` declarations remain unchanged.
+Success returns a publisher-readable text content block, followed by the standalone version-history sentence from 1.3. The MCP result defines `content` as a `ContentBlock[]` and `structuredContent` separately ([MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)), so the second text block is additive: the publish `structuredContent` members (`url`, `relic_id`, `relic_expires_at`, `renderer_class`, `filename`, `title`, `resolved_path`, `report_url`, `disclosure_url`, `version`, `cover`), the republish `structuredContent` members (`relic_id`, `version`, `relic_expires_at`, `renderer_class`, `filename`, `title`, `resolved_path`, `report_url`, `disclosure_url`, `key_phrase`, `cover`, `notify`, with optional `acknowledgements`), and both strict `outputSchema` declarations require their respective members.
 
 **Every result this tool returns carries `resultType: "complete"`**, success and failure alike, because the pinned revision puts that member on every `tools/call` result including its own `isError: true` example. A document arguing that result semantics are revision-dependent has to name the member the revision added. The sibling value is `input_required`, where "Servers MAY respond to tools/call with an InputRequiredResult to indicate that additional input is needed before the tool call can be completed" ([MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)). **`relic_publish` never returns it.** It elicits nothing: every input it needs arrives in the call, and a missing one is a refusal the model corrects by calling again.
 
@@ -129,10 +128,9 @@ One property is load-bearing and easy to get backwards: **progress defeats the i
 
 **When no progress token is supplied, the server can't keep the call warm and doesn't try.** The orphan risk returns in full, and the mitigation is section 4.7: the client generated the ID and the key before anything left the machine, so the URL exists in the tool's own hands regardless of what happens to the response.
 
-### 1.6 Six tools, and why there's still no delete tool
+### 1.6 Eleven tools, and why there's still no delete tool
 
-**The surface is five workflow tools plus one inspection tool.** `relic_publish` creates a new encrypted URL. `relic_lookup_source` reads local state to recover the id for an existing source. `relic_republish` updates that id under its original key and token. `relic_read_comments` reads what people left on a relic. `relic_comment` answers them. `relic_describe_client` explains the client without reading a source or calling the service. Lookup stays separate because the agent needs the id before it chooses a write; hiding lookup inside either write makes the answer observable only after choosing. The two comment tools stay separate from each other for the narrower version of the same reason: the read needs no credential and the write spends the publish token, so folding them together makes an agent that only wants to read present a write credential to find out. The naming rule of 1.1 applies to all six.
-
+**The surface is ten workflow tools plus one inspection tool.** `relic_publish` creates a new encrypted URL. `relic_list` enumerates relics published by this machine. `relic_show` inspects one relic in detail and decrypts it. `relic_lookup_source` reads local state to recover the id for an existing source. `relic_republish` updates that id under its original key and token. `relic_share` registers email addresses for change notices and composes a share email. `relic_read_comments` reads what people left on a relic. `relic_comment` answers them. `relic_edit_comment` edits a comment. `relic_resolve_comment` settles an open comment. `relic_describe_client` explains the client without reading a source or calling the service. Lookup stays separate because the agent needs the id before it chooses a write; hiding lookup inside either write makes the answer observable only after choosing. The comment tools stay separate from each other for the narrower version of the same reason: the read needs no credential and the write spends the publish token, so folding them together makes an agent that only wants to read present a write credential to find out. The naming rule of 1.1 applies to all eleven.
 **A publisher still cannot delete their own relic, and the reasoning had to be restated rather than left where it was, because the reversal broke half of it.** With no publisher account, a publisher-side delete has to be authorized by something the publisher holds, and there were exactly two candidates. Authorizing on anything derivable from the URL means every recipient can delete the relic, which hands a link-holder a destructive capability the publisher never granted and reproduces the burn-after-reading failure the frame ruled out for the first release. That candidate is dead on arrival and nothing reversed it. The other was a separately stored token, and the old objection was that keeping durable per-relic state on disk is a relic list under another name with no locked surface to house it. That objection is spent: republish pays exactly that cost, the key and token persisted on the publishing machine, so the state exists and the token is in hand. What keeps self-delete out of this change is not architecture but the abuse posture: deletion is the takedown primitive, it is operator-audited end to end (section 4 of `service.md`), and a publisher-side path through the same machinery would sit beside the audit trail rather than inside it. The token makes a self-delete tool specifiable where it used to be foreclosed; if a later station adds one, that station owns the audit question, and this paragraph is what it reopens.
 
 So deletion stays operator-only through `/abuse` (`service.md` section 4), which already works on the ID alone and needs no key. A publisher who wants their own relic gone reports it with its ID. The mandatory TTL used to bound the exposure in the meantime, which was why this was deferrable rather than a hole; that bound is gone, and what bounds exposure now is the per-object download cap and operator delete. The gap that leaves is named rather than papered over: a publisher who wants their own never-expiring relic gone waits on an operator. If a later station adds publisher self-delete, the delete tool becomes specifiable and this section is what it reopens.
@@ -160,6 +158,34 @@ So deletion stays operator-only through `/abuse` (`service.md` section 4), which
 **A display name aliases the attribution and never replaces it.** It rides inside the ciphertext, so the service never sees it, and the `author` the service returns is the record. `relic_comment` takes it as an optional argument because otherwise every agent comment renders as a bare `publisher`, which tells a reader nothing about which agent, on whose behalf, said it.
 
 **What this discloses is stated where the publisher can act on it.** `relic_describe_client` gains two members, `comment_encryption` and `comment_attribution`, and the prose gains a paragraph: comment bodies reach the service as ciphertext, and the operator nonetheless learns which identity commented on which relic and when. That is the participation graph the frame entry names as unrecoverable, and it is not covered by the content's encryption.
+
+### 1.8 The share tool
+
+**`relic_share` registers recipient email addresses for change notices and prepares a ready-to-send share email.**
+
+It takes two inputs:
+- `relic_id`: the 26-character relic id.
+- `emails`: an array of 1 to 20 email address strings.
+
+Success returns `structuredContent` with seven members, all required:
+- `relic_id`: the canonical relic id.
+- `registered`: normalized email addresses accepted by the service.
+- `added`: number of new addresses added to the share list.
+- `shared_count`: total count of shared addresses on this relic.
+- `share_limit`: maximum shared addresses allowed per relic (50).
+- `email`: a `ShareEmail` object with `to`, `subject`, and `text`.
+- `mailto_url`: a pre-populated `mailto:` link opening a draft in the user's mail client.
+
+**The email is composed on the client, and the service never sends it.** Because the share URL carries the decryption key in its fragment, and the fragment must never reach the service, the share email cannot be sent by Relic. The client composes the email locally for the sharer to draft and send from their own mailbox. Calling `relic_share` discloses the full link into the session transcript, so the key enters the transcript at share time. The service stores only the email addresses in the clear, linked to the relic id, to deliver change notices on republish.
+
+**Refusals distinguish local boundaries from server enforcement:**
+- `no_local_publish_state`: the relic id is invalid, or the relic was published on another machine (the key and publish token live only on the publishing machine). Passing a full share URL instead of an id is refused locally to avoid putting the key into the transcript unnecessarily.
+- `local_state_unreadable`: local publish state could not be read from disk.
+- `local_share_emails_invalid`: the email address list is empty or exceeds 20 addresses.
+- `app_response_unusable`: the service returned an unrecognized response shape, or a plain 404 indicating an older service that does not support `relic_share`.
+- Server refusals: `service_paused` (kill switch active), `share_rate_limited` (rate limited by IP), `invalid_relic_id` (malformed id), `relic_removed` (relic was taken down), `relic_not_found` (relic does not exist), `invalid_publish_token` (token mismatch), `relic_expired` or `download_cap_exhausted` (relic no longer available), `invalid_share` (malformed email syntax), and `share_limit_reached` (relic reached 50 address cap).
+
+Readers holding the link can also share from the viewer once the relic was published or republished by a client that supplies a share verifier.
 
 ## 2. Error mapping, and the two legs the app server is not in
 

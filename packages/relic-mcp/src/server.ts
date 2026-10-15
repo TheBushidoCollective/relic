@@ -62,6 +62,7 @@ import {
   ServerRefusal,
 } from './publish.ts';
 import { type RepublishAddressEntry, republish } from './republish.ts';
+import { shareRelic } from './share.ts';
 
 export type { JsonRpcRequest, JsonRpcResponse };
 export {
@@ -108,6 +109,11 @@ export const DESCRIBE_TOOL_NAME = 'relic_describe_client';
  * that can never succeed.
  */
 export const REPUBLISH_TOOL_NAME = 'relic_republish';
+
+/**
+ * The share tool: send a relic this machine published to named people.
+ */
+export const SHARE_TOOL_NAME = 'relic_share';
 
 /**
  * Source lookup is a separate read-only tool.
@@ -376,7 +382,8 @@ export const REPUBLISH_TOOL_DEFINITION = {
     'By default a picture of the first screen is rendered locally and ' +
     'uploaded unencrypted for link previews; pass cover: false to withhold ' +
     'it.' +
-    REPUBLISH_DISCIPLINE_DISCLOSURE,
+    REPUBLISH_DISCIPLINE_DISCLOSURE +
+    ' Each new version emails a change notice, naming the title and version and never the key, to everyone who commented and every address added with relic_share; pass notify: false to skip it.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -440,6 +447,12 @@ export const REPUBLISH_TOOL_DEFINITION = {
         description:
           'Optional. Render a picture of the first screen of the file on this machine and upload it for link previews. Defaults to true. NOT encrypted: the service stores it and anyone who fetches the link sees it, with or without the key. Pass false for anything you would not show in a chat preview.',
       },
+      notify: {
+        type: 'boolean',
+        default: true,
+        description:
+          'Optional. Email a change notice for this version to everyone following the relic: each verified address that commented on it and each address added with relic_share, except any that stopped those emails. Defaults to true. The notice names the title and version and never carries the key. Pass false for a change not worth an email, such as a typo fix.',
+      },
     },
     required: ['relic_id', 'path'],
     additionalProperties: false,
@@ -476,6 +489,10 @@ export const REPUBLISH_TOOL_DEFINITION = {
         required: ['status'],
         additionalProperties: false,
       },
+      notify: {
+        type: 'boolean',
+        description: 'Whether a change notice was sent for this version.',
+      },
     },
     required: [
       'relic_id',
@@ -489,6 +506,82 @@ export const REPUBLISH_TOOL_DEFINITION = {
       'disclosure_url',
       'key_phrase',
       'cover',
+      'notify',
+    ],
+    additionalProperties: false,
+  },
+} as const;
+
+export const SHARE_TOOL_DEFINITION = {
+  name: SHARE_TOOL_NAME,
+  title: 'Share a relic with people',
+  description:
+    'Send a relic this machine published to named people. Registers their email addresses with the service so each gets a change notice when you republish, and returns a ready share email carrying the full link, plus a mailto link that opens it as a draft. Relic never sends the share email, because it carries the key: draft it in the sharer\u2019s own mailbox, from their own address, and let them send it. The service stores the addresses in the clear, linked to the relic. A change notice names the title and version, never the key, and carries a link to stop them. Only works on the machine that published the relic: the link needs its key and registering needs its publish token. Takes the relic id, never the share URL. Up to 20 addresses per call and 50 per relic.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: {
+        type: 'string',
+        description: 'The 26-character relic id the original publish returned.',
+      },
+      emails: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 1,
+        maxItems: 20,
+        description: 'Up to 20 email addresses to register for change notices.',
+      },
+    },
+    required: ['relic_id', 'emails'],
+    additionalProperties: false,
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      relic_id: { type: 'string' },
+      registered: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Normalized email addresses registered by the service.',
+      },
+      added: {
+        type: 'integer',
+        minimum: 0,
+        description: 'Number of new email addresses added to the share list.',
+      },
+      shared_count: {
+        type: 'integer',
+        minimum: 0,
+        description: 'Total number of shared addresses on this relic.',
+      },
+      share_limit: {
+        type: 'integer',
+        minimum: 1,
+        description: 'Maximum shared addresses allowed per relic.',
+      },
+      email: {
+        type: 'object',
+        properties: {
+          to: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+          subject: { type: 'string' },
+          text: { type: 'string' },
+        },
+        required: ['to', 'subject', 'text'],
+        additionalProperties: false,
+      },
+      mailto_url: { type: 'string' },
+    },
+    required: [
+      'relic_id',
+      'registered',
+      'added',
+      'shared_count',
+      'share_limit',
+      'email',
+      'mailto_url',
     ],
     additionalProperties: false,
   },
@@ -1447,8 +1540,7 @@ export const INSTRUCTIONS = `Relic encrypts a file on this machine and uploads \
 only ciphertext. The key lives in the URL fragment, which browsers never send \
 to a server.
 
-Eight things that change how you should act:
-
+Nine things that change how you should act:
 1. The link is the credential: anyone holding it, fragment included, can read \
 the file. Never paste it into a tracker, log, or channel.
 2. A relic carries a plaintext title, defaulting to the filename: the service \
@@ -1470,7 +1562,14 @@ handled. All take the relic id and attribute you as publisher.
 8. By default relic_publish and relic_republish upload a picture of the file's \
 first screen, unencrypted, for link previews: the service and anyone holding \
 the link without the key can see it. Pass cover: false for anything you would \
-not show in a chat preview.`;
+not show in a chat preview.
+9. relic_republish emails a change notice, naming the title and version but \
+never the key, to everyone who commented and every address added with \
+relic_share; pass notify: false to skip it. relic_share hands back a share \
+email with the full link for you to draft in the sharer's own mailbox: Relic \
+never sends it, so the key never reaches the service. Readers holding the \
+link can also share from the viewer once this client version has published \
+or republished the relic.`;
 
 /**
  * Handle one JSON-RPC message.
@@ -1542,6 +1641,7 @@ export async function handleMessage(
             SHOW_TOOL_DEFINITION,
             LOOKUP_TOOL_DEFINITION,
             REPUBLISH_TOOL_DEFINITION,
+            SHARE_TOOL_DEFINITION,
             READ_COMMENTS_TOOL_DEFINITION,
             COMMENT_TOOL_DEFINITION,
             EDIT_COMMENT_TOOL_DEFINITION,
@@ -1616,6 +1716,18 @@ async function callTool(
           comment_attribution:
             'the publish token, reported by the service as "publisher"; the ' +
             'operator learns which identity commented on which relic and when',
+          change_notices:
+            'on every republish unless notify: false, the service emails every ' +
+            'verified address that commented on the relic and every address ' +
+            'added with relic_share, minus any that used the stop link; the ' +
+            'email names the title and version and never carries the key',
+          sharing:
+            'relic_share sends the service email addresses and nothing else; ' +
+            'it stores them in the clear, linked to the relic id; the share ' +
+            'email carrying the full link is composed here for you to send ' +
+            'from your own mailbox, so the key never reaches the service; ' +
+            'readers holding the link can also share from the viewer once a ' +
+            'relic was published or republished by this client version',
           service_origin: deps.serviceOrigin,
         },
         isError: false,
@@ -1637,6 +1749,10 @@ async function callTool(
 
   if (params['name'] === REPUBLISH_TOOL_NAME) {
     return callRepublish(id, params, deps);
+  }
+
+  if (params['name'] === SHARE_TOOL_NAME) {
+    return callShare(id, params, deps);
   }
 
   if (params['name'] === READ_COMMENTS_TOOL_NAME) {
@@ -2146,7 +2262,15 @@ async function callRepublish(
     );
   }
   const cover = typeof rawCover === 'boolean' ? rawCover : undefined;
-
+  const rawNotify = args['notify'];
+  if (rawNotify !== undefined && typeof rawNotify !== 'boolean') {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`notify` must be a boolean or omitted'
+    );
+  }
+  const notify = typeof rawNotify === 'boolean' ? rawNotify : undefined;
   try {
     const result = await republish(
       {
@@ -2157,6 +2281,7 @@ async function callRepublish(
         ttl_days: ttlDays.days,
         addresses,
         cover,
+        notify,
       },
       deps
     );
@@ -2176,6 +2301,11 @@ async function callRepublish(
               'The share URL is unchanged: everyone holding the existing ' +
               'link, including its fragment, now sees this content. There ' +
               'is no new link to hand out.\n\n' +
+              `${
+                result.notify
+                  ? `Relic sends a change notice for version ${result.version} to everyone following this relic, meaning each address that commented on it or was added with relic_share, except any that stopped those emails. It names the title and version and never carries the key.`
+                  : 'No change notice goes out for this version, as asked.'
+              }\n\n` +
               `Key phrase: ${result.key_phrase}\n` +
               `${KEY_PHRASE_DISCLOSURE}\n\n` +
               `${
@@ -2201,6 +2331,73 @@ async function callRepublish(
   }
 }
 
+async function callShare(
+  id: string | number | null,
+  params: Record<string, unknown>,
+  deps: PublishDeps
+): Promise<JsonRpcResponse> {
+  const args = (params['arguments'] ?? {}) as Record<string, unknown>;
+  const relicId = args['relic_id'];
+  if (typeof relicId !== 'string' || relicId.length === 0) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`relic_id` is required and must be a string'
+    );
+  }
+
+  const rawEmails = args['emails'];
+  if (!Array.isArray(rawEmails)) {
+    return errorResponse(
+      id,
+      ERROR_CODES.invalidParams,
+      '`emails` is required and must be an array of email addresses'
+    );
+  }
+  for (let i = 0; i < rawEmails.length; i++) {
+    if (typeof rawEmails[i] !== 'string') {
+      return errorResponse(
+        id,
+        ERROR_CODES.invalidParams,
+        `\`emails[${i}]\` must be a string`
+      );
+    }
+  }
+
+  try {
+    const result = await shareRelic(
+      {
+        relic_id: relicId,
+        emails: rawEmails as readonly string[],
+      },
+      deps
+    );
+
+    const text =
+      `Registered ${result.registered.length} address(es) on relic ${result.relic_id} ` +
+      `for change notices (${result.added} new; ${result.shared_count} of ${result.share_limit} on its list). ` +
+      'Relic has emailed nobody.\n\n' +
+      "Draft the email below in the sharer's own mailbox, from their own address, " +
+      'and let them send it. Do not send it through Relic or any other service, and ' +
+      'do not paste the link anywhere else: it carries the key, which is now in this transcript.\n\n' +
+      `To: ${result.email.to.join(', ')}\n` +
+      `Subject: ${result.email.subject}\n\n` +
+      `${result.email.text}\n\n` +
+      `Mail client link (opens a draft with all of the above): ${result.mailto_url}`;
+
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        content: [{ type: 'text', text }],
+        structuredContent: result,
+        isError: false,
+      },
+    };
+  } catch (error) {
+    return { jsonrpc: '2.0', id, result: toolError(error) };
+  }
+}
 async function callReadComments(
   id: string | number | null,
   params: Record<string, unknown>,
@@ -2688,6 +2885,12 @@ const REFUSAL_GUIDANCE: Readonly<Record<string, string>> = {
     'The service is rate limiting comments on that relic. The refusal ' +
     'carries retry_after_seconds; wait it out rather than retrying in a ' +
     'loop, which only extends the limit.',
+  share_limit_reached:
+    'That relic already has the most shared addresses the service allows; the people on it still get change notices.',
+  invalid_share:
+    'Every entry must be one email address, and a call takes at most share_max_per_call of them.',
+  share_rate_limited:
+    'The refusal carries retry_after_seconds; wait it out rather than retrying in a loop.',
 };
 
 /**
@@ -2782,6 +2985,17 @@ an agent has no mailbox to verify. What the operator does learn is who
 commented on which relic and when: for a person that is a verified email
 address, and that association is a real cost the content's encryption does
 not cover.
+
+What happens with change notices and sharing: on every republish unless
+notify: false, the service emails every verified address that commented on
+the relic and every address added with relic_share, minus any that used the
+stop link. The email names the title and version and never carries the key.
+relic_share sends the service email addresses and nothing else: it stores
+them in the clear, linked to the relic id. The share email carrying the
+full link is composed here on this machine for you to send from your own
+mailbox, so the key never reaches the service. Readers holding the link
+can also share from the viewer once the relic was published or republished
+by this client version.
 
 What this does NOT protect against: the key is returned to your agent in the
 URL, so it enters the model's context and your session transcript. That is

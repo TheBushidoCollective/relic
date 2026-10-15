@@ -14,6 +14,7 @@
 
 import {
   deriveRendererClass,
+  deriveShareProof,
   encodeKey,
   encryptRelic,
   generateKey,
@@ -21,6 +22,7 @@ import {
   normalizeTitle,
   type RendererClass,
   relicUrl,
+  shareVerifierFor,
 } from '@relic/format';
 import type {
   CoverOutcome,
@@ -86,6 +88,7 @@ export type ClientCode =
   | 'local_comment_anchor_page_out_of_range'
   | 'local_comment_addresses_invalid'
   | 'local_comment_addresses_too_long'
+  | 'local_share_emails_invalid'
   | 'unaddressed_comments'
   | 'duplicate_version'
   | 'empty_acknowledgement_note'
@@ -402,6 +405,7 @@ export async function publish(
 
     let grant: Record<string, unknown>;
     try {
+      const shareVerifier = await shareVerifierFor(await deriveShareProof(key));
       grant = await postJson(deps, `${deps.serviceOrigin}/api/grant`, {
         challenge_nonce: challenge['challenge_nonce'],
         relic_id: relicId,
@@ -414,6 +418,7 @@ export async function publish(
         // server's default (kept until deleted) and never a value this
         // client guessed on the publisher's behalf.
         ...(input.ttl_days === undefined ? {} : { ttl_days: input.ttl_days }),
+        share_verifier: shareVerifier,
       });
     } catch (error) {
       if (

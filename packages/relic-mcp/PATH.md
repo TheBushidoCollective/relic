@@ -194,3 +194,57 @@ Success ends with:
 ```text
 COVER_LIVE_OK relic_id=<id>
 ```
+
+## Change emails and sharing
+
+Run from the repository root:
+
+```bash
+RELIC_CHROME_PATH=none bun packages/relic-mcp/test/notify-path.ts
+```
+
+The command puts the app server on loopback with `MemoryStore` and `MemoryStorage`,
+capturing email sends. Every tool call runs as a fresh stdio process. It exercises
+the full change notification and sharing lifecycle: publishing a relic with
+its derived `share_verifier`, posting a comment, sharing to recipient email addresses,
+republishing with change notices, exercising the one-click unsubscribe stop link,
+verifying opted-out recipients are skipped on subsequent republishes, verifying
+`notify: false` suppresses change notices, demonstrating unlanded republishes send
+zero notices, and cleaning up via operator delete.
+
+Success ends with:
+
+```text
+PUBLISHED relic_id=<id>
+SHARED registered=2 link_has_fragment=true
+CHANGE_NOTICES version=2 recipients=3 keyless=true list_unsubscribe=true reader_mails=1
+STOPPED get=200 post=200 redirect=false
+CHANGE_NOTICES version=3 recipients=2 opted_out_skipped=1
+NOTIFY_FALSE version=4 recipients=0
+UNLANDED recipients=0
+DELETED shares_deleted=2 opt_outs_deleted=1
+NOTIFY_PATH_OK
+```
+
+## Change emails on the live service
+
+Run from the repository root:
+
+```bash
+RELIC_NOTIFY_PROBE_TO=a@example.com,b@example.com bun packages/relic-mcp/test/notify-live-probe.ts
+```
+
+The probe exercises change notices and sharing against a live service deployment.
+It reads recipient addresses from `RELIC_NOTIFY_PROBE_TO` and respects
+`RELIC_SERVICE_ORIGIN` (defaulting to `https://relik.link`),
+`RELIC_NOTIFY_PROBE_CLIENT` (`'source'` or `'npx:<version>'`), and
+`RELIC_NOTIFY_PROBE_PHASE` (`'send'`, `'after-stop'`, or `'quiet'`).
+
+It publishes a fixture with a 1-day TTL, an empty title, and `cover: false`, shares
+to the recipients, republishes, and verifies change notices.
+
+Success for phase 1 ends with:
+
+```text
+PROBE relic_id=<id> version=2
+```
