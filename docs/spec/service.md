@@ -214,6 +214,19 @@ The link is:
 `${config.serviceOrigin}/api/relics/${relicId}/unsubscribe?addr=${addressHash}&token=${token}`.
 The unsubscribe key must never be deleted; it is generated once and stored permanently in the key vault/store so historical links remain verifiable.
 
+### 1.13 Client IP derivation and trusted proxy hops
+
+Every IP-keyed rate limit (publish, mint, comment writes, auth sign-in requests, cover uploads, shares, and stop links) relies on an authenticated client IP rather than caller-supplied headers.
+
+In production on relik.link, traffic arrives through a Google Cloud Global External Application Load Balancer in front of Cloud Run. The load balancer terminates public TLS and appends two IP addresses to the `X-Forwarded-For` header in order: the connecting client IP, followed by the load balancer forwarding rule IP (`<existing-value>, <client-ip>, <lb-ip>`).
+
+To prevent rate limit bypass via caller-controlled headers, the server derives the client IP by counting hops from the right of `X-Forwarded-For`, configured by `trustedProxyHops`:
+- **External Application Load Balancer (`trustedProxyHops = 2`, default):** the client IP is two hops from the right (index `-2`), ignoring any caller-supplied leading entries.
+- **Direct Cloud Run (`trustedProxyHops = 1`):** the client IP is one hop from the right (index `-1`).
+- **Local or dev without proxy (`trustedProxyHops = 0`):** `X-Forwarded-For` is ignored as untrusted; the server falls back to `X-Real-IP` or `127.0.0.1`.
+
+Entries to the left of the trusted hop are caller-controlled and never trusted. If `X-Forwarded-For` contains fewer entries than `trustedProxyHops`, the request did not transit the expected proxy chain; the server falls back to `X-Real-IP` or `127.0.0.1` rather than trusting caller-supplied values.
+
 ## 2. Mint placement, the mint response, and counting
 
 **The mint is never a side effect of serving `/{id}`.** That path returns a static shell with no mint, no counter increment, and no cap consumption. The mint is a distinct request the shell makes.
