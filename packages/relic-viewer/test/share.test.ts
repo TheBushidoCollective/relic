@@ -359,7 +359,8 @@ describe('the share request', () => {
     );
     if (limited.kind !== 'refused') throw new Error('expected a refusal');
     expect(limited.refusal.detail).toContain('about 38 minutes');
-    expect(limited.refusal.retryable).toBe(true);
+    // The wait is the remedy, so no immediate retry is offered.
+    expect(limited.refusal.retryable).toBe(false);
   });
 
   test('an answer that is not the documented shape is not called success', async () => {

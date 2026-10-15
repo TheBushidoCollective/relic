@@ -3171,6 +3171,266 @@ canvas.relic-page {
   }
 }
 
+/* ---------- the share panel ---------- */
+
+/* A sheet that drops from the band, under the action that opened it. It is a
+   modal dialog rather than a third sidebar: sharing is a short errand with an
+   end, the reading row already has a conversation beside it, and a dialog
+   gives the keyboard its trap and Escape for nothing. Square, hairline, the
+   patina rule on top like the composer, and the version list's shadow, so it
+   reads as the same family of chrome as everything else that drops from the
+   band. */
+.share-panel {
+  position: fixed;
+  inset: var(--share-top, var(--bar-height)) 0 auto auto;
+  width: min(28rem, 100vw);
+  max-width: 100vw;
+  max-height: calc(100dvh - var(--share-top, var(--bar-height)));
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--ink);
+  font-family: var(--sans);
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-top: 2px solid var(--patina);
+  border-right: 0;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+}
+
+.share-panel::backdrop {
+  background: rgb(16 19 20 / 28%);
+}
+
+.share-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  padding: 0 0.4rem 0 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+}
+
+.share-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.share-title:focus {
+  outline: none;
+}
+
+.share-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.share-close:hover {
+  color: var(--patina-ink);
+  background: var(--ground);
+}
+
+.share-close:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: -2px;
+}
+
+.share-body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1.1rem 1.25rem 1.4rem;
+}
+
+.share-body > * {
+  min-width: 0;
+}
+
+.share-form {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.share-form > .action.primary,
+.share-body > .action {
+  justify-self: start;
+}
+
+.share-body .thread-note,
+.share-body .thread-policy {
+  margin: 0;
+}
+
+.share-body .compose-warning {
+  margin: 0;
+}
+
+/* The two facts a sharer is owed before typing anybody's address, set as the
+   composer sets its disclosure: at reading size, on the oxide rule. */
+.share-facts {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.share-facts p {
+  margin: 0;
+}
+
+.share-addresses {
+  min-height: 4.6rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.share-addresses[aria-invalid="true"] {
+  border-color: var(--oxide);
+}
+
+/* Inside the sheet every action is a bordered button: the band's divider
+   rules mean nothing away from the band. */
+.share-panel .action {
+  justify-content: center;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--rule-strong);
+}
+
+.share-panel .action.primary {
+  border: 1px solid var(--patina);
+}
+
+.share-panel .action:disabled {
+  color: var(--ink-soft);
+  background: var(--ground);
+  border-color: var(--rule);
+  cursor: default;
+}
+
+.share-panel .action span {
+  display: inline;
+}
+
+.share-panel .compose-foot .action.primary {
+  margin-left: auto;
+}
+
+.share-done {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  background: var(--diff-added);
+  border-left: 2px solid var(--patina);
+}
+
+/* The email as the recipient will get it, so what is about to leave the
+   sharer's own mailbox is read before it leaves. The body is set in the
+   reading face because it is a letter, not chrome. */
+.share-email {
+  margin: 0;
+  background: var(--ground);
+  border: 1px solid var(--rule);
+}
+
+.share-email-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.3rem 0.75rem;
+  margin: 0;
+  padding: 0.65rem 0.8rem;
+  font-size: 0.82rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.share-email-head dt {
+  padding-top: 0.15rem;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.share-email-head dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.share-email-body {
+  margin: 0;
+  padding: 0.75rem 0.8rem 0.85rem;
+  font-family: var(--serif);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.share-send {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.share-again {
+  justify-self: start;
+  padding: 0;
+  color: var(--patina-ink);
+  font: inherit;
+  font-size: 0.8rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.share-again:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 2px;
+}
+
+.share-body .thread-refusal {
+  margin: 0;
+}
+
+/* A phone gets the whole width under the band, and the buttons stack so the
+   one that opens the mail app is never a sliver. */
+@media (max-width: 34rem) {
+  .share-panel {
+    width: 100vw;
+    border-left: 0;
+  }
+
+  .share-head {
+    padding-left: 1rem;
+  }
+
+  .share-body {
+    padding: 1rem 1rem 1.25rem;
+  }
+
+  .share-send .action {
+    flex: 1 1 100%;
+  }
+}
+
 /* ---------- toast ---------- */
 
 .toast {
@@ -3732,267 +3992,6 @@ canvas.relic-page {
 }
 
 
-/* ---------- the share panel ---------- */
-
-/* A sheet that drops from the band, under the action that opened it. It is a
-   modal dialog rather than a third sidebar: sharing is a short errand with an
-   end, the reading row already has a conversation beside it, and a dialog
-   gives the keyboard its trap and Escape for nothing. Square, hairline, the
-   patina rule on top like the composer, and the version list's shadow, so it
-   reads as the same family of chrome as everything else that drops from the
-   band. */
-.share-panel {
-  position: fixed;
-  inset: var(--share-top, var(--bar-height)) 0 auto auto;
-  width: min(28rem, 100vw);
-  max-width: 100vw;
-  max-height: calc(100dvh - var(--share-top, var(--bar-height)));
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  color: var(--ink);
-  font-family: var(--sans);
-  background: var(--surface);
-  border: 1px solid var(--rule-strong);
-  border-top: 2px solid var(--patina);
-  border-right: 0;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
-}
-
-.share-panel::backdrop {
-  background: rgb(16 19 20 / 28%);
-}
-
-.share-head {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  min-height: 2.75rem;
-  padding: 0 0.4rem 0 1.25rem;
-  background: var(--surface);
-  border-bottom: 1px solid var(--rule);
-}
-
-.share-title {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-.share-title:focus {
-  outline: none;
-}
-
-.share-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2.25rem;
-  height: 2.25rem;
-  padding: 0;
-  color: var(--ink-soft);
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-}
-
-.share-close:hover {
-  color: var(--patina-ink);
-  background: var(--ground);
-}
-
-.share-close:focus-visible {
-  outline: 2px solid var(--patina);
-  outline-offset: -2px;
-}
-
-.share-body {
-  display: grid;
-  gap: 0.75rem;
-  padding: 1.1rem 1.25rem 1.4rem;
-}
-
-.share-body > * {
-  min-width: 0;
-}
-
-.share-form {
-  display: grid;
-  gap: 0.75rem;
-  margin: 0;
-}
-
-.share-form > .action.primary,
-.share-body > .action {
-  justify-self: start;
-}
-
-.share-body .thread-note,
-.share-body .thread-policy {
-  margin: 0;
-}
-
-.share-body .compose-warning {
-  margin: 0;
-}
-
-/* The two facts a sharer is owed before typing anybody's address, set as the
-   composer sets its disclosure: at reading size, on the oxide rule. */
-.share-facts {
-  display: grid;
-  gap: 0.4rem;
-}
-
-.share-facts p {
-  margin: 0;
-}
-
-.share-addresses {
-  min-height: 4.6rem;
-  font-family: var(--mono);
-  font-size: 0.8rem;
-  line-height: 1.6;
-  resize: vertical;
-}
-
-.share-addresses[aria-invalid="true"] {
-  border-color: var(--oxide);
-}
-
-/* Inside the sheet every action is a bordered button: the band's divider
-   rules mean nothing away from the band. */
-.share-panel .action {
-  justify-content: center;
-  padding: 0.5rem 0.85rem;
-  border: 1px solid var(--rule-strong);
-}
-
-.share-panel .action.primary {
-  border: 1px solid var(--patina);
-}
-
-.share-panel .action:disabled {
-  color: var(--ink-soft);
-  background: var(--ground);
-  border-color: var(--rule);
-  cursor: default;
-}
-
-.share-panel .action span {
-  display: inline;
-}
-
-.share-panel .compose-foot .action.primary {
-  margin-left: auto;
-}
-
-.share-done {
-  margin: 0;
-  padding: 0.6rem 0.75rem;
-  font-size: 0.84rem;
-  line-height: 1.5;
-  background: var(--diff-added);
-  border-left: 2px solid var(--patina);
-}
-
-/* The email as the recipient will get it, so what is about to leave the
-   sharer's own mailbox is read before it leaves. The body is set in the
-   reading face because it is a letter, not chrome. */
-.share-email {
-  margin: 0;
-  background: var(--ground);
-  border: 1px solid var(--rule);
-}
-
-.share-email-head {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 0.3rem 0.75rem;
-  margin: 0;
-  padding: 0.65rem 0.8rem;
-  font-size: 0.82rem;
-  border-bottom: 1px solid var(--rule);
-}
-
-.share-email-head dt {
-  padding-top: 0.15rem;
-  color: var(--ink-soft);
-  font-family: var(--mono);
-  font-size: 0.66rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.share-email-head dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.share-email-body {
-  margin: 0;
-  padding: 0.75rem 0.8rem 0.85rem;
-  font-family: var(--serif);
-  font-size: 0.9rem;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.share-send {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.share-again {
-  justify-self: start;
-  padding: 0;
-  color: var(--patina-ink);
-  font: inherit;
-  font-size: 0.8rem;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  background: none;
-  border: 0;
-  cursor: pointer;
-}
-
-.share-again:focus-visible {
-  outline: 2px solid var(--patina);
-  outline-offset: 2px;
-}
-
-.share-body .thread-refusal {
-  margin: 0;
-}
-
-/* A phone gets the whole width under the band, and the buttons stack so the
-   one that opens the mail app is never a sliver. */
-@media (max-width: 34rem) {
-  .share-panel {
-    width: 100vw;
-    border-left: 0;
-  }
-
-  .share-head {
-    padding-left: 1rem;
-  }
-
-  .share-body {
-    padding: 1rem 1rem 1.25rem;
-  }
-
-  .share-send .action {
-    flex: 1 1 100%;
-  }
-}
-
-
 /* ---------- mock controls, not part of the viewer ---------- */
 .mock-states {
   position: fixed;
@@ -4091,7 +4090,6 @@ canvas.relic-page {
   <ul data-group="refusal"></ul>
 </aside>
 
-<div class="toast-slot"></div>
 
 <script>
 (() => {
@@ -4189,7 +4187,7 @@ canvas.relic-page {
           headline: 'Relic could not confirm this link\u2019s key',
           detail: 'Sharing sends a value derived from the key in your link, and it does not match the one this relic\u2019s publisher registered. Nothing was added. Republishing registers it again, so this one is for the publisher.' };
       case 'share_rate_limited':
-        return { code, retryable: true,
+        return { code, retryable: false,
           headline: 'Too many shares from here just now',
           detail: `Relic limits how many addresses one reader and one network can add in an hour, because each one joins a mailing list. Nothing was added. Try again in about ${minutes(ext.retry_after_seconds ?? 3600)}.` };
       case 'share_limit_reached': {
@@ -4274,13 +4272,6 @@ canvas.relic-page {
     if (refusal.retryable) card.appendChild(actionButton('Try again', ICON_RETRY, onRetry, true));
     card.appendChild(el('div', 'accession', refusal.code));
     return card;
-  }
-  function toast(message) {
-    document.querySelector('.toast')?.remove();
-    const t = el('div', 'toast', message);
-    t.setAttribute('role', 'status');
-    document.body.appendChild(t);
-    setTimeout(() => t.remove(), 4000);
   }
 
   const dialog = document.getElementById('share');
@@ -4476,7 +4467,7 @@ canvas.relic-page {
     outcome.setAttribute('aria-live', 'polite');
     const copy = actionButton('Copy message', ICON_COPY, () => {
       navigator.clipboard.writeText(email.text).then(
-        () => { outcome.replaceChildren(); toast('Message copied. It contains the key.'); },
+        () => { outcome.replaceChildren(el('p', 'thread-note', 'Message copied. It contains the key.')); },
         () => {
           const range = document.createRange();
           range.selectNodeContents(text);

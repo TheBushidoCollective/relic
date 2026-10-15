@@ -213,7 +213,9 @@ export function shareRefusal(
           'Relic limits how many addresses one reader and one network can ' +
           'add in an hour, because each one joins a mailing list. Nothing ' +
           `was added. Try again in about ${aboutMinutes(extensions.retry_after_seconds)}.`,
-        retryable: true,
+        // The wait is the answer. A Try again beside it would only be
+        // refused again, and the form's own button is still there for later.
+        retryable: false,
       };
     case 'share_limit_reached': {
       const limit = extensions.share_limit;
