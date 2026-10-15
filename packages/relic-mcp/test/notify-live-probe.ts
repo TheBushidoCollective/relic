@@ -117,6 +117,24 @@ async function callMcp(
   return (result['structuredContent'] ?? {}) as Record<string, unknown>;
 }
 
+/**
+ * The relic the send phase published, read from the publish state file the
+ * client keeps: its `relics` map, keyed by relic id. The later phases run in
+ * fresh processes, so the state file is the only place the id survives.
+ */
+async function probeRelicId(): Promise<string> {
+  const state = JSON.parse(await readFile(statePath, 'utf8')) as {
+    relics?: Record<string, unknown>;
+  };
+  const ids = Object.keys(state.relics ?? {});
+  assert.equal(
+    ids.length,
+    1,
+    `expected exactly one relic in ${statePath}; set RELIC_PUBLISH_STATE to the send phase's state file`
+  );
+  return ids[0] as string;
+}
+
 const fixturePath = join(scratch, 'probe-doc.md');
 
 try {
@@ -144,44 +162,39 @@ try {
       `expected ${probeRecipients.length} registered shares, got ${registered.length}`
     );
 
-    // 3. Republish v2
+    // 3. Republish v2. Untitled again: a republish without a title takes the
+    //    new filename, and the notice would then carry it.
     await writeFile(fixturePath, '# Live Probe v2\n');
     const repubRes = await callMcp('relic_republish', {
       relic_id: relicId,
       path: fixturePath,
+      title: '',
       cover: false,
     });
     assert.equal(Number(repubRes['version']), 2);
 
     console.log(`PROBE relic_id=${relicId} version=2`);
   } else if (probePhase === 'after-stop') {
-    // Read state to find relic_id
-    const stateRaw = await readFile(statePath, 'utf8');
-    const stateData = JSON.parse(stateRaw) as Record<string, unknown>;
-    const relicIds = Object.keys(stateData);
-    assert.ok(relicIds.length > 0, 'no relics found in state file');
-    const relicId = relicIds[relicIds.length - 1] ?? '';
+    const relicId = await probeRelicId();
 
     await writeFile(fixturePath, '# Live Probe v3\n');
     const repubRes = await callMcp('relic_republish', {
       relic_id: relicId,
       path: fixturePath,
+      title: '',
       cover: false,
     });
     assert.equal(Number(repubRes['version']), 3);
 
     console.log(`PROBE relic_id=${relicId} version=3`);
   } else if (probePhase === 'quiet') {
-    const stateRaw = await readFile(statePath, 'utf8');
-    const stateData = JSON.parse(stateRaw) as Record<string, unknown>;
-    const relicIds = Object.keys(stateData);
-    assert.ok(relicIds.length > 0, 'no relics found in state file');
-    const relicId = relicIds[relicIds.length - 1] ?? '';
+    const relicId = await probeRelicId();
 
     await writeFile(fixturePath, '# Live Probe v4\n');
     const repubRes = await callMcp('relic_republish', {
       relic_id: relicId,
       path: fixturePath,
+      title: '',
       cover: false,
       notify: false,
     });
