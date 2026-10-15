@@ -9,7 +9,7 @@ import {
 } from '@relic/format';
 import { createApp, type Mailer, type RelicApp } from '../src/app.ts';
 import { sha256Hex } from '../src/gcs.ts';
-import type { OutboundMail } from '../src/mail.ts';
+import { MailRefusedError, type OutboundMail } from '../src/mail.ts';
 import { MemoryStorage } from '../src/storage.ts';
 import { MemoryStore } from '../src/store.ts';
 import { RateLimiter } from '../src/ratelimit.ts';
@@ -2310,7 +2310,7 @@ describe('change notices and relic_share', () => {
       expect(fuseVerdict.allowed).toBe(true);
     });
 
-    test('batch notice and comment-notification failure logs contain no recipient address and sanitize provider error text', async () => {
+    test('batch failure logs log only controlled fields and never provider message text containing other or non-ASCII addresses', async () => {
       const { id } = await publish({
         title: 'SecretDoc',
         ownerEmail: 'owner-secret@example.com',
@@ -2323,13 +2323,17 @@ describe('change notices and relic_share', () => {
       };
 
       try {
+        const error = new MailRefusedError(
+          403,
+          'validation_error',
+          'invalid recipient josé@example.com'
+        );
+
         const failingBatchMailer: Mailer = {
           async send() {},
           async sendMail() {},
           async sendBatch() {
-            throw new Error(
-              'Resend 500: delivery failed for owner-secret@example.com'
-            );
+            throw error;
           },
         };
 
@@ -2345,8 +2349,12 @@ describe('change notices and relic_share', () => {
 
         expect(loggedErrors.length).toBeGreaterThan(0);
         const combinedLog = loggedErrors.join('\n');
-        expect(combinedLog).not.toContain('owner-secret@example.com');
-        expect(combinedLog).toContain('[redacted-recipient]');
+        expect(combinedLog).not.toContain('josé@example.com');
+        expect(combinedLog).not.toContain('invalid recipient');
+        expect(combinedLog).toContain('403');
+        expect(combinedLog).toContain('validation_error');
+        const ownerHash = await sha256Hex('owner-secret@example.com');
+        expect(combinedLog).toContain(ownerHash);
       } finally {
         console.error = origError;
       }

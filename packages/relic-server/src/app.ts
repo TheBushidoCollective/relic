@@ -42,6 +42,7 @@ import {
   changeNoticeMail,
   commentNoticeMail,
   commentNotificationMail,
+  MailRefusedError,
   type OutboundMail,
   replyNotificationMail,
 } from './mail.ts';
@@ -1719,9 +1720,30 @@ export function createApp(options: AppOptions = {}): RelicApp {
               activeChunk.map((it) => ({ email: it.email, mail: it.mail }))
             );
           } catch (error) {
+            let status: number | undefined;
+            let code = 'unknown';
+            if (error instanceof MailRefusedError) {
+              status = error.status;
+              code = error.code;
+            } else if (typeof error === 'object' && error !== null) {
+              if ('status' in error && typeof error.status === 'number') {
+                status = error.status;
+              } else if (
+                'statusCode' in error &&
+                typeof error.statusCode === 'number'
+              ) {
+                status = error.statusCode;
+              }
+              if ('code' in error && typeof error.code === 'string') {
+                code = error.code;
+              } else if (error instanceof Error) {
+                code = error.name;
+              }
+            }
+            const statusDetail = status !== undefined ? `${status} ` : '';
             for (const it of activeChunk) {
               console.error(
-                `relic: ${logPrefix} failed for recipient ${it.addressHash}: ${sanitizeMailError(error, it.email)}`
+                `relic: ${logPrefix} failed for recipient ${it.addressHash}: ${statusDetail}${code}`
               );
             }
           }
