@@ -1571,9 +1571,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     const canonicalRelicId = parseRelicId(relicId);
     const relicUrl = `${config.serviceOrigin}/${relicId}`;
     const logPrefix =
-      event.type === 'version'
-        ? 'change notice send'
-        : 'comment notification';
+      event.type === 'version' ? 'change notice send' : 'comment notification';
 
     interface PreparedRecipient {
       readonly address: string;
@@ -1635,7 +1633,10 @@ export function createApp(options: AppOptions = {}): RelicApp {
             relicUrl,
             stopUrl,
           });
-        } else if (normalizedOwner !== undefined && address === normalizedOwner) {
+        } else if (
+          normalizedOwner !== undefined &&
+          address === normalizedOwner
+        ) {
           mail = commentNotificationMail({
             title: row.title,
             commenter: commenterName,
@@ -1664,12 +1665,20 @@ export function createApp(options: AppOptions = {}): RelicApp {
           break;
         }
         const chunk = prepared.slice(i, i + MAX_BATCH);
-        const activeChunk: Array<{ email: string; addressHash: string; mail: OutboundMail }> = [];
+        const activeChunk: Array<{
+          email: string;
+          addressHash: string;
+          mail: OutboundMail;
+        }> = [];
         for (const item of chunk) {
           if (await store.isOptedOut(relicId, item.addressHash)) {
             continue;
           }
-          activeChunk.push({ email: item.address, addressHash: item.addressHash, mail: item.mail });
+          activeChunk.push({
+            email: item.address,
+            addressHash: item.addressHash,
+            mail: item.mail,
+          });
         }
         if (activeChunk.length > 0) {
           try {
@@ -2156,13 +2165,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
 
     const action = `${config.serviceOrigin}/api/relics/${relicId}/unsubscribe?addr=${addr}&amp;token=${token}`;
     const formHtml = `<p>Stop emails about ${T}?</p><form method="POST" action="${action}"><button type="submit">Stop these emails</button></form><p>Only this relic's emails stop.</p>`;
-    return unsubscribeResponse(
-      200,
-      'Stop emails',
-      formHtml,
-      undefined,
-      isHead
-    );
+    return unsubscribeResponse(200, 'Stop emails', formHtml, undefined, isHead);
   }
 
   // --- operator surface ---------------------------------------------------

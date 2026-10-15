@@ -616,10 +616,10 @@ describe('reserved segments beat ids at the router', () => {
       "Anyone holding a relic's link can fetch every version it has ever held"
     );
     expect(body).toContain(
-      'When a relic gets a new version, we email the people following it.'
+      'When someone comments or a relic gets a new version, we email the people following it.'
     );
     expect(body).toContain('Sharing gives us addresses, never the link.');
-    expect(body).toContain('Every change email has a stop link.');
+    expect(body).toContain('One stop link stops every email about that relic.');
   });
 
   test('/install on a self-hosted deployment names the origin to point at', async () => {

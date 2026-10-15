@@ -56,6 +56,8 @@ describe('share email', () => {
     const body = parsed.searchParams.get('body') ?? '';
     expect(body).toContain(url);
     expect(body).toContain('\r\n');
-    expect(body).toContain('When someone comments or a new version is published');
+    expect(body).toContain(
+      'When someone comments or a new version is published'
+    );
   });
 });

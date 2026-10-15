@@ -371,7 +371,9 @@ describe('relic_share tool and shareRelic', () => {
       `I've shared "Test Document" with you on Relic. Open it here:`
     );
     expect(structured.email.text).toContain(expectedUrl);
-    expect(structured.email.text).toContain('When I publish a new version');
+    expect(structured.email.text).toContain(
+      'When someone comments or I publish a new version'
+    );
     expect(structured.email.text).toContain(
       'Relic keeps your address for that.'
     );

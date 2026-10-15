@@ -115,7 +115,7 @@ export function commentNotificationMail(
     stopUrl = titleOrOptions.stopUrl;
   } else {
     title = titleOrOptions;
-    commenter = rawCommenter!;
+    commenter = rawCommenter ?? '';
     relicUrl = rawRelicUrl;
     stopUrl = rawStopUrl;
   }
@@ -134,15 +134,13 @@ export function commentNotificationMail(
           'Open the link you hold for this relic to read and answer the comment. If you have opened the relic in this browser before, this link works too:',
           relicUrl,
         ]
-      : ['Open the link you hold for this relic to read and answer the comment.']),
+      : [
+          'Open the link you hold for this relic to read and answer the comment.',
+        ]),
     '',
     'Relic does not store the decryption key on its servers, so comments cannot be read from this email.',
     ...(stopUrl !== undefined
-      ? [
-          '',
-          'To stop emails about this relic, open:',
-          stopUrl,
-        ]
+      ? ['', 'To stop emails about this relic, open:', stopUrl]
       : []),
   ].join('\n');
 
@@ -204,7 +202,7 @@ export function replyNotificationMail(
     stopUrl = titleOrOptions.stopUrl;
   } else {
     title = titleOrOptions;
-    replier = rawReplier!;
+    replier = rawReplier ?? '';
     relicUrl = rawRelicUrl;
     stopUrl = rawStopUrl;
   }
@@ -227,11 +225,7 @@ export function replyNotificationMail(
     '',
     'Relic does not store the decryption key on its servers, so comments cannot be read from this email.',
     ...(stopUrl !== undefined
-      ? [
-          '',
-          'To stop emails about this relic, open:',
-          stopUrl,
-        ]
+      ? ['', 'To stop emails about this relic, open:', stopUrl]
       : []),
   ].join('\n');
 
@@ -342,7 +336,8 @@ export function changeNoticeMail(p: {
     | 'commented'
     | 'shared'
     | 'shared_by_publisher'
-    | 'shared_by_reader';
+    | 'shared_by_reader'
+    | 'owner';
   readonly sharedBy?: 'publisher' | 'reader' | undefined;
 }): OutboundMail {
   const subject = p.title
@@ -352,6 +347,8 @@ export function changeNoticeMail(p: {
   let reasonText: string;
   if (p.reason === 'commented') {
     reasonText = 'you commented on this relic';
+  } else if (p.reason === 'owner') {
+    reasonText = 'you are its owner';
   } else if (p.sharedBy === 'reader' || p.reason === 'shared_by_reader') {
     reasonText = "someone with this relic's link shared it with you";
   } else {
@@ -498,9 +495,7 @@ export function resendMailer(options: ResendMailerOptions): Mailer {
 
   // Resend batch endpoint: https://resend.com/docs/api-reference/emails/send-batch-emails
   // Up to 100 emails per call, supporting per-email custom headers (List-Unsubscribe).
-  async function postBatch(
-    items: readonly BatchMailItem[]
-  ): Promise<void> {
+  async function postBatch(items: readonly BatchMailItem[]): Promise<void> {
     if (items.length === 0) return;
     const MAX_BATCH = 100;
     for (let i = 0; i < items.length; i += MAX_BATCH) {
@@ -511,7 +506,9 @@ export function resendMailer(options: ResendMailerOptions): Mailer {
         subject: item.mail.subject,
         text: item.mail.text,
         html: item.mail.html,
-        ...(item.mail.headers !== undefined ? { headers: item.mail.headers } : {}),
+        ...(item.mail.headers !== undefined
+          ? { headers: item.mail.headers }
+          : {}),
       }));
 
       const response = await call(BATCH_ENDPOINT, {

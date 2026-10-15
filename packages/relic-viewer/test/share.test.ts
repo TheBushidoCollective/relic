@@ -545,7 +545,9 @@ describe('the share panel', () => {
     expect(textOf(head)).toContain('Shared with you: Quarterly field notes');
     const letter = only(panel, 'share-email-body').textContent;
     expect(letter).toContain(view().shareUrl);
-    expect(letter).toContain('When someone comments or a new version is published');
+    expect(letter).toContain(
+      'When someone comments or a new version is published'
+    );
 
     const mailto = only(panel, 'share-mailto');
     expect(
