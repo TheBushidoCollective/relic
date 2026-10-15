@@ -124,7 +124,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     const url = new URL(request.url);
     const segments = url.pathname.split('/').filter((s) => s.length > 0);
     const head = segments[0];
-    const ip = clientIp(request);
+    const ip = clientIp(request, config);
     const now = clock();
 
     // The homepage is a landing page, not the viewer. It used to be the shell
@@ -2319,10 +2319,60 @@ export function createApp(options: AppOptions = {}): RelicApp {
   };
 }
 
-function clientIp(request: Request): string {
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded !== null) return forwarded.split(',')[0]?.trim() ?? 'unknown';
-  return request.headers.get('x-real-ip') ?? 'unknown';
+/**
+ * Derives the trusted client IP from the incoming request.
+ *
+ * In production on relik.link, traffic arrives through a Google Cloud Global
+ * External Application Load Balancer in front of Cloud Run
+ * (see deploy/terraform/resource.google_compute_lb.service.tf and
+ * deploy/terraform/modules/relic/module.service.tf).
+ *
+ * Google Cloud Load Balancing documentation: External Application Load Balancer
+ * overview, "X-Forwarded-For header"
+ * (https://cloud.google.com/load-balancing/docs/https#x-forwarded-for_header):
+ *   "The load balancer appends two IP addresses to the X-Forwarded-For header,
+ *    separated by a single comma, in the following order:
+ *    1. The IP address of the client that connects to the load balancer
+ *    2. The IP address of the load balancer's forwarding rule
+ *    ...
+ *    If the incoming request already includes an X-Forwarded-For header,
+ *    the load balancer appends its values to the existing header:
+ *    X-Forwarded-For: <existing-value>,<client-ip>,<load-balancer-ip>"
+ *
+ * For direct Cloud Run without an external load balancer, the platform appends
+ * the client IP as the last hop:
+ * (https://cloud.google.com/run/docs/triggering/https-request):
+ *   X-Forwarded-For: <existing-value>, <client-ip>
+ *
+ * We count hops from the right based on config.trustedProxyHops:
+ * - External Application Load Balancer: 2 hops from the right (index -2).
+ * - Direct Cloud Run: 1 hop from the right (index -1).
+ * - Local or dev without proxy: 0 (or no proxy header), falling back to X-Real-IP
+ *   or 127.0.0.1.
+ *
+ * Entries to the left of the trusted hop are caller-controlled and never trusted.
+ * If the header contains fewer entries than trustedProxyHops, the caller did
+ * not transit the expected proxy chain, so the header cannot be trusted; we fall
+ * back to X-Real-IP or 127.0.0.1.
+ */
+export function clientIp(request: Request, config: RelicConfig): string {
+  const hops = config.trustedProxyHops;
+  if (hops > 0) {
+    const forwarded = request.headers.get('x-forwarded-for');
+    if (forwarded !== null) {
+      const entries = forwarded
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      if (entries.length >= hops) {
+        const candidate = entries[entries.length - hops];
+        if (candidate !== undefined) return candidate;
+      }
+    }
+  }
+  const realIp = request.headers.get('x-real-ip')?.trim();
+  if (realIp !== undefined && realIp.length > 0) return realIp;
+  return '127.0.0.1';
 }
 
 async function readJson(request: Request): Promise<unknown> {
