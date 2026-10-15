@@ -1487,14 +1487,14 @@ export function createApp(options: AppOptions = {}): RelicApp {
     readonly event: NotificationEvent;
   }): Promise<void> {
     const { relicId, row, now, event } = params;
-
+    const initialRow = (await store.getRelic(relicId)) ?? row;
     if ((await store.getTombstone(relicId)) !== undefined) {
       return;
     }
-    if (row.expiresAt !== undefined && row.expiresAt <= now) {
+    if (initialRow.expiresAt !== undefined && initialRow.expiresAt <= now) {
       return;
     }
-    if (row.mintsUsed >= config.downloadCap) {
+    if (initialRow.mintsUsed >= config.downloadCap) {
       return;
     }
     if (
@@ -1666,7 +1666,13 @@ export function createApp(options: AppOptions = {}): RelicApp {
     if (typeof mailer.sendBatch === 'function') {
       const MAX_BATCH = 100;
       for (let i = 0; i < prepared.length; i += MAX_BATCH) {
-        if ((await store.getTombstone(relicId)) !== undefined) {
+        const dispatchRow = await store.getRelic(relicId);
+        if (
+          dispatchRow === undefined ||
+          (await store.getTombstone(relicId)) !== undefined ||
+          (dispatchRow.expiresAt !== undefined && dispatchRow.expiresAt <= now) ||
+          dispatchRow.mintsUsed >= config.downloadCap
+        ) {
           break;
         }
         const chunk = prepared.slice(i, i + MAX_BATCH);
@@ -1751,7 +1757,13 @@ export function createApp(options: AppOptions = {}): RelicApp {
       }
     } else if (typeof mailer.sendMail === 'function') {
       for (const item of prepared) {
-        if ((await store.getTombstone(relicId)) !== undefined) {
+        const dispatchRow = await store.getRelic(relicId);
+        if (
+          dispatchRow === undefined ||
+          (await store.getTombstone(relicId)) !== undefined ||
+          (dispatchRow.expiresAt !== undefined && dispatchRow.expiresAt <= now) ||
+          dispatchRow.mintsUsed >= config.downloadCap
+        ) {
           break;
         }
         if (await store.isOptedOut(relicId, item.addressHash)) {
@@ -1794,7 +1806,13 @@ export function createApp(options: AppOptions = {}): RelicApp {
       }
     } else if (typeof mailer.send === 'function') {
       for (const item of prepared) {
-        if ((await store.getTombstone(relicId)) !== undefined) {
+        const dispatchRow = await store.getRelic(relicId);
+        if (
+          dispatchRow === undefined ||
+          (await store.getTombstone(relicId)) !== undefined ||
+          (dispatchRow.expiresAt !== undefined && dispatchRow.expiresAt <= now) ||
+          dispatchRow.mintsUsed >= config.downloadCap
+        ) {
           break;
         }
         if (await store.isOptedOut(relicId, item.addressHash)) {
@@ -2569,10 +2587,11 @@ export function createApp(options: AppOptions = {}): RelicApp {
         report_url: `${config.serviceOrigin}/abuse`,
       });
     }
-    const row = await store.getRelic(relicId);
-    if (row === undefined) {
+    const fetchedRow = await store.getRelic(relicId);
+    if (fetchedRow === undefined) {
       return refuse('relic_not_found', { relic_id: relicId });
     }
+    const row = { ...fetchedRow };
 
     const body = (await readJson(request)) as Record<string, unknown>;
     const author = await resolveAuthor(body, request, row.publishTokenHash);

@@ -2359,5 +2359,38 @@ describe('change notices and relic_share', () => {
         console.error = origError;
       }
     });
+    test('a mint reaching the download cap between comment read and dispatch suppresses notification dispatch', async () => {
+      const { id } = await publish({
+        title: 'Capped Relic',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const existingRow = await store.getRelic(id);
+      expect(existingRow).toBeDefined();
+      if (existingRow) {
+        await store.putRelic({
+          ...existingRow,
+          mintsUsed: app.config.downloadCap - 1,
+        });
+      }
+
+      const origPutComment = store.putComment.bind(store);
+      store.putComment = async (cRow) => {
+        await origPutComment(cRow);
+        await store.consumeMint(id);
+      };
+
+      const session = await createSession('commenter@example.com');
+      const commentRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: session },
+          body: JSON.stringify({ ciphertext: 'dGVzdA' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+
+      expect(sentMails).toHaveLength(0);
+    });
   });
 });
