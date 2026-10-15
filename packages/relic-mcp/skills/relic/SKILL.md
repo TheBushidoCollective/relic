@@ -1,6 +1,6 @@
 ---
 name: relic
-description: Publish a local file as an encrypted, shareable link when someone outside this session needs to see it. Use when the user says "share this", "send this to X", "publish this", "give me a link for this", "make this shareable", or has just been handed a generated report, HTML page, deck, image, or export and needs it somewhere a person can open. Also covers republishing a new version of an existing relic, reading the comments people leave on one and answering them, what the recipient sees, how long a link lives, and what the service can and cannot read.
+description: Publish a local file as an encrypted, shareable link when someone outside this session needs to see it. Use when the user says "share this", "send this to X", "publish this", "give me a link for this", "make this shareable", or has just been handed a generated report, HTML page, deck, image, or export and needs it somewhere a person can open. Also covers sending a relic to named people (relic_share), republishing a new version of an existing relic, reading the comments people leave on one and answering them, what the recipient sees, how long a link lives, and what the service can and cannot read.
 ---
 
 # Relic
@@ -145,12 +145,26 @@ Two things to know before promising an update:
 
 A relic's lifetime is set at its first publish and carries across versions
 unchanged.
+## Sending a relic to people
+
+Call `relic_share` with the relic id and up to 20 email addresses:
+
+```
+relic_share(relic_id: "0a2c...", emails: ["ada@example.com", "grace@example.com"])
+```
+
+`relic_share` registers the addresses with the service so each recipient receives an email notice whenever a new version is republished. It composes a ready-to-send share email containing the full URL and key, and returns both the email text and a `mailto:` link.
+
+Draft the email in the user's own mailbox (or hand over the `mailto:` link if there is no mail tool available) and let them send it. Relic never sends the share email, because the share link carries the key in its fragment, and the service must never receive the key.
+
+Addresses are stored by the service in the clear, linked to the relic id. When you republish, the service automatically sends a change notice to everyone who commented and every address added with `relic_share`, unless you pass `notify: false`.
+
+Readers holding the link can also share from the viewer once a relic was published or republished by this client version.
 
 ## Comments
 
 People can comment on a relic, and that is the only way a reader can answer
-back: there is no reply-to, no dashboard, and no notification. So read them.
-
+back. Nothing tells you a comment arrived, so read them.
 ```
 relic_read_comments(relic_id: "0a2c...")
 ```

@@ -13,10 +13,12 @@
 import {
   decodeKey,
   deriveRendererClass,
+  deriveShareProof,
   encryptRelic,
   isValidRelicId,
   normalizeTitle,
   type RendererClass,
+  shareVerifierFor,
 } from '@relic/format';
 import type { CoverOutcome, CoverReport } from '@relic/format/cover';
 import { keyToMnemonic } from '@relic/format/mnemonic';
@@ -77,6 +79,11 @@ export interface RepublishInput {
    * rendering and uploading a cover image for link previews.
    */
   readonly cover?: boolean | undefined;
+  /**
+   * Optional change notice flag. Defaults to true. Pass false to decline
+   * emailing a change notice for this version.
+   */
+  readonly notify?: boolean | undefined;
 }
 
 export interface RepublishResult {
@@ -111,6 +118,7 @@ export interface RepublishResult {
    * counts.
    */
   readonly cover: CoverReport;
+  readonly notify: boolean;
 }
 
 export async function republish(
@@ -397,6 +405,9 @@ export async function republish(
   // 1. The republish grant: same shape as a first grant, authorized by the
   //    publish token instead of a challenge nonce, aiming the upload at the
   //    next version's object.
+  const shareVerifier = await shareVerifierFor(
+    await deriveShareProof(decodeKey(state.key))
+  );
   const grant = await postJson(
     deps,
     `${deps.serviceOrigin}/api/relics/${input.relic_id}/republish`,
@@ -407,6 +418,8 @@ export async function republish(
       declared_ciphertext_bytes: container.length,
       title: normalizedTitle,
       ...(input.ttl_days === undefined ? {} : { ttl_days: input.ttl_days }),
+      ...(input.notify === false ? { notify: false } : {}),
+      share_verifier: shareVerifier,
     }
   );
 
@@ -515,5 +528,6 @@ export async function republish(
     key_phrase: keyToMnemonic(decodeKey(state.key)).join(' '),
     ...(acknowledgements.length > 0 ? { acknowledgements } : {}),
     cover: coverReport,
+    notify: input.notify !== false,
   };
 }

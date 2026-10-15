@@ -950,7 +950,7 @@ describe('what an agent is told before it calls anything', () => {
   test('the handshake instructions name the comment tools', () => {
     expect(INSTRUCTIONS).toMatch(/relic_read_comments/);
     expect(INSTRUCTIONS).toMatch(/relic_comment/);
-    expect(INSTRUCTIONS).toMatch(/Eight things/);
+    expect(INSTRUCTIONS).toMatch(/Nine things/);
   });
 });
 

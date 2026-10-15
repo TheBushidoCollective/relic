@@ -544,6 +544,7 @@ describe('the MCP surface', () => {
       'relic_show',
       'relic_lookup_source',
       'relic_republish',
+      'relic_share',
       'relic_read_comments',
       'relic_comment',
       'relic_edit_comment',
@@ -895,6 +896,7 @@ describe('republish', () => {
       'ttl_days',
       'addresses',
       'cover',
+      'notify',
     ]);
     expect(schema.required).toEqual(['relic_id', 'path']);
     expect(schema.additionalProperties).toBe(false);
@@ -949,6 +951,7 @@ describe('republish', () => {
       'disclosure_url',
       'filename',
       'key_phrase',
+      'notify',
       'relic_expires_at',
       'relic_id',
       'renderer_class',

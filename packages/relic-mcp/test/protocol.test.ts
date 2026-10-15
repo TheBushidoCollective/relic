@@ -249,8 +249,8 @@ describe('the handshake carries instructions', () => {
 
   test('stay short, because they cost context every session', async () => {
     const { INSTRUCTIONS } = await import('../src/server.ts');
-    // The ceiling moved to accommodate the 8th item (cover disclosure).
-    expect(INSTRUCTIONS.length).toBeLessThan(1700);
+    // The ceiling moved to accommodate the 9th item (change notices and sharing).
+    expect(INSTRUCTIONS.length).toBeLessThan(2300);
   });
 
   test('do not drift from the skill on the facts that matter', async () => {

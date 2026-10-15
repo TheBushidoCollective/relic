@@ -93,16 +93,25 @@ without reading it or contacting anything.
 
 It also exposes `relic_republish`, which posts a new version of a file to an
 existing relic's URL. It takes the relic id and a path (with an optional
-`title` to replace or clear the card title, and an optional `cover` argument to
-replace or clear the cover image); the publish token is never an argument and
+`title` to replace or clear the card title, an optional `cover` argument to
+replace or clear the cover image, and an optional `notify` flag to control change
+notices, defaulting to true); the publish token is never an argument and
 never printed, because the client stored it beside the relic's key at first
-publish and reads it back from there. The server issued that token once and
-keeps only its hash, so the machine that published is the only machine that can
-republish: lose that state and nobody, the operator included, can authorize
-another version. Opening the link always serves the current version, and the
-download cap is shared across all versions. A relic taken down for abuse refuses
-every future version whatever token is presented, because a takedown an abuser
-could out-publish would not be a takedown.
+publish and reads it back from there. Each new version emails a change notice to
+commenters and shared addresses unless `notify: false` is passed. The server
+issued that token once and keeps only its hash, so the machine that published is
+the only machine that can republish: lose that state and nobody, the operator
+included, can authorize another version. Opening the link always serves the
+current version, and the download cap is shared across all versions. A relic
+taken down for abuse refuses every future version whatever token is presented,
+because a takedown an abuser could out-publish would not be a takedown.
+
+`relic_share` sends a relic this machine published to named people. It registers
+up to 20 email addresses with the service for change notices on future versions,
+and returns a ready share email and mailto link to draft in the sharer's own
+mailbox so the key never leaves the client. Addresses are stored in the clear by
+the service, linked to the relic id. Readers holding the link can also share from
+the viewer once the relic was published or republished by this client version.
 
 `relic_list` and `relic_show` are how a publisher finds a relic again. Lookup
 by source only answers when you are still holding the file, so a relic whose
