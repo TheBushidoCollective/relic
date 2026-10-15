@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  changeNoticeMail,
   commentNotificationMail,
   MailRefusedError,
   mailerFromEnv,
@@ -211,6 +212,123 @@ describe('the reply notification mail', () => {
   });
 });
 
+describe('the change notice mail', () => {
+  test('copy with and without a title, for both reasons', () => {
+    const withTitleCommented = changeNoticeMail({
+      title: 'Quarterly Numbers',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/api/relics/r1/unsubscribe?addr=a&token=t',
+      reason: 'commented',
+    });
+    expect(withTitleCommented.subject).toBe(
+      'New version of "Quarterly Numbers"'
+    );
+    expect(withTitleCommented.text).toContain(
+      '"Quarterly Numbers" has a new version: version 2.'
+    );
+    expect(withTitleCommented.text).toContain(
+      'You are getting this because you commented on this relic.'
+    );
+    expect(withTitleCommented.html).toContain(
+      '<p>"Quarterly Numbers" has a new version: version 2.</p>'
+    );
+    expect(withTitleCommented.html).toContain(
+      '<a href="https://relic.example/r1">https://relic.example/r1</a>'
+    );
+
+    const untitledCommented = changeNoticeMail({
+      title: undefined,
+      version: 3,
+      relicUrl: 'https://relic.example/r2',
+      stopUrl: 'https://relic.example/api/relics/r2/unsubscribe?addr=b&token=u',
+      reason: 'commented',
+    });
+    expect(untitledCommented.subject).toBe('New version of a relic');
+    expect(untitledCommented.text).toContain(
+      'A relic has a new version: version 3.'
+    );
+    expect(untitledCommented.text).toContain(
+      'You are getting this because you commented on this relic.'
+    );
+    expect(untitledCommented.html).toContain(
+      '<p>A relic has a new version: version 3.</p>'
+    );
+
+    const withTitleSharedPublisher = changeNoticeMail({
+      title: 'Quarterly Numbers',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/api/relics/r1/unsubscribe?addr=a&token=t',
+      reason: 'shared',
+      sharedBy: 'publisher',
+    });
+    expect(withTitleSharedPublisher.text).toContain(
+      'You are getting this because the person who published this relic shared it with you.'
+    );
+    expect(withTitleSharedPublisher.html).toContain(
+      'You are getting this because the person who published this relic shared it with you.'
+    );
+
+    const withTitleSharedReader = changeNoticeMail({
+      title: 'Quarterly Numbers',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/api/relics/r1/unsubscribe?addr=a&token=t',
+      reason: 'shared',
+      sharedBy: 'reader',
+    });
+    expect(withTitleSharedReader.text).toContain(
+      "You are getting this because someone with this relic's link shared it with you."
+    );
+    expect(withTitleSharedReader.html).toContain(
+      "You are getting this because someone with this relic's link shared it with you."
+    );
+  });
+
+  test('the title is HTML-escaped', () => {
+    const mail = changeNoticeMail({
+      title: '<script>alert("xss")</script>',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/api/relics/r1/unsubscribe?addr=a&token=t',
+      reason: 'commented',
+    });
+    expect(mail.html).not.toContain('<script>');
+    expect(mail.html).toContain('&lt;script&gt;');
+  });
+
+  test('no U+2014 or U+2013 in the output', () => {
+    const mail = changeNoticeMail({
+      title: 'Document',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/api/relics/r1/unsubscribe?addr=a&token=t',
+      reason: 'shared',
+      sharedBy: 'reader',
+    });
+    expect(mail.subject).not.toMatch(/[\u2013\u2014]/);
+    expect(mail.text).not.toMatch(/[\u2013\u2014]/);
+    expect(mail.html).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  test('the headers are present', () => {
+    const stopUrl =
+      'https://relic.example/api/relics/r1/unsubscribe?addr=a&token=t';
+    const mail = changeNoticeMail({
+      title: 'Document',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl,
+      reason: 'commented',
+    });
+    expect(mail.headers).toEqual({
+      'List-Unsubscribe': `<${stopUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
+  });
+});
+
 describe('sending through Resend', () => {
   test('the request is the documented one', async () => {
     const wire = recorder(accepted());
@@ -310,6 +428,41 @@ describe('sending through Resend', () => {
     expect(body['to']).toBe('creator@example.com');
     expect(body['subject']).toBe('New comment on "Report"');
     expect(String(body['text'])).toContain('ada@example.com left a comment');
+  });
+  test('resendMailer sends headers when given and leaves the key out otherwise', async () => {
+    const wireWithHeaders = recorder(accepted());
+    const mailerWithHeaders = resendMailer({
+      apiKey: 're_test_key',
+      from: 'Relic <no-reply@relik.link>',
+      fetch: wireWithHeaders.fetch,
+    });
+    const notice = changeNoticeMail({
+      title: 'Doc',
+      version: 2,
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop',
+      reason: 'commented',
+    });
+    await mailerWithHeaders.sendMail?.('user@example.com', notice);
+    const bodyWithHeaders = JSON.parse(
+      String(wireWithHeaders.calls[0]?.init.body)
+    ) as Record<string, unknown>;
+    expect(bodyWithHeaders['headers']).toEqual({
+      'List-Unsubscribe': '<https://relic.example/stop>',
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
+
+    const wireWithoutHeaders = recorder(accepted());
+    const mailerWithoutHeaders = resendMailer({
+      apiKey: 're_test_key',
+      from: 'Relic <no-reply@relik.link>',
+      fetch: wireWithoutHeaders.fetch,
+    });
+    await mailerWithoutHeaders.send('user@example.com', LINK);
+    const bodyWithoutHeaders = JSON.parse(
+      String(wireWithoutHeaders.calls[0]?.init.body)
+    ) as Record<string, unknown>;
+    expect('headers' in bodyWithoutHeaders).toBe(false);
   });
 });
 
