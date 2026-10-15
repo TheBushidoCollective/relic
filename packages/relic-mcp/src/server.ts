@@ -383,7 +383,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
     'uploaded unencrypted for link previews; pass cover: false to withhold ' +
     'it.' +
     REPUBLISH_DISCIPLINE_DISCLOSURE +
-    ' Each new version emails a change notice, naming the title and version and never the key, to everyone who commented and every address added with relic_share; pass notify: false to skip it.',
+    ' Each new version emails a change notice, naming the title and version and never the key, to each verified commenter and each address added with relic_share, minus any that stopped emails; pass notify: false to skip it. At most one email per person per relic per 10 minutes, and one stop link stops every email about that relic.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -451,7 +451,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
         type: 'boolean',
         default: true,
         description:
-          'Optional. Email a change notice for this version to everyone following the relic: each verified address that commented on it and each address added with relic_share, except any that stopped those emails. Defaults to true. The notice names the title and version and never carries the key. Pass false for a change not worth an email, such as a typo fix.',
+          'Optional. Email a change notice for this version to each verified address that commented on the relic and each address added with relic_share, except any that stopped those emails. Defaults to true. The notice names the title and version and never carries the key. At most one email per person per relic per 10 minutes, and one stop link stops every email about that relic. Pass false for a change not worth an email, such as a typo fix.',
       },
     },
     required: ['relic_id', 'path'],
@@ -516,7 +516,7 @@ export const SHARE_TOOL_DEFINITION = {
   name: SHARE_TOOL_NAME,
   title: 'Share a relic with people',
   description:
-    'Send a relic this machine published to named people. Registers their email addresses with the service so each gets a change notice when you republish, and returns a ready share email carrying the full link, plus a mailto link that opens it as a draft. Relic never sends the share email, because it carries the key: draft it in the sharer\u2019s own mailbox, from their own address, and let them send it. The service stores the addresses in the clear, linked to the relic. A change notice names the title and version, never the key, and carries a link to stop them. Only works on the machine that published the relic: the link needs its key and registering needs its publish token. Takes the relic id, never the share URL. Up to 20 addresses per call and 50 per relic.',
+    'Send a relic this machine published to named people. Registers their email addresses with the service so each gets an email notice when someone comments and when you republish, and returns a ready share email carrying the full link, plus a mailto link that opens it as a draft. Relic never sends the share email, because it carries the key: draft it in the sharer\u2019s own mailbox, from their own address, and let them send it. The service stores the addresses in the clear, linked to the relic. A change notice names the title and version, never the key. A new comment emails everyone on the list except the author, naming the commenter\u2019s address (or "The publisher"). At most one email per person per relic per 10 minutes, and one stop link stops every email about that relic. Only works on the machine that published the relic: the link needs its key and registering needs its publish token. Takes the relic id, never the share URL. Up to 20 addresses per call and 50 per relic.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -529,7 +529,8 @@ export const SHARE_TOOL_DEFINITION = {
         items: { type: 'string' },
         minItems: 1,
         maxItems: 20,
-        description: 'Up to 20 email addresses to register for change notices.',
+        description:
+          'Up to 20 email addresses to register for comment and change notices.',
       },
     },
     required: ['relic_id', 'emails'],
@@ -1210,9 +1211,14 @@ export const COMMENT_TOOL_DEFINITION = {
   description:
     'Leave a comment on a relic this machine published, encrypted here so ' +
     'the service stores ciphertext it cannot read. Everyone holding the ' +
-    'link sees it. Attribution is the publish token, so the comment is ' +
-    'attributed to "publisher" rather than to an email address: an agent has ' +
-    'no mailbox and cannot verify one. That is attribution and not ' +
+    'link sees it. Warning: posting emails everyone following the relic ' +
+    '(each verified commenter, each address added with relic_share, and ' +
+    'the owner address, minus any that used the stop link). ' +
+    'Attribution is the publish token, so the comment is attributed to ' +
+    '"publisher" rather than to an email address: an agent has no mailbox ' +
+    'and cannot verify one, and the email names "The publisher". At most ' +
+    'one email per person per relic per 10 minutes, and one stop link stops ' +
+    'every email about that relic. That is attribution and not ' +
     'authorization. ' +
     'Comments can be anchored to an exact location: a text quote, a stage ' +
     'pin, an artifact region, a moment or span in audio or video, or a page ' +
@@ -1558,18 +1564,20 @@ styles, scripts, fonts, and images: a CDN reference renders as nothing.
 7. People can comment on a relic. Read with relic_read_comments before \
 changing reviewed content, answer with relic_comment. relic_edit_comment \
 rewrites one, relic_resolve_comment settles one, and settled counts as \
-handled. All take the relic id and attribute you as publisher.
+handled. All take the relic id and attribute you as publisher. A new \
+comment emails everyone on the relic's list except the author (naming \
+the address, or "The publisher" for relic_comment; at most once per 10 \
+minutes). One stop link stops every email about that relic.
 8. By default relic_publish and relic_republish upload a picture of the file's \
 first screen, unencrypted, for link previews: the service and anyone holding \
 the link without the key can see it. Pass cover: false for anything you would \
 not show in a chat preview.
 9. relic_republish emails a change notice, naming the title and version but \
-never the key, to everyone who commented and every address added with \
-relic_share; pass notify: false to skip it. relic_share hands back a share \
-email with the full link for you to draft in the sharer's own mailbox: Relic \
-never sends it, so the key never reaches the service. Readers holding the \
-link can also share from the viewer once this client version has published \
-or republished the relic.`;
+never the key, to everyone following the relic; pass notify: false to skip \
+it. relic_share hands back a share email with the full link for you to draft \
+in the sharer's own mailbox: Relic never sends it, so the key never reaches \
+the service. Readers holding the link can also share from the viewer once this \
+client version has published or republished the relic.`;
 
 /**
  * Handle one JSON-RPC message.
@@ -1715,19 +1723,26 @@ async function callTool(
             'ciphertext and the URL fragment is unchanged',
           comment_attribution:
             'the publish token, reported by the service as "publisher"; the ' +
-            'operator learns which identity commented on which relic and when',
+            'operator learns which identity commented on which relic and when; ' +
+            'posting with relic_comment emails everyone following the relic, naming "The publisher"',
+          comment_notices:
+            'a new comment on a relic emails everyone on its list (commenters, ' +
+            'shared addresses, the owner address) except the author, naming the ' +
+            'commenter\u2019s address or "The publisher"; at most one email per person ' +
+            'per relic per 10 minutes, and one stop link stops every email about that relic',
           change_notices:
             'on every republish unless notify: false, the service emails every ' +
             'verified address that commented on the relic and every address ' +
-            'added with relic_share, minus any that used the stop link; the ' +
-            'email names the title and version and never carries the key',
+            'added with relic_share, minus any that used ' +
+            'the stop link; the email names the title and version and never carries the key; ' +
+            'at most one email per person per relic per 10 minutes, and one stop link stops every email about that relic',
           sharing:
             'relic_share sends the service email addresses and nothing else; ' +
-            'it stores them in the clear, linked to the relic id; the share ' +
-            'email carrying the full link is composed here for you to send ' +
-            'from your own mailbox, so the key never reaches the service; ' +
-            'readers holding the link can also share from the viewer once a ' +
-            'relic was published or republished by this client version',
+            'it stores them in the clear, linked to the relic id so they receive ' +
+            'comment and change notices; the share email carrying the full link ' +
+            'is composed here for you to send from your own mailbox, so the key ' +
+            'never reaches the service; readers holding the link can also share ' +
+            'from the viewer once a relic was published or republished by this client version',
           service_origin: deps.serviceOrigin,
         },
         isError: false,
@@ -2303,7 +2318,7 @@ async function callRepublish(
               'is no new link to hand out.\n\n' +
               `${
                 result.notify
-                  ? `Relic sends a change notice for version ${result.version} to everyone following this relic, meaning each address that commented on it or was added with relic_share, except any that stopped those emails. It names the title and version and never carries the key.`
+                  ? `Relic sends a change notice for version ${result.version} to each address that commented on this relic or was added with relic_share, except any that stopped those emails. It names the title and version and never carries the key (at most one email per recipient per relic per 10 minutes; one stop link stops every email about that relic).`
                   : 'No change notice goes out for this version, as asked.'
               }\n\n` +
               `Key phrase: ${result.key_phrase}\n` +
@@ -2375,7 +2390,7 @@ async function callShare(
 
     const text =
       `Registered ${result.registered.length} address(es) on relic ${result.relic_id} ` +
-      `for change notices (${result.added} new; ${result.shared_count} of ${result.share_limit} on its list). ` +
+      `for comment and change notices (${result.added} new; ${result.shared_count} of ${result.share_limit} on its list). ` +
       'Relic has emailed nobody.\n\n' +
       "Draft the email below in the sharer's own mailbox, from their own address, " +
       'and let them send it. Do not send it through Relic or any other service, and ' +
@@ -2546,7 +2561,10 @@ async function callComment(
               `Commented on relic ${result.relic_id} as ${result.author}.\n` +
               'Everyone holding the link sees it. The service stored ' +
               'ciphertext it cannot read, and it knows that this address ' +
-              'commented on this relic at this time.',
+              'commented on this relic at this time. Relic emails everyone ' +
+              'following this relic, naming "The publisher" (at most one ' +
+              'email per recipient per relic per 10 minutes; one stop link ' +
+              'stops every email about that relic).',
           },
         ],
         structuredContent: result,
@@ -2984,18 +3002,23 @@ writes is attributed to the publisher rather than an email address, because
 an agent has no mailbox to verify. What the operator does learn is who
 commented on which relic and when: for a person that is a verified email
 address, and that association is a real cost the content's encryption does
-not cover.
+not cover. A new comment emails everyone on the relic's list (commenters,
+shared addresses, and the owner address) except the author, naming the
+commenter's address or "The publisher" for comments this client posts.
+At most one email per person per relic per 10 minutes, and one stop link
+stops every email about that relic.
 
 What happens with change notices and sharing: on every republish unless
 notify: false, the service emails every verified address that commented on
 the relic and every address added with relic_share, minus any that used the
-stop link. The email names the title and version and never carries the key.
-relic_share sends the service email addresses and nothing else: it stores
-them in the clear, linked to the relic id. The share email carrying the
-full link is composed here on this machine for you to send from your own
-mailbox, so the key never reaches the service. Readers holding the link
-can also share from the viewer once the relic was published or republished
-by this client version.
+stop link. The email names the title and version and
+never carries the key. At most one email per person per relic per 10 minutes,
+and one stop link stops every email about that relic. relic_share sends the
+service email addresses and nothing else: it stores them in the clear, linked
+to the relic id. The share email carrying the full link is composed here on
+this machine for you to send from your own mailbox, so the key never reaches
+the service. Readers holding the link can also share from the viewer once the
+relic was published or republished by this client version.
 
 What this does NOT protect against: the key is returned to your agent in the
 URL, so it enters the model's context and your session transcript. That is
