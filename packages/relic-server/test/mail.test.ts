@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   changeNoticeMail,
+  commentNoticeMail,
   commentNotificationMail,
   MailRefusedError,
   mailerFromEnv,
@@ -165,6 +166,25 @@ describe('the comment notification mail', () => {
     expect(mail.html).not.toContain('#');
     expect(mail.text).not.toContain('comment_id');
     expect(mail.html).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+
+  test('carries relic link, stop link, and List-Unsubscribe headers when provided', () => {
+    const stopUrl = 'https://relic.example/api/relics/r1/unsubscribe?addr=h&token=t';
+    const mail = commentNotificationMail({
+      title: 'Notes',
+      commenter: 'ada@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl,
+    });
+    expect(mail.text).toContain('https://relic.example/r1');
+    expect(mail.text).toContain(stopUrl);
+    expect(mail.html).toContain('https://relic.example/r1');
+    expect(mail.html).toContain(stopUrl);
+    expect(mail.headers).toEqual({
+      'List-Unsubscribe': `<${stopUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
   });
 });
 
@@ -209,6 +229,103 @@ describe('the reply notification mail', () => {
     expect(mail.html).not.toContain('#');
     expect(mail.text).not.toContain('comment_id');
     expect(mail.html).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+
+  test('carries relic link, stop link, and List-Unsubscribe headers when provided', () => {
+    const stopUrl = 'https://relic.example/api/relics/r1/unsubscribe?addr=h&token=t';
+    const mail = replyNotificationMail({
+      title: 'Notes',
+      replier: 'The publisher',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl,
+    });
+    expect(mail.text).toContain('The publisher answered your comment');
+    expect(mail.text).toContain('https://relic.example/r1');
+    expect(mail.text).toContain(stopUrl);
+    expect(mail.headers).toEqual({
+      'List-Unsubscribe': `<${stopUrl}>`,
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
+  });
+});
+
+describe('the comment notice mail', () => {
+  test('copy with and without a title, for each reason and commenter', () => {
+    const withTitleCommented = commentNoticeMail({
+      title: 'Quarterly Plan',
+      commenter: 'alice@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop1',
+      reason: 'commented',
+    });
+    expect(withTitleCommented.subject).toBe('New comment on "Quarterly Plan"');
+    expect(withTitleCommented.text).toContain('alice@example.com left a comment on "Quarterly Plan".');
+    expect(withTitleCommented.text).toContain('You are getting this because you commented on this relic.');
+    expect(withTitleCommented.html).toContain('<p>alice@example.com left a comment on "Quarterly Plan".</p>');
+    expect(withTitleCommented.html).toContain('<a href="https://relic.example/r1">https://relic.example/r1</a>');
+    expect(withTitleCommented.headers).toEqual({
+      'List-Unsubscribe': '<https://relic.example/stop1>',
+      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    });
+
+    const untitledPublisher = commentNoticeMail({
+      title: undefined,
+      commenter: 'The publisher',
+      relicUrl: 'https://relic.example/r2',
+      stopUrl: 'https://relic.example/stop2',
+      reason: 'shared',
+      sharedBy: 'publisher',
+    });
+    expect(untitledPublisher.subject).toBe('New comment on a relic');
+    expect(untitledPublisher.text).toContain('The publisher left a comment on a relic.');
+    expect(untitledPublisher.text).toContain('the person who published this relic shared it with you');
+
+    const sharedReader = commentNoticeMail({
+      title: 'Project',
+      commenter: 'bob@example.com',
+      relicUrl: 'https://relic.example/r3',
+      stopUrl: 'https://relic.example/stop3',
+      reason: 'shared',
+      sharedBy: 'reader',
+    });
+    expect(sharedReader.text).toContain("someone with this relic's link shared it with you");
+
+    const ownerReason = commentNoticeMail({
+      title: 'Project',
+      commenter: 'carol@example.com',
+      relicUrl: 'https://relic.example/r4',
+      stopUrl: 'https://relic.example/stop4',
+      reason: 'owner',
+    });
+    expect(ownerReason.text).toContain('you are its owner');
+  });
+
+  test('carries no comment body, no fragment, and no key', () => {
+    const mail = commentNoticeMail({
+      title: 'Secret Spec',
+      commenter: 'alice@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop',
+      reason: 'commented',
+    });
+    expect(mail.text).not.toContain('#');
+    expect(mail.html).not.toContain('#');
+    expect(mail.text).not.toContain('comment_id');
+    expect(mail.html).not.toContain('comment_id');
+  });
+
+  test('escapes HTML in title and commenter', () => {
+    const mail = commentNoticeMail({
+      title: '<script>alert("x")</script>',
+      commenter: 'user"name<x>@example.com',
+      relicUrl: 'https://relic.example/r1',
+      stopUrl: 'https://relic.example/stop',
+      reason: 'commented',
+    });
+    expect(mail.html).not.toContain('<script>');
+    expect(mail.html).toContain('&lt;script&gt;');
+    expect(mail.html).toContain('&quot;');
   });
 });
 

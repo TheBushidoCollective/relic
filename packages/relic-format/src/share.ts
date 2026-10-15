@@ -100,8 +100,8 @@ export function composeShareEmail(p: {
       : `Shared with you: ${p.title}`;
   const next =
     p.sender === 'publisher'
-      ? 'When I publish a new version'
-      : 'When a new version is published';
+      ? 'When someone comments or I publish a new version'
+      : 'When someone comments or a new version is published';
   const text = [
     `I've shared ${thing} with you on Relic. Open it here:`,
     '',
@@ -109,7 +109,7 @@ export function composeShareEmail(p: {
     '',
     'Anyone with this whole link can read it, including the part after the #, which is the key that decrypts it. Relic never receives that part.',
     '',
-    `${next}, Relic will email you that it changed. That email never contains the key, and it has a link to stop those emails. Relic keeps your address for that.`,
+    `${next}, Relic will email you. That email never contains the key, and it has a link to stop those emails. Relic keeps your address for that.`,
   ].join('\n');
   return { to: [...p.to], subject, text };
 }

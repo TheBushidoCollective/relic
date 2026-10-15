@@ -93,7 +93,8 @@ export interface RelicConfig {
    */
   readonly unsubscribeRateLimit: RateLimitConfig;
   /**
-   * Change notice emails per window across all relics.
+   * Outbound notification emails per window across all relics (covers both
+   * change notices on republish and comment notifications).
    * decisions.md
    */
   readonly changeNoticeRateLimit: RateLimitConfig;

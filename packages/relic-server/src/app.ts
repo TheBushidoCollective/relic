@@ -40,6 +40,7 @@ import { COVER_ALT, cardCopy } from './card.ts';
 import { assertConfig, DEFAULT_CONFIG, type RelicConfig } from './config.ts';
 import {
   changeNoticeMail,
+  commentNoticeMail,
   commentNotificationMail,
   type OutboundMail,
   replyNotificationMail,
@@ -73,9 +74,15 @@ const RESERVED = new Set(RESERVED_SEGMENTS);
  * network, and a production deployment supplies one implementation without
  * any route knowing which.
  */
+export interface BatchMailItem {
+  readonly email: string;
+  readonly mail: OutboundMail;
+}
+
 export interface Mailer {
   send(email: string, link: string): Promise<void>;
   sendMail?(email: string, mail: OutboundMail): Promise<void>;
+  sendBatch?(items: readonly BatchMailItem[]): Promise<void>;
 }
 
 /**
@@ -86,6 +93,7 @@ export interface Mailer {
 export const NULL_MAILER: Mailer = {
   async send(): Promise<void> {},
   async sendMail(): Promise<void> {},
+  async sendBatch(): Promise<void> {},
 };
 
 export interface AppOptions {
@@ -1450,14 +1458,50 @@ export function createApp(options: AppOptions = {}): RelicApp {
     );
   }
 
-  // --- change notices and sharing ----------------------------------------
+  // --- change notices, comment notifications, and sharing -----------------
 
-  async function announceVersion(
-    relicId: string,
-    version: number,
-    now: number
-  ): Promise<void> {
+  interface RecipientMeta {
+    readonly reason: 'commented' | 'shared' | 'owner';
+    readonly sharedBy?: 'publisher' | 'reader' | undefined;
+  }
+
+  type NotificationEvent =
+    | {
+        readonly type: 'version';
+        readonly version: number;
+      }
+    | {
+        readonly type: 'comment';
+        readonly author: string;
+        readonly addresses?: string | undefined;
+      };
+
+  async function fanOutNotifications(params: {
+    readonly relicId: string;
+    readonly row: RelicRow;
+    readonly now: number;
+    readonly event: NotificationEvent;
+  }): Promise<void> {
+    const { relicId, row, now, event } = params;
+
     if ((await store.getTombstone(relicId)) !== undefined) {
+      return;
+    }
+    if (row.expiresAt !== undefined && row.expiresAt <= now) {
+      return;
+    }
+    if (row.mintsUsed >= config.downloadCap) {
+      return;
+    }
+    if (
+      mailer === undefined ||
+      (mailer.sendBatch === undefined &&
+        mailer.sendMail === undefined &&
+        mailer.send === undefined)
+    ) {
+      const noticeKind =
+        event.type === 'version' ? 'change notice' : 'comment notification';
+      console.error(`relic: ${noticeKind} mailer unavailable`);
       return;
     }
 
@@ -1468,26 +1512,21 @@ export function createApp(options: AppOptions = {}): RelicApp {
       store.unsubscribeKey(),
     ]);
 
-    const claimedRow = await store.claimVersionNotice(relicId, version);
-    if (claimedRow === undefined) {
-      return;
-    }
-    if (claimedRow.expiresAt !== undefined && claimedRow.expiresAt <= now) {
-      return;
-    }
-    if (claimedRow.mintsUsed >= config.downloadCap) {
-      return;
-    }
-    if (mailer === undefined || mailer.sendMail === undefined) {
-      console.error('relic: change notice mailer unavailable');
-      return;
+    let answeredAddr: string | undefined;
+    if (event.type === 'comment' && event.addresses !== undefined) {
+      const addressedComment = await store.getComment(relicId, event.addresses);
+      if (
+        addressedComment !== undefined &&
+        addressedComment.author !== 'publisher' &&
+        looksLikeEmail(addressedComment.author)
+      ) {
+        const candidate = addressedComment.author.trim().toLowerCase();
+        if (candidate !== event.author.trim().toLowerCase()) {
+          answeredAddr = candidate;
+        }
+      }
     }
 
-    const optOutSet = new Set(optOuts);
-    interface RecipientMeta {
-      readonly reason: 'commented' | 'shared';
-      readonly sharedBy?: 'publisher' | 'reader';
-    }
     const recipients = new Map<string, RecipientMeta>();
 
     for (const comment of comments) {
@@ -1507,23 +1546,47 @@ export function createApp(options: AppOptions = {}): RelicApp {
       }
     }
 
-    if (claimedRow.ownerEmail !== undefined) {
-      recipients.delete(claimedRow.ownerEmail.trim().toLowerCase());
+    const normalizedOwner = row.ownerEmail?.trim().toLowerCase();
+    if (event.type === 'version') {
+      if (normalizedOwner !== undefined) {
+        recipients.delete(normalizedOwner);
+      }
+    } else {
+      const authorLower = event.author.trim().toLowerCase();
+      if (event.author === 'publisher') {
+        if (normalizedOwner !== undefined) {
+          recipients.delete(normalizedOwner);
+        }
+      } else {
+        if (normalizedOwner !== undefined && normalizedOwner !== authorLower) {
+          if (!recipients.has(normalizedOwner)) {
+            recipients.set(normalizedOwner, { reason: 'owner' });
+          }
+        }
+        recipients.delete(authorLower);
+      }
     }
 
+    const optOutSet = new Set(optOuts);
     const canonicalRelicId = parseRelicId(relicId);
     const relicUrl = `${config.serviceOrigin}/${relicId}`;
+    const logPrefix =
+      event.type === 'version'
+        ? 'change notice send'
+        : 'comment notification';
+
+    interface PreparedRecipient {
+      readonly address: string;
+      readonly addressHash: string;
+      readonly mail: OutboundMail;
+    }
+
+    const prepared: PreparedRecipient[] = [];
 
     for (const [address, meta] of recipients) {
       const addressHash = await sha256Hex(address);
       if (optOutSet.has(addressHash)) {
         continue;
-      }
-      if (await store.isOptedOut(relicId, addressHash)) {
-        continue;
-      }
-      if ((await store.getTombstone(relicId)) !== undefined) {
-        break;
       }
 
       const recipientVerdict = limiter.check(
@@ -1552,23 +1615,131 @@ export function createApp(options: AppOptions = {}): RelicApp {
       const token = Buffer.from(tokenBytes).toString('base64url');
       const stopUrl = `${config.serviceOrigin}/api/relics/${relicId}/unsubscribe?addr=${addressHash}&token=${token}`;
 
-      const mail = changeNoticeMail({
-        title: claimedRow.title,
-        version,
-        relicUrl,
-        stopUrl,
-        reason: meta.reason,
-        sharedBy: meta.sharedBy,
-      });
+      let mail: OutboundMail;
+      if (event.type === 'version') {
+        mail = changeNoticeMail({
+          title: row.title,
+          version: event.version,
+          relicUrl,
+          stopUrl,
+          reason: meta.reason,
+          sharedBy: meta.sharedBy,
+        });
+      } else {
+        const commenterName =
+          event.author === 'publisher' ? 'The publisher' : event.author;
+        if (answeredAddr !== undefined && address === answeredAddr) {
+          mail = replyNotificationMail({
+            title: row.title,
+            replier: commenterName,
+            relicUrl,
+            stopUrl,
+          });
+        } else if (normalizedOwner !== undefined && address === normalizedOwner) {
+          mail = commentNotificationMail({
+            title: row.title,
+            commenter: commenterName,
+            relicUrl,
+            stopUrl,
+          });
+        } else {
+          mail = commentNoticeMail({
+            title: row.title,
+            commenter: commenterName,
+            relicUrl,
+            stopUrl,
+            reason: meta.reason,
+            sharedBy: meta.sharedBy,
+          });
+        }
+      }
 
-      try {
-        await mailer.sendMail(address, mail);
-      } catch (error) {
-        console.error(
-          `relic: change notice send failed for recipient ${addressHash}: ${sanitizeMailError(error, address)}`
-        );
+      prepared.push({ address, addressHash, mail });
+    }
+
+    if (typeof mailer.sendBatch === 'function') {
+      const MAX_BATCH = 100;
+      for (let i = 0; i < prepared.length; i += MAX_BATCH) {
+        if ((await store.getTombstone(relicId)) !== undefined) {
+          break;
+        }
+        const chunk = prepared.slice(i, i + MAX_BATCH);
+        const activeChunk: Array<{ email: string; addressHash: string; mail: OutboundMail }> = [];
+        for (const item of chunk) {
+          if (await store.isOptedOut(relicId, item.addressHash)) {
+            continue;
+          }
+          activeChunk.push({ email: item.address, addressHash: item.addressHash, mail: item.mail });
+        }
+        if (activeChunk.length > 0) {
+          try {
+            await mailer.sendBatch(
+              activeChunk.map((it) => ({ email: it.email, mail: it.mail }))
+            );
+          } catch (error) {
+            for (const it of activeChunk) {
+              console.error(
+                `relic: ${logPrefix} failed for recipient ${it.addressHash}: ${sanitizeMailError(error, it.email)}`
+              );
+            }
+          }
+        }
+      }
+    } else if (typeof mailer.sendMail === 'function') {
+      for (const item of prepared) {
+        if ((await store.getTombstone(relicId)) !== undefined) {
+          break;
+        }
+        if (await store.isOptedOut(relicId, item.addressHash)) {
+          continue;
+        }
+        try {
+          await mailer.sendMail(item.address, item.mail);
+        } catch (error) {
+          console.error(
+            `relic: ${logPrefix} failed for recipient ${item.addressHash}: ${sanitizeMailError(error, item.address)}`
+          );
+        }
+      }
+    } else if (typeof mailer.send === 'function') {
+      for (const item of prepared) {
+        if ((await store.getTombstone(relicId)) !== undefined) {
+          break;
+        }
+        if (await store.isOptedOut(relicId, item.addressHash)) {
+          continue;
+        }
+        try {
+          await mailer.send(item.address, item.mail.text);
+        } catch (error) {
+          console.error(
+            `relic: ${logPrefix} failed for recipient ${item.addressHash}: ${sanitizeMailError(error, item.address)}`
+          );
+        }
       }
     }
+  }
+
+  async function announceVersion(
+    relicId: string,
+    version: number,
+    now: number
+  ): Promise<void> {
+    if ((await store.getTombstone(relicId)) !== undefined) {
+      return;
+    }
+
+    const claimedRow = await store.claimVersionNotice(relicId, version);
+    if (claimedRow === undefined) {
+      return;
+    }
+
+    await fanOutNotifications({
+      relicId,
+      row: claimedRow,
+      now,
+      event: { type: 'version', version },
+    });
   }
 
   async function share(
@@ -1939,7 +2110,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       return unsubscribeResponse(
         200,
         'Nothing to stop',
-        '<p>This relic is no longer available, so it sends no change emails.</p>',
+        '<p>This relic is no longer available, so it sends no emails.</p>',
         undefined,
         isHead
       );
@@ -1950,7 +2121,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       return unsubscribeResponse(
         200,
         'Nothing to stop',
-        '<p>This relic is no longer available, so it sends no change emails.</p>',
+        '<p>This relic is no longer available, so it sends no emails.</p>',
         undefined,
         isHead
       );
@@ -1969,7 +2140,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
         return unsubscribeResponse(
           200,
           'Nothing to stop',
-          '<p>This relic is no longer available, so it sends no change emails.</p>',
+          '<p>This relic is no longer available, so it sends no emails.</p>',
           undefined,
           isHead
         );
@@ -1977,17 +2148,17 @@ export function createApp(options: AppOptions = {}): RelicApp {
       return unsubscribeResponse(
         200,
         'Stopped',
-        `<p>This address will get no more change emails about ${T}.</p>`,
+        `<p>This address will get no more emails about ${T}.</p>`,
         undefined,
         isHead
       );
     }
 
     const action = `${config.serviceOrigin}/api/relics/${relicId}/unsubscribe?addr=${addr}&amp;token=${token}`;
-    const formHtml = `<p>Stop emails when ${T} gets a new version?</p><form method="POST" action="${action}"><button type="submit">Stop these emails</button></form><p>Only this relic's change emails stop.</p>`;
+    const formHtml = `<p>Stop emails about ${T}?</p><form method="POST" action="${action}"><button type="submit">Stop these emails</button></form><p>Only this relic's emails stop.</p>`;
     return unsubscribeResponse(
       200,
-      'Stop change emails',
+      'Stop emails',
       formHtml,
       undefined,
       isHead
@@ -2348,8 +2519,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     try {
       await dispatchCommentNotifications({
         relicId,
-        relicTitle: row.title,
-        ownerEmail: row.ownerEmail,
+        row,
         author,
         addresses,
         now,
@@ -2369,82 +2539,21 @@ export function createApp(options: AppOptions = {}): RelicApp {
       201
     );
   }
+
   async function dispatchCommentNotifications(params: {
     readonly relicId: string;
-    readonly relicTitle: string | undefined;
-    readonly ownerEmail: string | undefined;
+    readonly row: RelicRow;
     readonly author: string;
     readonly addresses: string | undefined;
     readonly now: number;
   }): Promise<void> {
-    const { relicId, relicTitle, ownerEmail, author, addresses, now } = params;
-
-    const notified = new Set<string>();
-
-    if (addresses !== undefined) {
-      const addressedComment = await store.getComment(relicId, addresses);
-      if (
-        addressedComment !== undefined &&
-        addressedComment.author !== 'publisher' &&
-        looksLikeEmail(addressedComment.author) &&
-        addressedComment.author.toLowerCase() !== author.toLowerCase()
-      ) {
-        const recipient = addressedComment.author;
-        notified.add(recipient.toLowerCase());
-
-        const verdict = limiter.check(
-          `notify ${relicId} ${recipient.toLowerCase()}`,
-          config.notificationRateLimit,
-          now
-        );
-        if (verdict.allowed) {
-          const mail = replyNotificationMail(relicTitle, author);
-          try {
-            if (mailer.sendMail) {
-              await mailer.sendMail(recipient, mail);
-            } else {
-              await mailer.send(recipient, mail.text);
-            }
-          } catch (error) {
-            const recipientHash = await sha256Hex(
-              recipient.toLowerCase().trim()
-            );
-            console.error(
-              `relic: comment notification failed for recipient ${recipientHash}: ${sanitizeMailError(error, recipient)}`
-            );
-          }
-        }
-      }
-    }
-
-    if (
-      ownerEmail !== undefined &&
-      author !== 'publisher' &&
-      ownerEmail.toLowerCase() !== author.toLowerCase() &&
-      !notified.has(ownerEmail.toLowerCase())
-    ) {
-      const recipient = ownerEmail;
-      const verdict = limiter.check(
-        `notify ${relicId} ${recipient.toLowerCase()}`,
-        config.notificationRateLimit,
-        now
-      );
-      if (verdict.allowed) {
-        const mail = commentNotificationMail(relicTitle, author);
-        try {
-          if (mailer.sendMail) {
-            await mailer.sendMail(recipient, mail);
-          } else {
-            await mailer.send(recipient, mail.text);
-          }
-        } catch (error) {
-          const recipientHash = await sha256Hex(recipient.toLowerCase().trim());
-          console.error(
-            `relic: comment notification failed for recipient ${recipientHash}: ${sanitizeMailError(error, recipient)}`
-          );
-        }
-      }
-    }
+    const { relicId, row, author, addresses, now } = params;
+    await fanOutNotifications({
+      relicId,
+      row,
+      now,
+      event: { type: 'comment', author, addresses },
+    });
   }
 
   function sanitizeMailError(error: unknown, recipient?: string): string {
@@ -3796,7 +3905,7 @@ republishing does not withdraw earlier content.** The same fragment key
 decrypts every version in your browser. Republishing is not a redaction
 mechanism.
 
-## Comments, change emails, and sharing
+## Comments, email notices, and sharing
 
 Anyone holding a relic's link can read its comments and add one. Comment
 bodies are encrypted with a key derived from the link, so we cannot read them.
@@ -3805,31 +3914,36 @@ address they verified by following a sign-in link, stored in the clear beside
 each comment. A sign-in link, and every email below, passes the address
 through our mail provider.
 
-**When a relic gets a new version, we email the people following it.** That
-is every verified address that commented on it and every address its
-publisher shared it with, minus anyone who stopped these emails. The email
-names the relic's title and the new version number and links to the relic
-without its key, because we never have the key. A publisher can skip the email
-for a version. A publisher who registered a verified owner address is emailed
-when a comment arrives, and a commenter is emailed when someone answers them.
+**When someone comments or a relic gets a new version, we email the people following it.**
+That is every verified address that commented on it, every address its publisher or a reader
+shared it with, and the relic's owner address, minus the author of the comment and anyone
+who stopped emails for that relic. A new comment email names the commenter (their verified
+email address, or "The publisher" for comments posted with the publish token), so everyone
+on the list, including third-party shared addresses, sees the commenter's address. The email
+cannot quote the comment and links to the relic without its key. The publisher gets owner-specific
+wording ("commented on your relic"), an answered commenter gets reply wording ("answered your comment"),
+and everyone else gets a notice with the reason they are following the relic. When a new version is
+published, the email announces the new version number. A publisher can skip the email for a version.
 
-**Sharing gives us addresses, never the link.** A publisher, or a signed-in
-reader holding the key, can register addresses on a relic so they receive these
-emails. Web sharing by a reader is gated by a proof derived from the key: the
-service learns the proof, but never the key, and does not store who shared it.
-We store each address in the clear, linked to the relic, and we do not ask its
-owner first. The email that carries the link goes from the sharer's own mail,
-not from us, so the key never reaches our servers.
+**Burst limiter and spend fuse.** Comment notices and version notices share the same rate
+limits: at most one email per recipient per relic per 10 minutes, collapsing rapid comments or
+version republishes with replies into a single email. Outbound notices across all relics are
+capped by a global fuse to bound mail spend.
 
-**Every change email has a stop link.** It stops change emails about that
-relic to that address. We record that it was used as a SHA-256 of the address
-beside the relic id. A hash of an email address is not anonymous: anyone who
-can guess the address can match it.
+**Sharing gives us addresses, never the link.** A publisher, or a signed-in reader holding
+the key, can register addresses on a relic so they receive these emails. Web sharing by a reader
+is gated by a proof derived from the key: the service learns the proof, but never the key, and does
+not store who shared it. We store each address in the clear, linked to the relic, and we do not ask
+its owner first. The email that carries the link goes from the sharer's own mail, not from us, so
+the key never reaches our servers.
 
-Deleting a relic deletes its comments, its shared addresses, and its stop
-records. An expired relic sends no more change emails, and those records stay
-until it is deleted, like the rest of it.
+**One stop link stops every email about that relic.** Every email (comment, reply, owner, and version)
+carries an unauthenticated stop link and RFC 8058 one-click unsubscribe headers. It stops all emails
+about that relic to that address. We record that it was used as a SHA-256 of the address beside the
+relic id. A hash of an email address is not anonymous: anyone who can guess the address can match it.
 
+Deleting a relic deletes its comments, its shared addresses, and its stop records. An expired
+relic sends no more emails, and those records stay until it is deleted, like the rest of it.
 ## The JavaScript caveat
 
 The code that decrypts your relic in the browser is served by us, the same

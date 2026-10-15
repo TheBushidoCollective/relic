@@ -206,9 +206,9 @@ describe('change notices and relic_share', () => {
       })
     );
 
-    // Clear initial comment notification to owner
+    // Advance clock past the notification rate limit window
+    now += 15 * 60 * 1000;
     sentMails = [];
-
     // Republish v2
     const repub = await republish(id, token);
     expect(repub.status).toBe(200);
@@ -716,7 +716,8 @@ describe('change notices and relic_share', () => {
     );
     expect(getRes.status).toBe(200);
     const getHtml = await getRes.text();
-    expect(getHtml).toContain('Stop change emails');
+    expect(getHtml).toContain('Stop emails');
+    expect(getHtml).toContain("Only this relic's emails stop.");
     expect(getHtml).toContain('<form method="POST"');
     expect(getHtml).toContain('Stop these emails');
 
@@ -1629,6 +1630,67 @@ describe('change notices and relic_share', () => {
       } finally {
         console.error = origError;
       }
+    });
+  });
+  describe('comment notifications to relic participants', () => {
+    test('a reader comment emails every other commenter, every shared address and the owner exactly once, never the author', async () => {
+      const { id, grant } = await publish({
+        title: 'Project Roadmap',
+        ownerEmail: 'owner@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      // Share with two addresses
+      const shareRes = await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: ['share1@example.com', 'share2@example.com'],
+          }),
+        })
+      );
+      expect(shareRes.status).toBe(200);
+
+      // Alice comments
+      const aliceSession = await createSession('alice@example.com');
+      const aliceRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'YWxpY2U' }),
+        })
+      );
+      expect(aliceRes.status).toBe(201);
+
+      // Advance clock past the 10-minute rate limit window
+      now += 15 * 60 * 1000;
+      sentMails = [];
+
+      // Bob comments
+      const bobSession = await createSession('bob@example.com');
+      const bobRes = await app.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: bobSession },
+          body: JSON.stringify({ ciphertext: 'Ym9i' }),
+        })
+      );
+      expect(bobRes.status).toBe(201);
+
+      // Bob's comment must notify:
+      // - owner@example.com (owner wording)
+      // - alice@example.com (commenter wording)
+      // - share1@example.com (shared wording)
+      // - share2@example.com (shared wording)
+      // Never bob@example.com
+      const recipientEmails = sentMails.map((m) => m.email).sort();
+      expect(recipientEmails).toEqual([
+        'alice@example.com',
+        'owner@example.com',
+        'share1@example.com',
+        'share2@example.com',
+      ]);
     });
   });
 });
