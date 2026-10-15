@@ -157,7 +157,7 @@ relic_share(relic_id: "0a2c...", emails: ["ada@example.com", "grace@example.com"
 
 Draft the email in the user's own mailbox (or hand over the `mailto:` link if there is no mail tool available) and let them send it. Relic never sends the share email, because the share link carries the key in its fragment, and the service must never receive the key.
 
-Addresses are stored by the service in the clear, linked to the relic id. When you republish, the service automatically sends a change notice to everyone following the relic (commenters, shared addresses, and the owner address), unless you pass `notify: false`. When a new comment is posted, the service emails everyone on the relic's list except the comment's author, naming the commenter's address (or "The publisher"). Relic sends at most one email per person per relic per 10 minutes, and one stop link stops every email about that relic.
+Addresses are stored by the service in the clear, linked to the relic id. When you republish, the service automatically sends a change notice to each commenter and shared address, unless you pass `notify: false`. When a new comment is posted, the service emails everyone on the relic's list (commenters, shared addresses, and the owner address) except the comment's author, naming the commenter's address (or "The publisher"). Relic sends at most one email per person per relic per 10 minutes, and one stop link stops every email about that relic.
 
 Readers holding the link can also share from the viewer once a relic was published or republished by this client version.
 
@@ -168,7 +168,8 @@ back. A new comment on a relic emails everyone on its list (verified commenters,
 shared addresses, and the owner address) except the author, naming the
 commenter's address (or "The publisher"). At most one email per person per
 relic per 10 minutes is sent, and one stop link stops every email about that
-relic.
+relic. You have no mailbox, so none of those emails reach you: read them.
+
 ```
 relic_read_comments(relic_id: "0a2c...")
 ```

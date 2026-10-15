@@ -98,10 +98,11 @@ replace or clear the cover image, and an optional `notify` flag to control chang
 notices, defaulting to true); the publish token is never an argument and
 never printed, because the client stored it beside the relic's key at first
 publish and reads it back from there. Each new version emails a change notice to
-commenters, shared addresses, and the owner address unless `notify: false` is
-passed. At most one email per person per relic per 10 minutes is sent, and one
-stop link stops every email about that relic. The server
-the only machine that can republish: lose that state and nobody, the operator
+commenters and shared addresses unless `notify: false` is passed. At most one
+email per person per relic per 10 minutes is sent, and one stop link stops
+every email about that relic. The server issued that token once and keeps only
+its hash, so the machine that published is the only machine that can
+republish: lose that state and nobody, the operator
 included, can authorize another version. Opening the link always serves the
 current version, and the download cap is shared across all versions. A relic
 taken down for abuse refuses every future version whatever token is presented,
@@ -146,6 +147,7 @@ except the comment's author, naming the commenter's address (or "The publisher")
 At most one email per person per relic per 10 minutes is sent, and one stop link
 stops every email about that relic. What the service does learn is
 who commented on which relic and when; now also whether a comment was
+edited, the `edited_at` stamp, and whether it was settled and by which
 address. There is no edit history, because the service holds one ciphertext
 per comment and an edit overwrites it. A resolution cannot be encrypted for
 the same shape of reason: it decides whether a republish is blocked, which

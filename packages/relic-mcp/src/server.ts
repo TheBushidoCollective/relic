@@ -383,7 +383,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
     'uploaded unencrypted for link previews; pass cover: false to withhold ' +
     'it.' +
     REPUBLISH_DISCIPLINE_DISCLOSURE +
-    ' Each new version emails a change notice, naming the title and version and never the key, to everyone following the relic (each verified commenter, each address added with relic_share, and the owner address, minus any that stopped emails); pass notify: false to skip it. At most one email per person per relic per 10 minutes, and one stop link stops every email about that relic.',
+    ' Each new version emails a change notice, naming the title and version and never the key, to each verified commenter and each address added with relic_share, minus any that stopped emails; pass notify: false to skip it. At most one email per person per relic per 10 minutes, and one stop link stops every email about that relic.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -451,7 +451,7 @@ export const REPUBLISH_TOOL_DEFINITION = {
         type: 'boolean',
         default: true,
         description:
-          'Optional. Email a change notice for this version to everyone following the relic: each verified address that commented on it, each address added with relic_share, and the owner address, except any that stopped those emails. Defaults to true. The notice names the title and version and never carries the key. At most one email per person per relic per 10 minutes, and one stop link stops every email about that relic. Pass false for a change not worth an email, such as a typo fix.',
+          'Optional. Email a change notice for this version to each verified address that commented on the relic and each address added with relic_share, except any that stopped those emails. Defaults to true. The notice names the title and version and never carries the key. At most one email per person per relic per 10 minutes, and one stop link stops every email about that relic. Pass false for a change not worth an email, such as a typo fix.',
       },
     },
     required: ['relic_id', 'path'],
@@ -1732,8 +1732,8 @@ async function callTool(
             'per relic per 10 minutes, and one stop link stops every email about that relic',
           change_notices:
             'on every republish unless notify: false, the service emails every ' +
-            'verified address that commented on the relic, every address ' +
-            'added with relic_share, and the owner address, minus any that used ' +
+            'verified address that commented on the relic and every address ' +
+            'added with relic_share, minus any that used ' +
             'the stop link; the email names the title and version and never carries the key; ' +
             'at most one email per person per relic per 10 minutes, and one stop link stops every email about that relic',
           sharing:
@@ -2318,7 +2318,7 @@ async function callRepublish(
               'is no new link to hand out.\n\n' +
               `${
                 result.notify
-                  ? `Relic sends a change notice for version ${result.version} to everyone following this relic, meaning each address that commented on it, was added with relic_share, or owns the relic, except any that stopped those emails. It names the title and version and never carries the key (at most one email per recipient per relic per 10 minutes; one stop link stops every email about that relic).`
+                  ? `Relic sends a change notice for version ${result.version} to each address that commented on this relic or was added with relic_share, except any that stopped those emails. It names the title and version and never carries the key (at most one email per recipient per relic per 10 minutes; one stop link stops every email about that relic).`
                   : 'No change notice goes out for this version, as asked.'
               }\n\n` +
               `Key phrase: ${result.key_phrase}\n` +
@@ -3010,8 +3010,8 @@ stops every email about that relic.
 
 What happens with change notices and sharing: on every republish unless
 notify: false, the service emails every verified address that commented on
-the relic, every address added with relic_share, and the owner address,
-minus any that used the stop link. The email names the title and version and
+the relic and every address added with relic_share, minus any that used the
+stop link. The email names the title and version and
 never carries the key. At most one email per person per relic per 10 minutes,
 and one stop link stops every email about that relic. relic_share sends the
 service email addresses and nothing else: it stores them in the clear, linked
