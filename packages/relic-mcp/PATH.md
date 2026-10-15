@@ -209,18 +209,23 @@ the full change notification and sharing lifecycle: publishing a relic with
 its derived `share_verifier`, posting a comment, sharing to recipient email addresses,
 republishing with change notices, exercising the one-click unsubscribe stop link,
 verifying opted-out recipients are skipped on subsequent republishes, verifying
-`notify: false` suppresses change notices, demonstrating unlanded republishes send
+`notify: false` suppresses change notices, a second reader's comment emailing
+everyone still following except its author, a publisher comment collapsed by the
+10-minute limit for people just emailed, demonstrating unlanded republishes send
 zero notices, and cleaning up via operator delete.
 
 Success ends with:
 
 ```text
 PUBLISHED relic_id=<id>
+SHARE_VERIFIER stored=true
 SHARED registered=2 link_has_fragment=true
 CHANGE_NOTICES version=2 recipients=3 keyless=true list_unsubscribe=true reader_mails=1
 STOPPED get=200 post=200 redirect=false
 CHANGE_NOTICES version=3 recipients=2 opted_out_skipped=1
 NOTIFY_FALSE version=4 recipients=0
+COMMENT_NOTICES recipients=2 names_commenter=true keyless=true
+PUBLISHER_COMMENT recipients=1 collapsed=2
 UNLANDED recipients=0
 DELETED shares_deleted=2 opt_outs_deleted=1
 NOTIFY_PATH_OK
