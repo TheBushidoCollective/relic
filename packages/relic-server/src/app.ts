@@ -39,6 +39,7 @@ import { type AssetSource, memoryAssets, REGISTER_SW_JS } from './assets.ts';
 import { COVER_ALT, cardCopy } from './card.ts';
 import { assertConfig, DEFAULT_CONFIG, type RelicConfig } from './config.ts';
 import {
+  changeNoticeMail,
   commentNotificationMail,
   type OutboundMail,
   replyNotificationMail,
@@ -412,6 +413,26 @@ export function createApp(options: AppOptions = {}): RelicApp {
     ) {
       return operatorDelete(second, request, url, now);
     }
+    if (
+      first === 'relics' &&
+      second !== undefined &&
+      third === 'share' &&
+      fourth === undefined &&
+      request.method === 'POST'
+    ) {
+      return share(second, request, ip, now);
+    }
+    if (
+      first === 'relics' &&
+      second !== undefined &&
+      third === 'unsubscribe' &&
+      fourth === undefined &&
+      (request.method === 'GET' ||
+        request.method === 'HEAD' ||
+        request.method === 'POST')
+    ) {
+      return unsubscribe(second, request, url, ip, now);
+    }
 
     // Comments. The read is deliberately unauthenticated: anybody holding
     // the link can already fetch and decrypt the content, and every body
@@ -578,6 +599,22 @@ export function createApp(options: AppOptions = {}): RelicApp {
       ownerEmail = normalizedOwner;
     }
 
+    let shareVerifier: string | undefined;
+    if (
+      'share_verifier' in body &&
+      body['share_verifier'] !== undefined &&
+      body['share_verifier'] !== null
+    ) {
+      const rawVerifier = body['share_verifier'];
+      if (
+        typeof rawVerifier !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(rawVerifier)
+      ) {
+        return refuse('invalid_publish_metadata', { relic_id: relicId });
+      }
+      shareVerifier = rawVerifier;
+    }
+
     const declared = Number(body['declared_size_bytes']);
     if (!Number.isSafeInteger(declared) || declared < 0) {
       return refuse('invalid_publish_metadata', { relic_id: relicId });
@@ -637,6 +674,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
       mintsUsed: 0,
       title,
       ownerEmail,
+      shareVerifier,
     });
 
     // The grant signs the object's exact byte length, so the upload has to be
@@ -817,6 +855,30 @@ export function createApp(options: AppOptions = {}): RelicApp {
       }
     }
 
+    let notify = true;
+    if ('notify' in body && body['notify'] !== undefined) {
+      if (typeof body['notify'] !== 'boolean') {
+        return refuse('invalid_publish_metadata', { relic_id: relicId });
+      }
+      notify = body['notify'];
+    }
+
+    let shareVerifierUpdate: { readonly shareVerifier: string } | undefined;
+    if (
+      'share_verifier' in body &&
+      body['share_verifier'] !== undefined &&
+      body['share_verifier'] !== null
+    ) {
+      const rawVerifier = body['share_verifier'];
+      if (
+        typeof rawVerifier !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(rawVerifier)
+      ) {
+        return refuse('invalid_publish_metadata', { relic_id: relicId });
+      }
+      shareVerifierUpdate = { shareVerifier: rawVerifier };
+    }
+
     const declared = Number(body['declared_size_bytes']);
     if (!Number.isSafeInteger(declared) || declared < 0) {
       return refuse('invalid_publish_metadata', { relic_id: relicId });
@@ -857,7 +919,9 @@ export function createApp(options: AppOptions = {}): RelicApp {
       rendererClass as RendererClass,
       declared,
       titleUpdate,
-      ownerUpdate
+      ownerUpdate,
+      notify,
+      shareVerifierUpdate
     );
     if (next === undefined) {
       return refuse('relic_not_found', { relic_id: relicId });
@@ -919,6 +983,14 @@ export function createApp(options: AppOptions = {}): RelicApp {
 
     if (row.publishedAt === undefined) {
       await store.markPublished(relicId, now, object.length, object.crc32c);
+    }
+
+    if (row.noticePending === true) {
+      try {
+        await announceVersion(relicId, row.version, now);
+      } catch (error) {
+        console.error('relic: change notice failed:', error);
+      }
     }
 
     return Response.json({
@@ -1256,6 +1328,14 @@ export function createApp(options: AppOptions = {}): RelicApp {
       );
     }
 
+    if (version === row.version && row.noticePending === true) {
+      try {
+        await announceVersion(relicId, row.version, now);
+      } catch (error) {
+        console.error('relic: change notice failed:', error);
+      }
+    }
+
     if (row.mintsUsed >= config.downloadCap) {
       // Not a rate limit: waiting never helps and the object still exists.
       return logAndRefuse(
@@ -1370,6 +1450,493 @@ export function createApp(options: AppOptions = {}): RelicApp {
     );
   }
 
+  // --- change notices and sharing ----------------------------------------
+
+  async function announceVersion(
+    relicId: string,
+    version: number,
+    now: number
+  ): Promise<void> {
+    if ((await store.getTombstone(relicId)) !== undefined) {
+      return;
+    }
+
+    const [comments, shares, optOuts, unsubKey] = await Promise.all([
+      store.listComments(relicId),
+      store.listShares(relicId),
+      store.listOptOuts(relicId),
+      store.unsubscribeKey(),
+    ]);
+
+    const claimedRow = await store.claimVersionNotice(relicId, version);
+    if (claimedRow === undefined) {
+      return;
+    }
+    if (claimedRow.expiresAt !== undefined && claimedRow.expiresAt <= now) {
+      return;
+    }
+    if (claimedRow.mintsUsed >= config.downloadCap) {
+      return;
+    }
+    if (mailer === undefined || mailer.sendMail === undefined) {
+      console.error('relic: change notice mailer unavailable');
+      return;
+    }
+
+    const optOutSet = new Set(optOuts);
+    interface RecipientMeta {
+      readonly reason: 'commented' | 'shared';
+      readonly sharedBy?: 'publisher' | 'reader';
+    }
+    const recipients = new Map<string, RecipientMeta>();
+
+    for (const comment of comments) {
+      if (comment.author !== 'publisher' && looksLikeEmail(comment.author)) {
+        const addr = comment.author.trim().toLowerCase();
+        recipients.set(addr, { reason: 'commented' });
+      }
+    }
+
+    for (const share of shares) {
+      const addr = share.email.trim().toLowerCase();
+      if (!recipients.has(addr)) {
+        recipients.set(addr, {
+          reason: 'shared',
+          sharedBy: share.sharedBy,
+        });
+      }
+    }
+
+    if (claimedRow.ownerEmail !== undefined) {
+      recipients.delete(claimedRow.ownerEmail.trim().toLowerCase());
+    }
+
+    const canonicalRelicId = parseRelicId(relicId);
+    const relicUrl = `${config.serviceOrigin}/${relicId}`;
+
+    for (const [address, meta] of recipients) {
+      const addressHash = await sha256Hex(address);
+      if (optOutSet.has(addressHash)) {
+        continue;
+      }
+
+      const recipientVerdict = limiter.check(
+        `notify ${relicId} ${address}`,
+        config.notificationRateLimit,
+        now
+      );
+      if (!recipientVerdict.allowed) {
+        continue;
+      }
+
+      const globalVerdict = limiter.check(
+        'change-notice',
+        config.changeNoticeRateLimit,
+        now
+      );
+      if (!globalVerdict.allowed) {
+        console.error('relic: change notice rate limit reached');
+        break;
+      }
+
+      const tokenBytes = await hmacSha256(
+        unsubKey,
+        `relic-unsubscribe:v1:${canonicalRelicId}:${addressHash}`
+      );
+      const token = Buffer.from(tokenBytes).toString('base64url');
+      const stopUrl = `${config.serviceOrigin}/api/relics/${relicId}/unsubscribe?addr=${addressHash}&token=${token}`;
+
+      const mail = changeNoticeMail({
+        title: claimedRow.title,
+        version,
+        relicUrl,
+        stopUrl,
+        reason: meta.reason,
+        sharedBy: meta.sharedBy,
+      });
+
+      try {
+        await mailer.sendMail(address, mail);
+      } catch (error) {
+        console.error(
+          `relic: change notice send failed for ${address}:`,
+          error
+        );
+      }
+    }
+  }
+
+  async function share(
+    rawId: string,
+    request: Request,
+    ip: string,
+    now: number
+  ): Promise<Response> {
+    if (config.killSwitchEngaged) {
+      return refuse('service_paused', { retry_after_seconds: 300 });
+    }
+
+    const ipVerdict = limiter.check(`share ${ip}`, config.shareRateLimit, now);
+    if (!ipVerdict.allowed) {
+      return refuse('share_rate_limited', {
+        retry_after_seconds: ipVerdict.retryAfterSeconds,
+      });
+    }
+
+    let relicId: string;
+    try {
+      relicId = parseRelicId(rawId);
+    } catch {
+      return refuse('invalid_relic_id');
+    }
+
+    if ((await store.getTombstone(relicId)) !== undefined) {
+      return refuse('relic_removed', {
+        relic_id: relicId,
+        report_url: `${config.serviceOrigin}/abuse`,
+      });
+    }
+
+    const row = await store.getRelic(relicId);
+    if (row === undefined) {
+      return refuse('relic_not_found', { relic_id: relicId });
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      const parsed = await readJson(request);
+      if (
+        parsed === null ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed)
+      ) {
+        return refuse('invalid_share', {
+          relic_id: relicId,
+          share_max_per_call: config.shareMaxPerCall,
+        });
+      }
+      body = parsed as Record<string, unknown>;
+    } catch {
+      return refuse('invalid_share', {
+        relic_id: relicId,
+        share_max_per_call: config.shareMaxPerCall,
+      });
+    }
+
+    const hasPublishToken =
+      'publish_token' in body && body['publish_token'] !== undefined;
+    const hasShareProof =
+      'share_proof' in body && body['share_proof'] !== undefined;
+
+    if (
+      (hasPublishToken && hasShareProof) ||
+      (!hasPublishToken && !hasShareProof)
+    ) {
+      return refuse('invalid_share', {
+        relic_id: relicId,
+        share_max_per_call: config.shareMaxPerCall,
+      });
+    }
+
+    let sharedBy: 'publisher' | 'reader';
+
+    if (hasPublishToken) {
+      sharedBy = 'publisher';
+      const token = body['publish_token'];
+      if (typeof token !== 'string' || token.length === 0) {
+        return refuse('invalid_publish_token', { relic_id: relicId });
+      }
+      const tokenHash = await sha256Hex(token);
+      if (!timingSafeEqual(tokenHash, row.publishTokenHash)) {
+        return refuse('invalid_publish_token', { relic_id: relicId });
+      }
+      if (row.expiresAt !== undefined && row.expiresAt <= now) {
+        return refuse('relic_expired', { relic_id: relicId });
+      }
+      if (row.mintsUsed >= config.downloadCap) {
+        return refuse('download_cap_exhausted', {
+          relic_id: relicId,
+          download_cap: config.downloadCap,
+        });
+      }
+    } else {
+      sharedBy = 'reader';
+      if (row.expiresAt !== undefined && row.expiresAt <= now) {
+        return refuse('relic_expired', { relic_id: relicId });
+      }
+      if (row.mintsUsed >= config.downloadCap) {
+        return refuse('download_cap_exhausted', {
+          relic_id: relicId,
+          download_cap: config.downloadCap,
+        });
+      }
+
+      const token = sessionCookie(request);
+      if (token === undefined) {
+        return refuse('invalid_session', { relic_id: relicId });
+      }
+      const session = await store.getSession(await sha256Hex(token));
+      if (session === undefined || session.expiresAt <= now) {
+        return refuse('invalid_session', { relic_id: relicId });
+      }
+
+      if (row.shareVerifier === undefined || row.shareVerifier === '') {
+        return refuse('share_unavailable', {
+          relic_id: relicId,
+          detail:
+            'This relic was published before sharing existed. Its publisher can republish it to turn sharing on.',
+        });
+      }
+
+      const rawProof = body['share_proof'];
+      if (
+        typeof rawProof !== 'string' ||
+        !/^[A-Za-z0-9_-]{43}$/.test(rawProof)
+      ) {
+        return refuse('invalid_share', {
+          relic_id: relicId,
+          share_max_per_call: config.shareMaxPerCall,
+        });
+      }
+      const proofBytes = Buffer.from(rawProof, 'base64url');
+      if (proofBytes.byteLength !== 32) {
+        return refuse('invalid_share', {
+          relic_id: relicId,
+          share_max_per_call: config.shareMaxPerCall,
+        });
+      }
+      const computedVerifier = await sha256Hex(proofBytes);
+      if (!timingSafeEqual(computedVerifier, row.shareVerifier)) {
+        return refuse('invalid_share_proof', { relic_id: relicId });
+      }
+
+      const readerVerdict = limiter.check(
+        `share-reader ${relicId} ${session.email}`,
+        config.readerShareRateLimit,
+        now
+      );
+      if (!readerVerdict.allowed) {
+        return refuse('share_rate_limited', {
+          relic_id: relicId,
+          retry_after_seconds: readerVerdict.retryAfterSeconds,
+        });
+      }
+    }
+
+    const rawEmails = body['emails'];
+    if (
+      !Array.isArray(rawEmails) ||
+      rawEmails.length === 0 ||
+      rawEmails.length > config.shareMaxPerCall
+    ) {
+      return refuse('invalid_share', {
+        relic_id: relicId,
+        share_max_per_call: config.shareMaxPerCall,
+      });
+    }
+
+    const validEmails: string[] = [];
+    for (let i = 0; i < rawEmails.length; i++) {
+      const entry = rawEmails[i];
+      if (typeof entry !== 'string' || !looksLikeEmail(entry.trim())) {
+        return refuse('invalid_share', {
+          relic_id: relicId,
+          share_max_per_call: config.shareMaxPerCall,
+          detail: `Invalid email address at index ${i}`,
+        });
+      }
+      validEmails.push(entry);
+    }
+
+    const existingShares = await store.listShares(relicId);
+    const existingEmailSet = new Set(existingShares.map((s) => s.email));
+
+    const normalizedDeduped: string[] = [];
+    const seenInCall = new Set<string>();
+    const newAddresses: string[] = [];
+
+    for (const entry of validEmails) {
+      const norm = entry.trim().toLowerCase();
+      if (!seenInCall.has(norm)) {
+        seenInCall.add(norm);
+        normalizedDeduped.push(norm);
+        if (!existingEmailSet.has(norm)) {
+          newAddresses.push(norm);
+        }
+      }
+    }
+
+    const totalCount = existingShares.length + newAddresses.length;
+    if (totalCount > config.shareMaxPerRelic) {
+      return refuse('share_limit_reached', {
+        relic_id: relicId,
+        share_limit: config.shareMaxPerRelic,
+        shared_count: existingShares.length,
+      });
+    }
+
+    for (const email of newAddresses) {
+      await store.putShare({
+        relicId,
+        email,
+        addedAt: now,
+        sharedBy,
+      });
+    }
+
+    return Response.json({
+      relic_id: relicId,
+      emails: normalizedDeduped,
+      added: newAddresses.length,
+      shared_count: totalCount,
+      share_limit: config.shareMaxPerRelic,
+      title: row.title ?? null,
+    });
+  }
+
+  function unsubscribeResponse(
+    status: number,
+    h1: string,
+    bodyHtml: string,
+    retryAfter?: number,
+    isHead = false
+  ): Response {
+    const headers = new Headers({
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'referrer-policy': 'no-referrer',
+      'x-robots-tag': 'noindex',
+      'content-security-policy':
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    });
+    if (retryAfter !== undefined) {
+      headers.set('retry-after', String(retryAfter));
+    }
+    const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${h1}</title><h1>${h1}</h1>${bodyHtml}`;
+    if (isHead) {
+      return new Response(null, { status, headers });
+    }
+    return new Response(html, { status, headers });
+  }
+
+  async function unsubscribe(
+    rawId: string,
+    request: Request,
+    url: URL,
+    ip: string,
+    now: number
+  ): Promise<Response> {
+    const isHead = request.method === 'HEAD';
+    const ipVerdict = limiter.check(
+      `unsubscribe ${ip}`,
+      config.unsubscribeRateLimit,
+      now
+    );
+    if (!ipVerdict.allowed) {
+      return unsubscribeResponse(
+        429,
+        'Too many requests',
+        '<p>Try again in a few minutes.</p>',
+        ipVerdict.retryAfterSeconds,
+        isHead
+      );
+    }
+
+    let relicId: string;
+    try {
+      relicId = parseRelicId(rawId);
+    } catch {
+      return unsubscribeResponse(
+        400,
+        'This link does not work',
+        '<p>It may have been cut short. Open the stop link from the email again.</p>',
+        undefined,
+        isHead
+      );
+    }
+
+    const addr = url.searchParams.get('addr');
+    const token = url.searchParams.get('token');
+    if (
+      addr === null ||
+      !/^[0-9a-f]{64}$/.test(addr) ||
+      token === null ||
+      token === ''
+    ) {
+      return unsubscribeResponse(
+        400,
+        'This link does not work',
+        '<p>It may have been cut short. Open the stop link from the email again.</p>',
+        undefined,
+        isHead
+      );
+    }
+
+    const unsubKey = await store.unsubscribeKey();
+    const expectedSig = await hmacSha256(
+      unsubKey,
+      `relic-unsubscribe:v1:${relicId}:${addr}`
+    );
+    const expectedToken = Buffer.from(expectedSig).toString('base64url');
+    if (!timingSafeEqual(expectedToken, token)) {
+      return unsubscribeResponse(
+        400,
+        'This link does not work',
+        '<p>It may have been cut short. Open the stop link from the email again.</p>',
+        undefined,
+        isHead
+      );
+    }
+
+    if ((await store.getTombstone(relicId)) !== undefined) {
+      return unsubscribeResponse(
+        200,
+        'Nothing to stop',
+        '<p>This relic is no longer available, so it sends no change emails.</p>',
+        undefined,
+        isHead
+      );
+    }
+
+    const row = await store.getRelic(relicId);
+    if (row === undefined) {
+      return unsubscribeResponse(
+        200,
+        'Nothing to stop',
+        '<p>This relic is no longer available, so it sends no change emails.</p>',
+        undefined,
+        isHead
+      );
+    }
+
+    const T = row.title ? `"${escapeHtml(row.title)}"` : 'this relic';
+
+    if (request.method === 'POST') {
+      await store.putOptOut({
+        relicId,
+        addressHash: addr,
+        at: now,
+      });
+      return unsubscribeResponse(
+        200,
+        'Stopped',
+        `<p>This address will get no more change emails about ${T}.</p>`,
+        undefined,
+        isHead
+      );
+    }
+
+    const action = `${config.serviceOrigin}/api/relics/${relicId}/unsubscribe?addr=${addr}&amp;token=${token}`;
+    const formHtml = `<p>Stop emails when ${T} gets a new version?</p><form method="POST" action="${action}"><button type="submit">Stop these emails</button></form><p>Only this relic's change emails stop.</p>`;
+    return unsubscribeResponse(
+      200,
+      'Stop change emails',
+      formHtml,
+      undefined,
+      isHead
+    );
+  }
+
   // --- operator surface ---------------------------------------------------
 
   /**
@@ -1454,7 +2021,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
     // response can say what it took, because a silent cascade is the kind
     // of deletion nobody can audit later.
     const commentsRemoved = await store.deleteCommentsForRelic(relicId);
-
+    const sharesDeleted = await store.deleteSharesForRelic(relicId);
+    const optOutsDeleted = await store.deleteOptOutsForRelic(relicId);
     // Blocklist in the same call, because a second call gets forgotten at 3am.
     const override = url.searchParams.get('blocklist');
     const automatic =
@@ -1472,6 +2040,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
       ciphertext_hash: hash,
       comments_deleted: commentsRemoved,
       covers_deleted: coversRemoved,
+      shares_deleted: sharesDeleted,
+      opt_outs_deleted: optOutsDeleted,
     });
   }
 
@@ -2414,6 +2984,26 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+async function hmacSha256(
+  keyBytes: Uint8Array,
+  message: string
+): Promise<Uint8Array> {
+  const buf = keyBytes.slice().buffer;
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    buf,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign(
+    'HMAC',
+    cryptoKey,
+    new TextEncoder().encode(message)
+  );
+  return new Uint8Array(signature);
+}
+
 /**
  * A relic with no publisher-set lifetime never expires, and `null` is how
  * the wire says so. Any string in this slot would read as a deadline the
@@ -3034,6 +3624,40 @@ your transcripts. This is structural, not a defect we plan to fix.
 republishing does not withdraw earlier content.** The same fragment key
 decrypts every version in your browser. Republishing is not a redaction
 mechanism.
+
+## Comments, change emails, and sharing
+
+Anyone holding a relic's link can read its comments and add one. Comment
+bodies are encrypted with a key derived from the link, so we cannot read them.
+We do keep who commented on which relic and when: a commenter is the email
+address they verified by following a sign-in link, stored in the clear beside
+each comment. A sign-in link, and every email below, passes the address
+through our mail provider.
+
+**When a relic gets a new version, we email the people following it.** That
+is every verified address that commented on it and every address its
+publisher shared it with, minus anyone who stopped these emails. The email
+names the relic's title and the new version number and links to the relic
+without its key, because we never have the key. A publisher can skip the email
+for a version. A publisher who registered a verified owner address is emailed
+when a comment arrives, and a commenter is emailed when someone answers them.
+
+**Sharing gives us addresses, never the link.** A publisher, or a signed-in
+reader holding the key, can register addresses on a relic so they receive these
+emails. Web sharing by a reader is gated by a proof derived from the key: the
+service learns the proof, but never the key, and does not store who shared it.
+We store each address in the clear, linked to the relic, and we do not ask its
+owner first. The email that carries the link goes from the sharer's own mail,
+not from us, so the key never reaches our servers.
+
+**Every change email has a stop link.** It stops change emails about that
+relic to that address. We record that it was used as a SHA-256 of the address
+beside the relic id. A hash of an email address is not anonymous: anyone who
+can guess the address can match it.
+
+Deleting a relic deletes its comments, its shared addresses, and its stop
+records. An expired relic sends no more change emails, and those records stay
+until it is deleted, like the rest of it.
 
 ## The JavaScript caveat
 
