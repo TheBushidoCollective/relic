@@ -23,6 +23,23 @@ export interface LimitVerdict {
 export class RateLimiter {
   private readonly windows = new Map<string, Window>();
 
+  peek(key: string, config: RateLimitConfig, now: number): LimitVerdict {
+    const window = this.windows.get(key);
+    if (window === undefined || now >= window.resetAt) {
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+    if (window.count >= config.limit) {
+      return {
+        allowed: false,
+        retryAfterSeconds: Math.max(
+          1,
+          Math.ceil((window.resetAt - now) / 1000)
+        ),
+      };
+    }
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
   check(key: string, config: RateLimitConfig, now: number): LimitVerdict {
     const window = this.windows.get(key);
 

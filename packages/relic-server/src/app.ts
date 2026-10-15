@@ -108,14 +108,17 @@ export interface AppOptions {
   readonly assets?: AssetSource;
   /** Where a magic link goes. Defaults to sending nothing at all. */
   readonly mailer?: Mailer;
+  readonly limiter?: RateLimiter;
 }
 
 export interface RelicApp {
   readonly config: RelicConfig;
   readonly store: RelicStore;
   readonly storage: ObjectStorage;
+  readonly limiter: RateLimiter;
   fetch(request: Request): Promise<Response>;
 }
+
 
 export function createApp(options: AppOptions = {}): RelicApp {
   const config: RelicConfig = { ...DEFAULT_CONFIG, ...options.config };
@@ -126,8 +129,8 @@ export function createApp(options: AppOptions = {}): RelicApp {
   const clock = options.now ?? (() => Date.now());
   const operators = options.operatorTokens ?? new Map<string, string>();
   const assets = options.assets ?? memoryAssets({});
-  const mailer = options.mailer ?? NULL_MAILER;
-  const limiter = new RateLimiter();
+  const mailer = options.mailer;
+  const limiter = options.limiter ?? new RateLimiter();
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -1495,6 +1498,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     }
     if (
       mailer === undefined ||
+      mailer === NULL_MAILER ||
       (mailer.sendBatch === undefined &&
         mailer.sendMail === undefined &&
         mailer.send === undefined)
@@ -2858,15 +2862,17 @@ export function createApp(options: AppOptions = {}): RelicApp {
       // a 500 for a deliverable address and a 202 for an undeliverable one
       // would rebuild the oracle out of error codes. So the failure goes to
       // the log, where the operator can see it and the caller cannot.
-      try {
-        await mailer.send(
-          email,
-          `${config.serviceOrigin}/api/auth/callback?token=${token}`
-        );
-      } catch (error) {
-        console.error(
-          `relic: sign-in mail failed: ${(error as Error).message}`
-        );
+      if (mailer !== undefined) {
+        try {
+          await mailer.send(
+            email,
+            `${config.serviceOrigin}/api/auth/callback?token=${token}`
+          );
+        } catch (error) {
+          console.error(
+            `relic: sign-in mail failed: ${(error as Error).message}`
+          );
+        }
       }
     }
 
@@ -3118,6 +3124,7 @@ export function createApp(options: AppOptions = {}): RelicApp {
     config,
     store,
     storage,
+    limiter,
     fetch: handle,
   };
 }

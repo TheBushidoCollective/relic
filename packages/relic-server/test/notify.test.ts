@@ -12,7 +12,7 @@ import { sha256Hex } from '../src/gcs.ts';
 import type { OutboundMail } from '../src/mail.ts';
 import { MemoryStorage } from '../src/storage.ts';
 import { MemoryStore } from '../src/store.ts';
-
+import { RateLimiter } from '../src/ratelimit.ts';
 const OPERATOR = new Map([['jason', 'operator-secret']]);
 
 let now = Date.parse('2026-08-02T12:00:00.000Z');
@@ -2222,6 +2222,35 @@ describe('change notices and relic_share', () => {
       );
       expect(resolveRes.status).toBe(200);
       expect(sentMails).toHaveLength(0);
+    });
+    test('with no mailer configured, a comment consumes no limiter credit', async () => {
+      const sharedLimiter = new RateLimiter();
+      const { id } = await publish({
+        title: 'Doc with owner',
+        ownerEmail: 'owner@example.com',
+      });
+
+      const unconfiguredApp = build({
+        mailer: undefined,
+        limiter: sharedLimiter,
+      });
+      const aliceSession = await createSession('alice@example.com');
+
+      const commentRes = await unconfiguredApp.fetch(
+        req(`/api/relics/${id}/comments`, {
+          method: 'POST',
+          headers: { cookie: aliceSession },
+          body: JSON.stringify({ ciphertext: 'dGVzdA' }),
+        })
+      );
+      expect(commentRes.status).toBe(201);
+
+      const verdict = sharedLimiter.check(
+        `notify ${id} owner@example.com`,
+        { limit: 1, windowSeconds: 600 },
+        now
+      );
+      expect(verdict.allowed).toBe(true);
     });
 
     test('batch notice and comment-notification failure logs contain no recipient address and sanitize provider error text', async () => {
