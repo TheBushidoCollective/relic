@@ -1394,4 +1394,241 @@ describe('change notices and relic_share', () => {
       expect(JSON.stringify(mintJson)).not.toContain('hidden@example.com');
     });
   });
+
+  describe('Security review findings: SHARE-001, UNSUB-004, DELETE-005, LOG-006', () => {
+    test('SHARE-001: concurrent authorized shares never exceed the 50-per-relic cap and refusals are 409 share_limit_reached', async () => {
+      const { id, grant } = await publish();
+      const token = grant['publish_token'] as string;
+
+      const batch1 = Array.from(
+        { length: 20 },
+        (_, i) => `c1_${i}@example.com`
+      );
+      const batch2 = Array.from(
+        { length: 20 },
+        (_, i) => `c2_${i}@example.com`
+      );
+      const batch3 = Array.from(
+        { length: 20 },
+        (_, i) => `c3_${i}@example.com`
+      );
+
+      const responses = await Promise.all([
+        app.fetch(
+          req(`/api/relics/${id}/share`, {
+            method: 'POST',
+            body: JSON.stringify({ publish_token: token, emails: batch1 }),
+          })
+        ),
+        app.fetch(
+          req(`/api/relics/${id}/share`, {
+            method: 'POST',
+            body: JSON.stringify({ publish_token: token, emails: batch2 }),
+          })
+        ),
+        app.fetch(
+          req(`/api/relics/${id}/share`, {
+            method: 'POST',
+            body: JSON.stringify({ publish_token: token, emails: batch3 }),
+          })
+        ),
+      ]);
+
+      const statuses = responses.map((r) => r.status).sort();
+      expect(statuses).toEqual([200, 200, 409]);
+
+      const bodies = (await Promise.all(
+        responses.map((r) => r.json())
+      )) as Array<Record<string, unknown>>;
+      const refused = bodies.find((b) => b['code'] === 'share_limit_reached');
+      expect(refused).toBeDefined();
+
+      const storedShares = await app.store.listShares(id);
+      expect(storedShares.length).toBeLessThanOrEqual(50);
+      expect(storedShares.length).toBe(40);
+    });
+
+    test('UNSUB-004: an opt-out written while fan-out is mid-flight means that recipient gets nothing', async () => {
+      const { id, key, grant } = await publish({ title: 'UnsubMidFlight' });
+      const token = grant['publish_token'] as string;
+
+      const recipientA = 'first@example.com';
+      const recipientB = 'second@example.com';
+
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: [recipientA, recipientB],
+          }),
+        })
+      );
+
+      const hashB = await sha256Hex(recipientB);
+      const unsubKey = await app.store.unsubscribeKey();
+      const tokenBytes = await crypto.subtle.importKey(
+        'raw',
+        unsubKey.slice().buffer,
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+      );
+      const sig = await crypto.subtle.sign(
+        'HMAC',
+        tokenBytes,
+        new TextEncoder().encode(`relic-unsubscribe:v1:${id}:${hashB}`)
+      );
+      const stopToken = Buffer.from(sig).toString('base64url');
+
+      const actuallyMailed: string[] = [];
+      testMailer.sendMail = async (email) => {
+        actuallyMailed.push(email);
+        if (email === recipientA) {
+          const stopRes = await app.fetch(
+            req(
+              `/api/relics/${id}/unsubscribe?addr=${hashB}&token=${stopToken}`,
+              {
+                method: 'POST',
+              }
+            )
+          );
+          expect(stopRes.status).toBe(200);
+        }
+      };
+
+      await republish(id, token);
+      storage.put(
+        `${id}/v2`,
+        await encryptRelic({
+          content: new TextEncoder().encode('v2 content'),
+          filename: 'notes.md',
+          mimetype: 'text/markdown',
+          key,
+        })
+      );
+      await app.fetch(req(`/api/relics/${id}/complete`, { method: 'POST' }));
+
+      expect(actuallyMailed).toContain(recipientA);
+      expect(actuallyMailed).not.toContain(recipientB);
+    });
+
+    test('DELETE-005: delete whose share sweep throws once, then retried delete, leaves no shares or opt-outs and returns their counts', async () => {
+      const { id, grant } = await publish();
+      const token = grant['publish_token'] as string;
+
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: ['alice@example.com', 'bob@example.com'],
+          }),
+        })
+      );
+      const hash = await sha256Hex('optout@example.com');
+      await app.store.putOptOut({ relicId: id, addressHash: hash, at: now });
+
+      expect((await app.store.listShares(id)).length).toBe(2);
+      expect((await app.store.listOptOuts(id)).length).toBe(1);
+
+      let failOnce = true;
+      const realDeleteShares = app.store.deleteSharesForRelic.bind(app.store);
+      app.store.deleteSharesForRelic = async (relicId: string) => {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error('Simulated GCS transient error during share sweep');
+        }
+        return realDeleteShares(relicId);
+      };
+
+      const auth = { authorization: 'Bearer operator-secret' };
+      await expect(
+        app.fetch(req(`/api/relics/${id}`, { method: 'DELETE', headers: auth }))
+      ).rejects.toThrow('Simulated GCS transient error during share sweep');
+
+      expect(await app.store.getTombstone(id)).toBeDefined();
+      expect((await app.store.listShares(id)).length).toBe(2);
+
+      const retryDel = await app.fetch(
+        req(`/api/relics/${id}`, { method: 'DELETE', headers: auth })
+      );
+      expect(retryDel.status).toBe(200);
+      const retryJson = (await retryDel.json()) as Record<string, unknown>;
+      expect(retryJson['already_deleted']).toBe(true);
+      expect(retryJson['shares_deleted']).toBe(2);
+      expect(retryJson['opt_outs_deleted']).toBe(1);
+
+      expect((await app.store.listShares(id)).length).toBe(0);
+      expect((await app.store.listOptOuts(id)).length).toBe(0);
+    });
+
+    test('LOG-006: notice and comment-notification failure logs do not contain recipient addresses and sanitize provider error text', async () => {
+      const { id, key, grant } = await publish({
+        title: 'LogRedactDoc',
+        ownerEmail: 'owner-secret@example.com',
+      });
+      const token = grant['publish_token'] as string;
+
+      const noticeRecipient = 'subscriber-secret@example.com';
+      await app.fetch(
+        req(`/api/relics/${id}/share`, {
+          method: 'POST',
+          body: JSON.stringify({
+            publish_token: token,
+            emails: [noticeRecipient],
+          }),
+        })
+      );
+
+      const loggedErrors: string[] = [];
+      const origError = console.error;
+      console.error = (...args: unknown[]) => {
+        loggedErrors.push(args.map(String).join(' '));
+      };
+
+      try {
+        testMailer.sendMail = async (email) => {
+          throw new Error(`Resend 422: failed to deliver to ${email}`);
+        };
+
+        await republish(id, token);
+        storage.put(
+          `${id}/v2`,
+          await encryptRelic({
+            content: new TextEncoder().encode('v2'),
+            filename: 'notes.md',
+            mimetype: 'text/markdown',
+            key,
+          })
+        );
+        await app.fetch(req(`/api/relics/${id}/complete`, { method: 'POST' }));
+
+        expect(loggedErrors.length).toBeGreaterThan(0);
+        const combinedNoticeLog = loggedErrors.join('\n');
+        expect(combinedNoticeLog).not.toContain(noticeRecipient);
+        expect(combinedNoticeLog).toContain(await sha256Hex(noticeRecipient));
+
+        loggedErrors.length = 0;
+
+        const commenterCookie = await createSession('commenter@example.com');
+        await app.fetch(
+          req(`/api/relics/${id}/comments`, {
+            method: 'POST',
+            headers: { cookie: commenterCookie },
+            body: JSON.stringify({
+              ciphertext: 'dummy',
+              version: 2,
+            }),
+          })
+        );
+
+        expect(loggedErrors.length).toBeGreaterThan(0);
+        const combinedCommentLog = loggedErrors.join('\n');
+        expect(combinedCommentLog).not.toContain('owner-secret@example.com');
+      } finally {
+        console.error = origError;
+      }
+    });
+  });
 });

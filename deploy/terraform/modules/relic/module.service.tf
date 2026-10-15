@@ -27,8 +27,9 @@ module "service" {
     # Credentials API using the attached identity and no key material exists
     # in the deployment.
 
-    RELIC_KILL_SWITCH     = tostring(var.kill_switch_engaged)
-    RELIC_OPERATOR_TOKENS = var.operator_tokens
+    RELIC_KILL_SWITCH        = tostring(var.kill_switch_engaged)
+    RELIC_OPERATOR_TOKENS    = var.operator_tokens
+    RELIC_TRUSTED_PROXY_HOPS = "2"
 
     RELIC_MAIL_FROM = var.mail_from
   })

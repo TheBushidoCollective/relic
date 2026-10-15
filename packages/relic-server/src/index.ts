@@ -130,6 +130,9 @@ const app = createApp({
     usercontentOrigin:
       process.env['RELIC_USERCONTENT_ORIGIN'] ?? 'http://localhost:8081',
     killSwitchEngaged: process.env['RELIC_KILL_SWITCH'] === 'true',
+    ...(process.env['RELIC_TRUSTED_PROXY_HOPS'] !== undefined
+      ? { trustedProxyHops: Number(process.env['RELIC_TRUSTED_PROXY_HOPS']) }
+      : {}),
   },
   storage: await resolveStorage(),
   store: await resolveStore(),

@@ -112,6 +112,15 @@ export interface RelicConfig {
 
   /** Engaged when egress spend crosses the ceiling. Refuses every mint. */
   readonly killSwitchEngaged: boolean;
+  /**
+   * Number of trusted proxy hops from the right in X-Forwarded-For.
+   *
+   * In production on relik.link, an external HTTPS Application Load Balancer
+   * fronts Cloud Run, appending `<client-ip>, <lb-ip>` (2 hops from right).
+   * Direct Cloud Run without an external load balancer appends `<client-ip>`
+   * (1 hop from right). Local development with no proxy sets this to 0.
+   */
+  readonly trustedProxyHops: number;
 }
 
 export interface RateLimitConfig {
@@ -158,6 +167,7 @@ export const DEFAULT_CONFIG: RelicConfig = {
   sessionTtlSeconds: 30 * 24 * 3600,
 
   killSwitchEngaged: false,
+  trustedProxyHops: 2,
 };
 
 /**
@@ -174,6 +184,12 @@ export function assertConfig(config: RelicConfig): void {
   }
   if (config.minViableValiditySeconds > config.urlValiditySeconds) {
     throw new Error('minimum viable validity exceeds the validity window');
+  }
+  if (
+    !Number.isInteger(config.trustedProxyHops) ||
+    config.trustedProxyHops < 0
+  ) {
+    throw new Error('trustedProxyHops must be a non-negative integer');
   }
   // `service.md` 7.5 wanted the mint log to outlive every relic, so the
   // metric's publishing-IP filter could still fire on an old relic's self

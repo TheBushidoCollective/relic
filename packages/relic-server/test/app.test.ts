@@ -55,7 +55,12 @@ function req(
   init: RequestInit & { ip?: string | undefined } = {}
 ): Request {
   const headers = new Headers(init.headers);
-  headers.set('x-forwarded-for', init.ip ?? '198.51.100.10');
+  if (!headers.has('x-forwarded-for')) {
+    headers.set(
+      'x-forwarded-for',
+      `${init.ip ?? '198.51.100.10'}, 130.211.0.1`
+    );
+  }
   return new Request(`https://relic.example${path}`, { ...init, headers });
 }
 
@@ -1933,6 +1938,64 @@ describe('rate limiting', () => {
     expect(response.status).toBe(429);
     expect(response.headers.get('retry-after')).not.toBeNull();
     expect((await response.json()).retry_after_seconds).toBeGreaterThan(0);
+  });
+
+  test('rotating a spoofed leading X-Forwarded-For entry does not bypass rate limiting', async () => {
+    app = build({ config: { authRateLimit: { limit: 1, windowSeconds: 60 } } });
+    const trustedClientIp = '198.51.100.10';
+    const lbIp = '130.211.0.1';
+
+    const first = await app.fetch(
+      new Request('https://relic.example/api/auth/request', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': `203.0.113.195, ${trustedClientIp}, ${lbIp}`,
+        },
+        body: JSON.stringify({ email: 'reader@example.com' }),
+      })
+    );
+    expect(first.status).toBe(202);
+
+    const second = await app.fetch(
+      new Request('https://relic.example/api/auth/request', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': `203.0.113.196, ${trustedClientIp}, ${lbIp}`,
+        },
+        body: JSON.stringify({ email: 'reader@example.com' }),
+      })
+    );
+    expect(second.status).toBe(429);
+    expect((await second.json()).code).toBe('auth_rate_limited');
+  });
+
+  test('local no-proxy requests derive client IP from fallback without bypassing limits', async () => {
+    app = build({ config: { authRateLimit: { limit: 1, windowSeconds: 60 } } });
+
+    const first = await app.fetch(
+      new Request('https://relic.example/api/auth/request', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ email: 'reader@example.com' }),
+      })
+    );
+    expect(first.status).toBe(202);
+
+    const second = await app.fetch(
+      new Request('https://relic.example/api/auth/request', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ email: 'reader@example.com' }),
+      })
+    );
+    expect(second.status).toBe(429);
+    expect((await second.json()).code).toBe('auth_rate_limited');
   });
 });
 
